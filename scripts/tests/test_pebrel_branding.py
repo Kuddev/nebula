@@ -76,15 +76,18 @@ class PebrelBrandingTests(unittest.TestCase):
         self.assertIn('.join("Nebula")', settings)
         self.assertNotIn('.join("Pebrel")', settings)
 
-    def test_preview_documents_compatibility(self):
+    def test_project_identity_without_local_preview_notice(self):
         changelog = self.source("CHANGELOG.md").split("## 1.5.0 -", 1)[0]
         self.assertIn("Pebrel", changelog)
         self.assertIn("not a new published release", changelog)
         self.assertIn("不代表新的已发布版本", changelog)
         readme = self.source("README.md")
-        self.assertIn("Pebrel is the new display name of Nebula Terminal", readme)
-        self.assertIn("not a new GitHub Release", readme)
-        self.assertIn("installer identity", readme)
+        self.assertIn('<h1 align="center">Pebrel</h1>', readme)
+        self.assertIn("Pebrel (formerly Nebula)", readme)
+        self.assertIn("https://github.com/Kuddev/nebula/releases", readme)
+        self.assertNotIn("Local branding preview", readme)
+        self.assertNotIn("本地品牌预览", readme)
+        self.assertNotIn("A name change does not create a new published release", readme)
 
 
 if __name__ == "__main__":

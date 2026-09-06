@@ -1,4 +1,8 @@
-# Installing Nebula
+# Installing Pebrel
+
+Pebrel retains the `Kuddev/nebula` repository, `nebula` command, and existing
+package identifiers for compatibility. Historical download filenames below
+are unchanged; do not rename installed files or configuration directories.
 
 ## Linux Preview
 

@@ -44,6 +44,12 @@ tocodex-docs/
 !/docs/runtime-control-api.md
 !/docs/runtime-api-v1.schema.json
 !/docs/preview-release-checklist.md
+# Reviewed public engineering guides, not private product/competitor investigations.
+!/docs/project-constraints.md
+!/docs/architecture.md
+!/docs/architecture-decisions.md
+!/docs/engineering-evidence.md
+!/docs/internationalization.md
 !/docs/skills/
 !/docs/skills/nebula-runtime/
 !/docs/skills/nebula-runtime/SKILL.md
@@ -57,10 +63,43 @@ tocodex-docs/
 # research filenames stay unpublished.
 docs/**/*-gap-analysis.md
 docs/**/*-study.md
+docs/**/*-research.md
+docs/**/*-competitor-*.md
+docs/**/research/
+docs/**/reference-projects/
+docs/**/external-probes/
 
 # Local interactive demos belong under the private docs tree.
 /*.html
+/*.htm
+/docs/**/*.html
+/docs/**/*.htm
+*-prototype.html
+*_prototype.html
+*-mockup.html
+*_mockup.html
+*-prototype.htm
+*_prototype.htm
+*-mockup.htm
+*_mockup.htm
+/prototypes/
 /TASKS.md
+
+# Reserved local-only work areas; maintained tests and third_party/ stay visible.
+/research/
+/reference-projects/
+/external-probes/
+/scratch/
+/tmp-*
+/tmp_*
+
+# Python-generated caches are not test sources or contract fixtures.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Secrets / credentials / environment — must never be committed
 .env

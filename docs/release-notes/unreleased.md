@@ -23,6 +23,8 @@ This file contains changes that are not part of a numbered release yet.
 - File-name indexing applies incremental updates and recovers from watcher queue overflow with a rescan; editing a file's contents alone no longer rebuilds its name entry.
 - Improved terminal formula parsing and rendering for streamed agent output, while preserving the original text when a formula cannot be rendered.
 - Added native platform adapters and preview packaging instructions for Linux and macOS. Native build, test and package validation remains a separate requirement before publishing those previews.
+- Updated the public project and installation guides to use Pebrel consistently, while retaining the existing repository, command, configuration, and download identifiers.
+- Added contribution, architecture, and translation guides with explicit compatibility and review requirements. GitHub branch protection still requires separate server-side setup and verification.
 
 ## 中文
 
@@ -45,6 +47,8 @@ This file contains changes that are not part of a numbered release yet.
 - 文件名索引采用增量更新，监听队列溢出时通过重新扫描恢复；仅编辑文件内容不再重建对应名称条目。
 - 改进流式 Agent 输出中的终端公式解析与绘制，无法渲染时保留原始文本。
 - 新增 Linux 和 macOS 原生平台适配及预览打包说明；发布这些预览前仍需单独完成原生构建、测试和打包验证。
+- 公开项目说明与安装指南统一采用 Pebrel 名称，同时保留现有仓库、命令、配置与下载标识。
+- 新增贡献、架构和翻译指南，明确兼容性与审查要求；GitHub 分支保护仍需单独在服务端配置并核验。
 
 ## Contributors
 - [@Sakyvo](https://github.com/Sakyvo): terminal network proxy, conditional `Ctrl+C` copy, and word deletion with `Ctrl+Backspace` / 终端网络代理、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除。

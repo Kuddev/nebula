@@ -4,9 +4,7 @@
 
 <h1 align="center">Pebrel</h1>
 
-> **Local branding preview / 本地品牌预览** — Pebrel is the new display name of Nebula Terminal. This worktree keeps version 1.5.0, `nebula.exe`, existing configuration paths, installer identity, and the Nebula update feed for compatibility. Pebrel-named packages are local test artifacts, not a new GitHub Release. Installing the setup package targets the existing Nebula installation; use the ZIP with isolated configuration for side-by-side testing.
->
-> Pebrel 是 Nebula Terminal 的新展示名称。本工作区保留 1.5.0 版本、`nebula.exe`、现有配置路径、安装标识和 Nebula 更新源，以维持兼容。Pebrel 命名的包仅用于本地测试，不代表新的 GitHub Release。安装器沿用现有 Nebula 安装身份；需要并行测试时，请使用 ZIP 并配置隔离目录。
+Contributing / 参与贡献：[Guide / 指南](CONTRIBUTING.md) · [Architecture / 架构](docs/architecture.md) · [Engineering contracts / 工程规范](docs/project-constraints.md)
 
 <p align="center">
   <b>A GPU-accelerated terminal for Windows that keeps your sessions alive — close the window, your <code>claude</code> conversation survives.</b><br/>
@@ -33,16 +31,16 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/nebula-top-tabs.png" alt="Nebula Terminal horizontal title-bar tabs and translucent background" width="920" />
+  <img src="docs/screenshots/nebula-top-tabs.png" alt="Pebrel horizontal title-bar tabs and translucent background" width="920" />
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code running in Nebula Terminal" width="920" />
+  <img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code running in Pebrel" width="920" />
 </p>
 
 <p align="center">
   <!-- v0.5 主视觉：同一窗口中的 OpenCode、Claude Code 与 Codex 分屏工作流。 -->
-  <img src="docs/screenshots/split-ai-workflows.png" alt="Nebula Terminal with OpenCode, Claude Code, and Codex in split panes" width="920" />
+  <img src="docs/screenshots/split-ai-workflows.png" alt="Pebrel with OpenCode, Claude Code, and Codex in split panes" width="920" />
 </p>
 
 ---
@@ -63,7 +61,7 @@ experience that works without extra setup.
 
 - **Session residency** — closing the window *detaches* instead of killing:
   every PTY (your running `claude`, builds, SSH sessions) keeps running in a
-  resident process. Launch Nebula again and the window re-attaches — same
+  resident process. Launch Pebrel again and the window re-attaches — same
   processes, same scrollback, mid-conversation.
 - **Cold session restore** — if the resident process is gone (reboot, crash),
   the next launch still restores your tab layout and per-tab working
@@ -83,14 +81,14 @@ experience that works without extra setup.
   actual Anthropic starburst; `codex` shows the OpenAI blossom, tinted to the
   theme. Other programs get Nerd Font icons (`gemini`, `copilot`, `git`,
   `vim`, `cargo`, …).
-- **Live turn state, wired to the source** — Nebula installs Claude Code
+- **Live turn state, wired to the source** — Pebrel installs Claude Code
   hooks (and Codex notify) pointing at a bundled bridge
   (`nebula-hook.exe`, dependency-free): prompt submitted → spinner; turn
   finished → dot + toast; Claude needs your input → toast carrying the actual
   message text. Delivered over a local named pipe, with no shell integration
   required.
 - **Click-to-focus notifications** — every toast knows which pane raised it:
-  click one and Nebula comes to the foreground, switches to that tab and
+  click one and Pebrel comes to the foreground, switches to that tab and
   focuses that split.
 - **Zero setup, self-healing** — the hook entries install on first boot and
   re-install themselves if a config switcher rewrites the file (a watcher on
@@ -98,11 +96,11 @@ experience that works without extra setup.
   running in any other terminal is untouched. `nebula setup-ai --remove`
   undoes everything.
 - **Plays nice with existing notifiers** — codex has a single notify slot;
-  Nebula wraps it (`--chain`) instead of stealing it, so a pre-existing
+  Pebrel wraps it (`--chain`) instead of stealing it, so a pre-existing
   notifier keeps firing.
 - **Fallback signals** — OSC 133 command tracking + BEL still cover every
   other CLI: long builds toast on completion, with their duration.
-- **Native SSH sessions** — saved hosts open directly through Nebula's Rust SSH
+- **Native SSH sessions** — saved hosts open directly through Pebrel's Rust SSH
   transport: no wrapper shell and no external console window. Host aliases,
   usernames, ports and identity files are resolved from `~/.ssh/config`;
   authentication supports standard private keys and certificates, encrypted-key
@@ -116,14 +114,14 @@ experience that works without extra setup.
   folders, recursively delete, follow symlink targets, and cancel transfers
   with visible progress and errors.
 - **AI-aware over SSH** — remote Hook envelopes can return through a
-  per-channel, randomly authenticated private OSC bridge. Nebula validates the
+  per-channel, randomly authenticated private OSC bridge. Pebrel validates the
   channel token, replaces any remote pane identifier with the local pane, and
   routes the event through the existing sidebar and Windows notification path.
   The `nebula ssh` compatibility command remains available for forwarding,
   query and explicit-command forms that need the system SSH client.
 
 <p align="center">
-  <img src="docs/screenshots/ssh.gif" alt="Nebula native SSH session" width="920" />
+  <img src="docs/screenshots/ssh.gif" alt="Pebrel native SSH session" width="920" />
 </p>
 
 **Performance & correctness**
@@ -153,7 +151,7 @@ experience that works without extra setup.
 **Markdown that renders like GitHub**
 
 <p align="center">
-  <img src="docs/screenshots/markdown-document.png" alt="Nebula rendering its own README: centred logo, badge row, and an embedded screenshot" width="920" />
+  <img src="docs/screenshots/markdown-document.png" alt="Pebrel rendering its own README: centred logo, badge row, and an embedded screenshot" width="920" />
 </p>
 
 - **Markdown/GFM document tabs** — open Markdown, JSON, and plain-text files
@@ -162,7 +160,7 @@ experience that works without extra setup.
 - **Images from anywhere** — remote `http(s)` URLs, `data:` URIs, absolute
   paths, and paths relative to the document all resolve, so badge rows, logos,
   and embedded screenshots land exactly where the file puts them. The
-  screenshot above is Nebula rendering its own README.
+  screenshot above is Pebrel rendering its own README.
 - **The HTML that real READMEs use** — `<p align="center">` centres its
   content, several `<img>` badges in one paragraph stay on a single row instead
   of breaking into separate blocks, `<br/>` breaks in document order, and
@@ -174,7 +172,7 @@ experience that works without extra setup.
 **Documents & native mathematics**
 
 <p align="center">
-  <img src="docs/screenshots/native-math-rendering.png" alt="Native mathematics rendered in a Nebula Markdown document" width="920" />
+  <img src="docs/screenshots/native-math-rendering.png" alt="Native mathematics rendered in a Pebrel Markdown document" width="920" />
 </p>
 
 - **Native TeX mathematics** — inline `$...$` and display `$$...$$` formulas
@@ -214,15 +212,15 @@ experience that works without extra setup.
 
 ### 📥 Install
 
-> **⚠️ Install the bundled font first.** Nebula's powerline prompt, program
+> **⚠️ Install the bundled font first.** Pebrel's powerline prompt, program
 > icons and AI brand marks are drawn with **Maple Mono Normal NF CN** (a Nerd Font).
-> Nebula embeds the same font as a runtime fallback so forgetting to install it
+> Pebrel embeds the same font as a runtime fallback so forgetting to install it
 > no longer breaks the interface, but a normal system installation is still the
 > intended setup. The font ships in the release zip under `fonts/` and the repo at
 > `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` — double-click
-> it and press **Install**, then launch Nebula. Nebula checks the font on every
+> it and press **Install**, then launch Pebrel. Pebrel checks the font on every
 > launch; if the system font is missing, a dismissible reminder can open the
-> bundled `fonts/` folder. Install the font and restart Nebula for the complete
+> bundled `fonts/` folder. Install the font and restart Pebrel for the complete
 > icon set. (Licensed under SIL OFL 1.1.)
 
 **Release build (recommended)** — download
@@ -241,7 +239,7 @@ cargo build --release   # artifacts land in target/release/
 
 ### Lua Configuration
 
-Nebula ships a vendored Lua 5.4 runtime with `require 'nebula'` and
+Pebrel ships a vendored Lua 5.4 runtime with `require 'nebula'` and
 `nebula.config_builder()`. Generate an annotated template with
 `nebula config init --language system|zh-CN|en-US`, then validate it without
 opening the GUI using `nebula config check`. Module `require` paths participate
@@ -273,25 +271,25 @@ Questions and feedback: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163
 
 ### 🙏 Acknowledgements
 
-Nebula's terminal core — the grid, the VTE escape-sequence parsing, and the PTY
+Pebrel's terminal core — the grid, the VTE escape-sequence parsing, and the PTY
 plumbing — is derived from
 **[Alacritty](https://github.com/alacritty/alacritty)**, a masterpiece of
 terminal engineering. Sincere thanks to its maintainers and contributors;
-Nebula would not exist without their work.
+Pebrel would not exist without their work.
 
-Nebula's shell is built on **[GPUI](https://github.com/zed-industries/zed)** — the
+Pebrel's shell is built on **[GPUI](https://github.com/zed-industries/zed)** — the
 GPU-accelerated UI framework developed by the [Zed](https://zed.dev) team — together with
 **[gpui-component](https://github.com/longbridge/gpui-component)** from
 [Longbridge](https://github.com/longbridge), which supplies the widget library. Both are
 Apache-2.0 licensed and are used through lightly patched forks pinned in the workspace
-manifest. Thank you for releasing this work as open source — Nebula's interface would not
+manifest. Thank you for releasing this work as open source — Pebrel's interface would not
 look the way it does without it.
 
 ### 📜 License
 
 Released under the [GNU General Public License v3.0](LICENSE).
 
-Parts of Nebula are derived from upstream open-source projects; their original
+Parts of Pebrel are derived from upstream open-source projects; their original
 license and copyright notices are preserved in
 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). The work as a whole is distributed
 under GPL-3.0.
@@ -312,7 +310,7 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 **会话永生**
 
 - **会话驻留** — 关闭窗口是*分离*而不是杀死：所有 PTY（正在跑的
-  `claude`、构建、SSH）继续在常驻进程里运行。再次启动 Nebula，窗口原样接回
+  `claude`、构建、SSH）继续在常驻进程里运行。再次启动 Pebrel，窗口原样接回
   —— 同样的进程、同样的回滚缓冲、对话进行到一半也不丢。
 - **冷恢复** — 常驻进程不在了（重启、崩溃）也没关系：下次启动从持续自动保
   存的快照恢复标签布局和每个标签的工作目录，并带崩溃循环保护。
@@ -328,20 +326,20 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 - **侧栏显示真品牌标识** — 跑 `claude` 的标签显示 Anthropic 珊瑚星芒，
   `codex` 显示 OpenAI 花结（贴图渲染、跟随主题染色）；其余程序用
   Nerd Font 图标（`gemini`、`copilot`、`git`、`vim`、`cargo`……）。
-- **回合状态实时直连** — Nebula 自动安装 Claude Code hooks（及 Codex
+- **回合状态实时直连** — Pebrel 自动安装 Claude Code hooks（及 Codex
   notify），指向随包的桥接器 `nebula-hook.exe`（无第三方依赖）：
   提交 prompt → 转圈；回合完成 → 圆点 + 通知；claude 要你确认 → 通知里
   带消息原文。经本地命名管道传递，无需任何 shell 集成。
-- **通知点击直达** — 每条 toast 都知道自己来自哪个 pane：点一下，Nebula
+- **通知点击直达** — 每条 toast 都知道自己来自哪个 pane：点一下，Pebrel
   前置、切到那个标签、聚焦那个分屏。
 - **零配置、自愈合** — hook 条目首次启动自动写入；被配置切换工具覆盖后
   会自动补回（配置目录上有监视器重新写入）。作用域由环境变量限定：其他
   终端里的 claude 完全不受影响。`nebula setup-ai --remove` 一键撤销。
-- **不抢占已有 notifier** — codex 只有一个 notify 槽位，Nebula 用
+- **不抢占已有 notifier** — codex 只有一个 notify 槽位，Pebrel 用
   `--chain` 包装而非顶掉：原有通知程序照常触发。
 - **兜底信号** — OSC 133 命令跟踪 + BEL 覆盖其余所有 CLI：长构建完成也
   弹通知，并带耗时。
-- **原生 SSH 会话** — 保存的主机现在直接通过 Nebula 的 Rust SSH 传输连接，
+- **原生 SSH 会话** — 保存的主机现在直接通过 Pebrel 的 Rust SSH 传输连接，
   不再经过包装 Shell，也不会弹出外部控制台窗口。主机别名、用户名、端口和
   IdentityFile 会从 `~/.ssh/config` 解析；认证覆盖标准私钥与证书、加密密钥
   口令、Windows 凭据管理器密码以及 keyboard-interactive/MFA。主机密钥写入
@@ -351,12 +349,12 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
   连接。支持浏览或手动输入远端路径、筛选、上传/下载文件与文件夹、新建与重命名
   文件夹、递归删除、跟随符号链接目标，以及带进度、取消和错误提示的后台传输。
 - **SSH 里也 AI 感知** — 远端 Hook 信封可通过每通道随机认证的私有 OSC 桥
-  返回。Nebula 会校验通道令牌，用本地 Pane 身份覆盖远端字段，再复用现有侧栏
+  返回。Pebrel 会校验通道令牌，用本地 Pane 身份覆盖远端字段，再复用现有侧栏
   状态和 Windows 通知链路。需要端口转发、配置查询或显式远程命令时，仍可使用
   `nebula ssh` 兼容命令交给系统 SSH 客户端处理。
 
 <p align="center">
-  <img src="docs/screenshots/ssh.gif" alt="Nebula 原生 SSH 会话" width="920" />
+  <img src="docs/screenshots/ssh.gif" alt="Pebrel 原生 SSH 会话" width="920" />
 </p>
 
 **性能与正确性**
@@ -382,14 +380,14 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 **Markdown 解析：照着 GitHub 的样子显示**
 
 <p align="center">
-  <img src="docs/screenshots/markdown-document.png" alt="Nebula 正在渲染自己的 README：居中 logo、徽章横排、内嵌截图" width="920" />
+  <img src="docs/screenshots/markdown-document.png" alt="Pebrel 正在渲染自己的 README：居中 logo、徽章横排、内嵌截图" width="920" />
 </p>
 
 - **Markdown/GFM 文档标签页** — 可以从文件抽屉直接打开 Markdown、JSON 和
   纯文本文件，原生显示标题、列表、表格、代码块、链接、引用、自动换行和虚拟滚动。
 - **图片来源不挑** — 远程 `http(s)` 链接、`data:` URI、绝对路径，以及相对文档
   自身位置的路径都能解析，徽章行、logo 和内嵌截图都落在文件让它们出现的地方。
-  上面这张图就是 Nebula 在渲染自己的 README。
+  上面这张图就是 Pebrel 在渲染自己的 README。
 - **真实 README 会用到的那些 HTML** — `<p align="center">` 居中生效，同一段里
   的多枚 `<img>` 徽章横排显示而不会被拆成若干块，`<br/>` 按文档顺序断行，
   `<a><img/></a>` 形式的链接徽章不会整个丢失。
@@ -399,7 +397,7 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 **文档与原生数学公式**
 
 <p align="center">
-  <img src="docs/screenshots/native-math-rendering.png" alt="Nebula Markdown 文档中的原生数学公式" width="920" />
+  <img src="docs/screenshots/native-math-rendering.png" alt="Pebrel Markdown 文档中的原生数学公式" width="920" />
 </p>
 
 - **原生 TeX 数学排版** — 行内 `$...$` 与块级 `$$...$$` 公式全部由 Rust
@@ -432,14 +430,14 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 
 ### 📥 安装
 
-> **⚠️ 请先安装随附字体。** Nebula 的 powerline 提示符、程序图标与 AI 品牌
-> 标识都用 **Maple Mono Normal NF CN**（一款 Nerd Font）绘制。Nebula 已把同一字体
+> **⚠️ 请先安装随附字体。** Pebrel 的 powerline 提示符、程序图标与 AI 品牌
+> 标识都用 **Maple Mono Normal NF CN**（一款 Nerd Font）绘制。Pebrel 已把同一字体
 > 内置为运行时兜底，忘记安装也不会再让界面显示异常，但正常使用仍建议安装到系统。
 > 字体在 release 包内、仓库里也有：
 > `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf`；压缩包内位于 `fonts/` ——
 > 双击它点**安装**，再启动
-> Nebula。Nebula 每次启动都会检查系统字体；如果还没有正确安装，会显示一个
-> 可关闭的提醒，并提供“打开字体文件夹”按钮。安装完成后重启 Nebula 即可显示完整图
+> Pebrel。Pebrel 每次启动都会检查系统字体；如果还没有正确安装，会显示一个
+> 可关闭的提醒，并提供“打开字体文件夹”按钮。安装完成后重启 Pebrel 即可显示完整图
 > 标。（SIL OFL 1.1 许可。）
 
 **Release 包（推荐）** — 从
@@ -457,7 +455,7 @@ cargo build --release   # 产物在 target/release/
 
 ### Lua 配置
 
-Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
+Pebrel 内置 Lua 5.4，使用 `require 'nebula'` 与
 `nebula.config_builder()`。运行
 `nebula config init --language system|zh-CN|en-US` 可生成带完整注释的模板，
 `nebula config check` 可在不启动 GUI 的情况下检查语法与字段。通过 `require`
@@ -488,22 +486,22 @@ Nebula 内置 Lua 5.4，使用 `require 'nebula'` 与
 
 ### 🙏 致谢
 
-Nebula 的终端内核——网格、VTE 转义序列解析与 PTY 管路——衍生自
+Pebrel 的终端内核——网格、VTE 转义序列解析与 PTY 管路——衍生自
 **[Alacritty](https://github.com/alacritty/alacritty)**，终端工程的杰作。
-衷心感谢它的维护者与贡献者们；没有他们的工作就没有 Nebula。
+衷心感谢它的维护者与贡献者们；没有他们的工作就没有 Pebrel。
 
-Nebula 的界面层构建在 **[GPUI](https://github.com/zed-industries/zed)** 之上——由
+Pebrel 的界面层构建在 **[GPUI](https://github.com/zed-industries/zed)** 之上——由
 [Zed](https://zed.dev) 团队开发的 GPU 加速 UI 框架——并使用
 [Longbridge](https://github.com/longbridge) 的
 **[gpui-component](https://github.com/longbridge/gpui-component)** 作为组件库。两者均以
-Apache-2.0 许可发布，Nebula 通过带少量补丁的 fork 使用，版本在 workspace 清单中精确锁定。
-感谢把这些工作开源——没有它，Nebula 现在的界面不会是这个样子。
+Apache-2.0 许可发布，Pebrel 通过带少量补丁的 fork 使用，版本在 workspace 清单中精确锁定。
+感谢把这些工作开源——没有它，Pebrel 现在的界面不会是这个样子。
 
 ### 📜 许可证
 
 基于 [GNU 通用公共许可证 v3.0（GPL-3.0）](LICENSE) 发布。
 
-Nebula 的部分代码衍生自上游开源项目，其原始许可与版权声明保留于
+Pebrel 的部分代码衍生自上游开源项目，其原始许可与版权声明保留于
 [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES)。整体作品以 GPL-3.0 分发。
 
 ---

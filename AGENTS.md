@@ -1,5 +1,14 @@
 # Nebula 项目代理指引
 
+## 强制工程规范
+
+- 修改前阅读 `CONTRIBUTING.md`、`docs/architecture.md` 和 `docs/project-constraints.md`；新 UI 文案同时遵循 `docs/internationalization.md`。
+- 行数预算与依赖方向由 `architecture/` 声明，使用 `python3 scripts/check_architecture.py --base <PR-base-commit>` 验证；800 行仅提示，2000 行是既有防灾上限。
+- 禁止靠抬高预算、删测试、压缩格式、机械分片或静默排除目录让门禁通过。规范存在缺陷时，先给可复现反例，补正反测试并记录经维护者审查的规则修订。
+- 核心规则保持单一权威实现；按职责和生命周期拆分，不因文件夹名称或历史模块别名推断耦合。新增长期依赖、跨层接口、持久化和线程模型变更须给出设计依据。
+- 普通翻译查询维持已测零分配合同；参数格式化和冷路径另行评估。不能把单机微基准写成普遍性能保证。
+- 不得声称仅加入 workflow 或 `CODEOWNERS` 就已启用 GitHub 强制保护；服务端设置及负例 PR 验证须另行获准并核验。
+
 ## 发布任务的持久化上下文
 
 - 处理版本号、构建、打包、自动更新、GitHub Release、Changelog 或 Release Note 前，必须先完整阅读 [`.agents/memory.md`](.agents/memory.md) 的发布章节。
