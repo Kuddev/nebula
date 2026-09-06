@@ -23,14 +23,13 @@
 //! crash. A small global throttle keeps a bell-happy background job from
 //! flooding the Action Center.
 
-#[cfg(feature = "legacy-shell")]
-use std::sync::{Mutex, OnceLock};
+#[cfg(any(feature = "gpui-shell", test))]
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
-#[cfg(feature = "legacy-shell")]
-use winit::window::WindowId;
 
 #[cfg(feature = "legacy-shell")]
 use crate::display::window::Window;
@@ -47,6 +46,41 @@ static PROXY: OnceLock<EventLoopProxy<Event>> = OnceLock::new();
 #[cfg(feature = "legacy-shell")]
 pub fn init_proxy(proxy: EventLoopProxy<Event>) {
     let _ = PROXY.set(proxy);
+}
+
+type ToastActivation = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(feature = "gpui-shell")]
+static GPUI_ACTIVATION: OnceLock<std::sync::mpsc::Sender<crate::gpui_shell::GpuiShellEvent>> =
+    OnceLock::new();
+
+#[cfg(feature = "gpui-shell")]
+pub(crate) fn init_gpui_activation(
+    sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiShellEvent>,
+) {
+    let _ = GPUI_ACTIVATION.set(sender);
+}
+
+#[cfg(feature = "gpui-shell")]
+fn gpui_activation(
+    sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiShellEvent>,
+    pane_id: Option<u64>,
+) -> ToastActivation {
+    Arc::new(move || {
+        let _ = sender.send(crate::gpui_shell::GpuiShellEvent::NotificationFocus(pane_id));
+    })
+}
+
+fn application_activation(pane_id: Option<u64>) -> Option<ToastActivation> {
+    #[cfg(feature = "gpui-shell")]
+    {
+        GPUI_ACTIVATION.get().map(|sender| gpui_activation(sender.clone(), pane_id))
+    }
+    #[cfg(not(feature = "gpui-shell"))]
+    {
+        let _ = pane_id;
+        None
+    }
 }
 
 /// Something that happened in a pane which may deserve attention.
@@ -74,7 +108,7 @@ pub enum Notification {
 impl Notification {
     /// Toast title + body. Title names the source ("Nebula" or the program);
     /// body carries the human detail.
-    fn toast_text(&self) -> (String, String) {
+    pub(crate) fn toast_text(&self) -> (String, String) {
         match self {
             Self::Bell { program } => match program {
                 Some(p) => (p.clone(), "任务完成，等待输入".to_owned()),
@@ -108,6 +142,10 @@ impl Notification {
             },
         }
     }
+
+    pub(crate) fn is_attention(&self) -> bool {
+        matches!(self, Self::AiTurn { attention: true, .. })
+    }
 }
 
 /// Commands shorter than this never notify: quick `ls`-style commands would
@@ -118,6 +156,40 @@ pub const COMMAND_NOTIFY_MIN: Duration = Duration::from_secs(10);
 /// flashes the taskbar (cheap, silent, coalesced by the shell) but skips the
 /// toast, so a build script ringing BEL in a loop cannot flood Action Center.
 const TOAST_THROTTLE: Duration = Duration::from_secs(3);
+
+#[cfg(any(feature = "gpui-shell", test))]
+#[derive(Default)]
+struct PaneNotificationThrottle {
+    recent: HashMap<(u64, bool), Instant>,
+}
+
+#[cfg(any(feature = "gpui-shell", test))]
+impl PaneNotificationThrottle {
+    fn accepts(&mut self, pane_id: u64, attention: bool, now: Instant) -> bool {
+        self.recent.retain(|_, last| now.saturating_duration_since(*last) < TOAST_THROTTLE);
+        if self.recent.contains_key(&(pane_id, attention)) {
+            return false;
+        }
+        self.recent.insert((pane_id, attention), now);
+        true
+    }
+}
+
+#[cfg(feature = "gpui-shell")]
+pub(crate) fn deliver_gpui(notification: &Notification, pane_id: u64) {
+    static THROTTLE: OnceLock<Mutex<PaneNotificationThrottle>> = OnceLock::new();
+    let accepted = THROTTLE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .accepts(pane_id, notification.is_attention(), Instant::now());
+    if !accepted {
+        log::debug!("notify: toast suppressed for pane={pane_id}: {notification:?}");
+        return;
+    }
+    let (title, body) = notification.toast_text();
+    spawn_toast(title, body, application_activation(Some(pane_id)));
+}
 
 /// Deliver `notification` for a window that is currently unfocused.
 ///
@@ -140,18 +212,18 @@ pub fn deliver(window: &Window, notification: &Notification, pane: Option<u64>) 
     }
 
     let (title, body) = notification.toast_text();
-    let focus = (window.id(), pane);
+    let window_id = window.id();
+    let activation = PROXY.get().map(|proxy| {
+        let proxy = proxy.clone();
+        Arc::new(move || {
+            let _ = proxy.send_event(Event::new(EventType::FocusWindow { pane }, window_id));
+        }) as ToastActivation
+    });
     log::debug!("notify: toast '{title}': '{body}'");
     // Fire-and-forget worker: the WinRT show() is a cross-process RPC (can
     // take tens of ms — an eternity for the event loop), and notifications
     // must never be able to take the terminal down with them.
-    if let Err(err) = std::thread::Builder::new()
-        .name("nebula-toast".into())
-        .spawn(move || toast_clickable(&title, &body, Some(focus)))
-    {
-        // Taskbar flash already fired, so the user is not left with nothing.
-        log::warn!("notify: failed to spawn toast thread: {err}");
-    }
+    spawn_toast(title, body, activation);
 }
 
 /// Global toast rate limit. Returns true when this one should be dropped.
@@ -172,15 +244,18 @@ fn throttled() -> bool {
 
 /// Raise a native system toast. Best-effort: any failure is logged and
 /// swallowed (the taskbar flash already fired, so the user is not left with
-/// nothing). Runs on the toast worker thread, never on the event loop.
-#[cfg(all(windows, feature = "legacy-shell"))]
+/// nothing). Native delivery runs on a worker thread, never on the event loop.
 pub(crate) fn toast(title: &str, body: &str) {
-    toast_clickable(title, body, None);
+    spawn_toast(title.to_owned(), body.to_owned(), application_activation(None));
 }
 
-#[cfg(all(windows, not(feature = "legacy-shell")))]
-pub(crate) fn toast(title: &str, body: &str) {
-    toast_clickable(title, body);
+fn spawn_toast(title: String, body: String, activation: Option<ToastActivation>) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("nebula-toast".into())
+        .spawn(move || toast_clickable(&title, &body, activation))
+    {
+        log::warn!("notify: failed to spawn toast thread: {error}");
+    }
 }
 
 /// [`toast`], optionally wired for click-to-focus: activating the banner (or
@@ -189,11 +264,7 @@ pub(crate) fn toast(title: &str, body: &str) {
 /// protocol registration. The one trade-off: clicks after Nebula exited do
 /// nothing, which is exactly right (there is nothing left to focus).
 #[cfg(windows)]
-fn toast_clickable(
-    title: &str,
-    body: &str,
-    #[cfg(feature = "legacy-shell")] focus: Option<(WindowId, Option<u64>)>,
-) {
+fn toast_clickable(title: &str, body: &str, activation: Option<ToastActivation>) {
     use tauri_winrt_notification::{IconCrop, Toast};
 
     // Attribute the toast to the Nebula AUMID so it reads "Nebula" instead of
@@ -210,15 +281,11 @@ fn toast_clickable(
     if let Some(icon) = win::icon_path() {
         toast = toast.icon(&icon, IconCrop::Square, crate::brand::NAME);
     }
-    #[cfg(feature = "legacy-shell")]
-    if let Some((window, pane)) = focus {
-        if let Some(proxy) = PROXY.get() {
-            let proxy = proxy.clone();
-            toast = toast.on_activated(move |_action| {
-                let _ = proxy.send_event(Event::new(EventType::FocusWindow { pane }, window));
-                Ok(())
-            });
-        }
+    if let Some(activation) = activation {
+        toast = toast.on_activated(move |_action| {
+            activation();
+            Ok(())
+        });
     }
 
     match toast.show() {
@@ -227,14 +294,104 @@ fn toast_clickable(
     }
 }
 
-#[cfg(not(windows))]
-pub(crate) fn toast(title: &str, body: &str) {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn toast_clickable(title: &str, body: &str, activation: Option<ToastActivation>) {
+    #[cfg(target_os = "macos")]
+    {
+        if objc2_foundation::NSBundle::mainBundle().bundleIdentifier().is_none() {
+            log::warn!("System notifications require a registered Nebula application bundle");
+            return;
+        }
+        crate::platform::notifications::prepare();
+    }
+    let mut notification = notify_rust::Notification::new();
+    notification.appname(crate::brand::NAME).summary(title).body(body);
+    if activation.is_some() {
+        notification.action("default", "Open Nebula");
+    }
+    match notification.show() {
+        Ok(handle) => {
+            if let Some(activation) = activation {
+                let result = handle.wait_for_response(move |response: &notify_rust::NotificationResponse| {
+                    if response.is_default_action()
+                        || matches!(response, notify_rust::NotificationResponse::Action(action) if action == "default")
+                    {
+                        activation();
+                    }
+                });
+                if let Err(error) = result {
+                    log::warn!("notify: activation listener failed: {error}");
+                }
+            }
+        },
+        Err(error) => log::warn!("notify: toast failed: {error}"),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn toast_clickable(title: &str, body: &str, _activation: Option<ToastActivation>) {
     crate::platform::notifications::show(title, body);
 }
 
-#[cfg(all(not(windows), feature = "legacy-shell"))]
-fn toast_clickable(title: &str, body: &str, _focus: Option<(WindowId, Option<u64>)>) {
-    toast(title, body);
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
+
+    #[test]
+    fn pane_throttle_does_not_suppress_another_pane_or_attention() {
+        let now = Instant::now();
+        let mut throttle = PaneNotificationThrottle::default();
+        assert!(throttle.accepts(1, false, now));
+        assert!(throttle.accepts(2, false, now));
+        assert!(!throttle.accepts(1, false, now));
+        assert!(throttle.accepts(1, true, now));
+        assert!(!throttle.accepts(1, true, now));
+        assert!(throttle.accepts(2, true, now));
+    }
+
+    #[test]
+    fn pane_throttle_expires_without_extending_on_repeats() {
+        let now = Instant::now();
+        let mut throttle = PaneNotificationThrottle::default();
+        assert!(throttle.accepts(1, false, now));
+        assert!(!throttle.accepts(1, false, now + Duration::from_secs(2)));
+        assert!(throttle.accepts(1, false, now + TOAST_THROTTLE));
+        assert_eq!(throttle.recent.len(), 1);
+    }
+
+    #[test]
+    fn attention_importance_is_independent_of_completion_text() {
+        let done =
+            Notification::AiTurn { program: "codex".to_owned(), message: None, attention: false };
+        let waiting = Notification::AiTurn {
+            program: "claude".to_owned(),
+            message: Some("Confirm command".to_owned()),
+            attention: true,
+        };
+        assert!(!done.is_attention());
+        assert!(waiting.is_attention());
+        assert_eq!(waiting.toast_text(), ("claude".to_owned(), "Confirm command".to_owned()));
+        assert!(!Notification::Bell { program: None }.is_attention());
+        assert!(
+            !Notification::Text { body: "permission".to_owned(), program: None }.is_attention()
+        );
+    }
+
+    #[cfg(feature = "gpui-shell")]
+    #[test]
+    fn activation_preserves_exact_pane_and_generic_application_targets() {
+        use crate::gpui_shell::GpuiShellEvent;
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let pane_activation = gpui_activation(sender.clone(), Some(42));
+        let generic_activation = gpui_activation(sender, None);
+        pane_activation();
+        generic_activation();
+        assert!(matches!(receiver.try_recv(), Ok(GpuiShellEvent::NotificationFocus(Some(42)))));
+        assert!(matches!(receiver.try_recv(), Ok(GpuiShellEvent::NotificationFocus(None))));
+        drop(receiver);
+        pane_activation();
+    }
 }
 
 /// `nebula notify-test` entrypoint: run the full toast pipeline synchronously

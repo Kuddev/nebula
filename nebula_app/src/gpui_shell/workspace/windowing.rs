@@ -646,6 +646,7 @@ fn route_entry(command: &RuntimeCommand, cx: &mut App) -> Result<WindowEntry, Ap
 pub(crate) fn dispatch_shell_events(events: Vec<GpuiShellEvent>, cx: &mut App) {
     for event in events {
         match event {
+            GpuiShellEvent::NotificationFocus(pane_id) => focus_notification(pane_id, cx),
             GpuiShellEvent::TrayFocus(pane_id) => {
                 let target =
                     pane_id.and_then(|pane_id| entry_with_pane(pane_id, cx)).or_else(|| {
@@ -1136,6 +1137,126 @@ pub(crate) fn is_quick_terminal_window(handle: AnyWindowHandle, cx: &App) -> boo
         let _ = (handle, cx);
         false
     }
+}
+
+fn notification_target<Entry>(
+    pane_id: Option<u64>,
+    candidates: impl IntoIterator<Item = (Entry, WindowRole, Vec<u64>)>,
+) -> Option<Entry> {
+    candidates.into_iter().find_map(|(entry, role, panes)| {
+        let matches = match pane_id {
+            Some(pane_id) => panes.contains(&pane_id),
+            None => role == WindowRole::Regular,
+        };
+        matches.then_some(entry)
+    })
+}
+
+pub(crate) fn notification_view(
+    pane_id: u64,
+    cx: &App,
+) -> Option<Entity<crate::gpui_shell::terminal::view::TerminalView>> {
+    cx.global::<WindowRegistry>().entries.iter().find_map(|entry| {
+        let workspace = entry.workspace.upgrade()?;
+        workspace.read(cx).tabs.iter().find_map(|tab| match tab {
+            WorkspaceTab::Terminal { panes, .. } => {
+                panes.iter().find(|pane| pane.id == pane_id).map(|pane| pane.view.clone())
+            },
+            _ => None,
+        })
+    })
+}
+
+pub(crate) fn focus_notification(pane_id: Option<u64>, cx: &mut App) {
+    prune_entries(cx);
+    let active_window = cx.active_window();
+    let mut entries = cx.global::<WindowRegistry>().entries.clone();
+    entries.sort_by_key(|entry| {
+        std::cmp::Reverse((
+            active_window.is_some_and(|handle| handle == entry.handle),
+            entry.last_activated,
+        ))
+    });
+    let target = notification_target(
+        pane_id,
+        entries.into_iter().filter_map(|entry| {
+            let workspace = entry.workspace.upgrade()?;
+            let panes = workspace
+                .read(cx)
+                .tabs
+                .iter()
+                .filter_map(|tab| match tab {
+                    WorkspaceTab::Terminal { panes, .. } => Some(panes.iter().map(|pane| pane.id)),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            let role = entry.role;
+            Some((entry, role, panes))
+        }),
+    );
+    let Some(entry) = target else { return };
+    #[cfg(windows)]
+    if entry.role == WindowRole::QuickTerminal {
+        let geometry = cx
+            .global::<WindowRegistry>()
+            .quick_terminal
+            .as_ref()
+            .filter(|quick| quick.runtime_window_id == entry.runtime_window_id)
+            .map(|quick| quick.geometry);
+        let Some(geometry) = geometry else { return };
+        if !super::quick_terminal::slide_native_window(entry.native_hwnd, geometry, 0.0) {
+            log::warn!("notification could not reveal quick terminal");
+            return;
+        }
+        if let Some(quick) = cx.global_mut::<WindowRegistry>().quick_terminal.as_mut() {
+            quick.target_visible = true;
+            quick.motion.snap_to(0.0);
+            quick.motion_clock.reset();
+            quick.animation_generation = quick.animation_generation.wrapping_add(1);
+        }
+        super::quick_terminal::show_native_window(entry.native_hwnd);
+    }
+    let workspace = entry.workspace.clone();
+    let _ = entry.handle.update(cx, move |_, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| {
+            let tab_ix = match pane_id {
+                Some(pane_id) => match workspace.tab_of_pane(pane_id) {
+                    Some(tab_ix) => tab_ix,
+                    None => return,
+                },
+                None => workspace.active,
+            };
+            #[cfg(windows)]
+            if let Some(hwnd) = native_hwnd(window) {
+                use windows_sys::Win32::UI::WindowsAndMessaging::{
+                    IsIconic, SW_RESTORE, ShowWindow,
+                };
+                unsafe {
+                    let hwnd = hwnd as *mut std::ffi::c_void;
+                    if IsIconic(hwnd) != 0 {
+                        ShowWindow(hwnd, SW_RESTORE);
+                    }
+                }
+            }
+            focus_workspace_window(workspace, window);
+            workspace.activate_tab(tab_ix, window, cx);
+            if let Some(pane_id) = pane_id {
+                if let Some(WorkspaceTab::Terminal { zoomed, .. }) = workspace.tabs.get_mut(tab_ix)
+                {
+                    *zoomed = false;
+                }
+                workspace.focus_pane(tab_ix, pane_id, window, cx);
+            }
+            if let Some(meta) = workspace.tab_meta.get_mut(tab_ix) {
+                meta.has_bell = false;
+            }
+            workspace.reveal_active_tab();
+            workspace.focus_active(window, cx);
+            workspace.sync_side_panel_to_active(true, cx);
+            cx.notify();
+        });
+    });
 }
 
 fn focus_entry(entry: &WindowEntry, pane_id: Option<u64>, cx: &mut App) {
@@ -1639,6 +1760,28 @@ mod tests {
     use super::*;
     use crate::ai_agents::AgentKind;
     use crate::runtime_api::{RuntimeKey, RuntimeKeyModifiers, RuntimeSplitDirection};
+
+    #[test]
+    fn notification_target_routes_by_live_pane_not_original_window() {
+        let windows =
+            vec![(10, WindowRole::Regular, vec![1, 2]), (20, WindowRole::Regular, vec![3])];
+        assert_eq!(notification_target(Some(3), windows.clone()), Some(20));
+        assert_eq!(notification_target(Some(99), windows.clone()), None);
+        assert_eq!(notification_target(None, windows), Some(10));
+        let moved =
+            vec![(10, WindowRole::Regular, vec![1, 2, 3]), (20, WindowRole::Regular, Vec::new())];
+        assert_eq!(notification_target(Some(3), moved), Some(10));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn notification_target_includes_quick_terminal_only_for_exact_pane() {
+        let windows =
+            vec![(30, WindowRole::QuickTerminal, vec![7]), (10, WindowRole::Regular, vec![1])];
+        assert_eq!(notification_target(Some(7), windows.clone()), Some(30));
+        assert_eq!(notification_target(None, windows), Some(10));
+        assert_eq!(notification_target(Some(9), [(30, WindowRole::QuickTerminal, vec![7])]), None);
+    }
 
     #[test]
     fn cross_window_client_position_uses_target_scale_factor() {

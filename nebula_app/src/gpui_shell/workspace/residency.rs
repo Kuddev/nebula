@@ -75,6 +75,10 @@ impl NebulaWorkspace {
         for event in events {
             match event {
                 GpuiShellEvent::TrayFocus(pane) => self.handle_tray_focus(*pane, cx),
+                GpuiShellEvent::NotificationFocus(pane) => {
+                    let pane = *pane;
+                    cx.defer(move |cx| super::windowing::focus_notification(pane, cx));
+                },
                 GpuiShellEvent::TrayQuit => {
                     self.quit_from_tray(cx);
                     return;

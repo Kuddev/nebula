@@ -164,6 +164,18 @@ mod tests {
             assert!(!popup_active(&state));
         }
     }
+
+    #[test]
+    fn hovering_and_scrolling_do_not_change_the_keyboard_accept_target() {
+        let mut state = popup_state();
+        popup_move(&mut state, 1);
+        let mut viewport = super::super::completion_viewport::CompletionViewport::default();
+        viewport.hover((12.0, 28.0), Some(1));
+        viewport.scroll(-28.0, 28.0, state.completion_items.len(), 1);
+        assert_eq!(viewport.offset, 1);
+        assert_eq!(state.completion_selected, Some(0));
+        assert_eq!(popup_take(&mut state).as_deref(), Some(" upstream"));
+    }
 }
 
 /// 接受键（Tab/Right/Both）的判定复用旧壳 [`AcceptKey`]。

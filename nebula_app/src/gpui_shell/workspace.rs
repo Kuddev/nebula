@@ -49,6 +49,7 @@ mod agents;
 mod command_manager;
 mod file_tree;
 mod key_actions;
+mod notifications;
 mod palette;
 mod pane_header;
 mod quick_jump;
@@ -2662,23 +2663,22 @@ impl NebulaWorkspace {
                 }
             },
             TerminalViewEvent::AiAttention(attention) => {
-                if let Some((tab_ix, pane_id)) = self.locate_pane(view.entity_id()) {
-                    if tab_ix != self.active
-                        && let Some(meta) = self.tab_meta.get_mut(tab_ix)
-                    {
-                        meta.has_bell = true;
-                    }
-                    let body = attention.summary_for_pane(pane_id);
-                    crate::gpui_shell::toast::banner(
+                if let Some((_, pane_id)) = self.locate_pane(view.entity_id()) {
+                    self.deliver_pane_notification(
+                        pane_id,
+                        crate::notify::Notification::AiTurn {
+                            program: attention.source.clone(),
+                            message: Some(attention.summary_for_pane(pane_id)),
+                            attention: true,
+                        },
                         window,
                         cx,
-                        crate::display::ToastKind::Warning,
-                        format!("{} · {body}", attention.source),
                     );
-                    if !window.is_window_active() {
-                        crate::notify::toast(&attention.source, &body);
-                    }
-                    cx.notify();
+                }
+            },
+            TerminalViewEvent::Notification(notification) => {
+                if let Some((_, pane_id)) = self.locate_pane(view.entity_id()) {
+                    self.deliver_pane_notification(pane_id, notification.clone(), window, cx);
                 }
             },
             TerminalViewEvent::SelectionContextMenuRequested { position, text } => {

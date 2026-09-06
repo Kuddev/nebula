@@ -15,9 +15,10 @@
 use std::collections::HashSet;
 
 use gpui::{
-    App, Bounds, ContentMask, Corners, CursorStyle, Element, ElementId, GlobalElementId, Hitbox,
-    HitboxBehavior, Hsla, InspectorElementId, LayoutId, PathBuilder, Pixels, Rgba, SharedString,
-    Style, TextRun, UnderlineStyle, Window, fill, outline, point, px, relative, size,
+    App, Bounds, ContentMask, Corners, CursorStyle, DispatchPhase, Element, ElementId,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, LayoutId, MouseButton,
+    MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Rgba, SharedString, Style, TextRun,
+    UnderlineStyle, Window, fill, outline, point, px, relative, size,
 };
 use gpui_component::ActiveTheme as _;
 use nebula_terminal::grid::Dimensions as _;
@@ -37,6 +38,35 @@ pub struct TerminalElement {
 impl TerminalElement {
     pub fn new(view: gpui::Entity<TerminalView>) -> Self {
         Self { view }
+    }
+
+    fn capture_completion_scrollbar_drag(&self, window: &mut Window, cx: &App) {
+        if self.view.read(cx).completion_viewport.scrollbar_grab.is_none() {
+            return;
+        }
+        let view = self.view.downgrade();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture
+                && view
+                    .update(cx, |view, cx| view.move_completion_popup_scrollbar(event, cx))
+                    .unwrap_or(false)
+            {
+                cx.stop_propagation();
+            }
+        });
+        let view = self.view.downgrade();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture
+                && event.button == MouseButton::Left
+                && view
+                    .update(cx, |view, cx| {
+                        view.finish_completion_popup_scrollbar(event.position, cx)
+                    })
+                    .unwrap_or(false)
+            {
+                cx.stop_propagation();
+            }
+        });
     }
 }
 
@@ -215,6 +245,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
+        self.capture_completion_scrollbar_drag(window, cx);
         let theme = self.view.read(cx).palette.clone();
         // 元素不画底色：卡容器统一负责"卡底色（带窗口透明度）→ 壁纸"
         // 两层（旧壳 draw_window_backdrop 同模型），元素只画单元格背景、
@@ -646,19 +677,21 @@ impl Element for TerminalElement {
             // 内联 ghost 余量与弹窗补全：结果由 view 在本帧 render 时算好
             // （引擎与旧壳共享），元素只负责画。IME 组合中让位给 preedit，
             // 与旧壳同一抑制条件；窗口失焦不灭（对齐旧壳 draw_pane）。
-            let (ghost_text, popup_items, popup_selected) = {
+            let (ghost_text, popup_items, popup_selected, popup_offset, popup_hovered) = {
                 let view = self.view.read(cx);
                 let ime_active = view.marked_text.as_deref().is_some_and(|m| !m.is_empty());
                 let same_frame =
                     view.suggest_anchor == Some((cursor.row as usize, cursor.col as usize));
                 if ime_active || !same_frame {
-                    (None, Vec::new(), None)
+                    (None, Vec::new(), None, 0, None)
                 } else {
                     (
                         (!view.suggest.suggestion.is_empty())
                             .then(|| view.suggest.suggestion.clone()),
                         view.suggest.completion_items.clone(),
                         view.suggest.completion_selected,
+                        view.completion_viewport.offset,
+                        view.completion_viewport.hovered,
                     )
                 }
             };
@@ -690,6 +723,8 @@ impl Element for TerminalElement {
                         cx,
                         &popup_items,
                         popup_selected,
+                        popup_offset,
+                        popup_hovered,
                         cursor.row as usize,
                         cursor_visual_col,
                         layout,
@@ -1083,7 +1118,7 @@ impl CompletionPopupLayout {
         )
     }
 
-    fn panel_bounds(self, origin: gpui::Point<Pixels>) -> Bounds<Pixels> {
+    pub(super) fn panel_bounds(self, origin: gpui::Point<Pixels>) -> Bounds<Pixels> {
         let content = self.content_bounds(origin);
         let pad = px(COMPLETION_PANEL_PAD);
         Bounds::new(
@@ -1099,12 +1134,37 @@ impl CompletionPopupLayout {
             size(content.size.width, self.row_height),
         )
     }
+
+    pub(super) fn scrollbar_bounds(
+        self,
+        origin: gpui::Point<Pixels>,
+        count: usize,
+    ) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+        if count <= self.rows {
+            return None;
+        }
+        let content = self.content_bounds(origin);
+        let track_height = content.size.height - px(4.0);
+        let track = Bounds::new(
+            point(content.right() + px(1.0), content.origin.y + px(2.0)),
+            size(px(2.0), track_height),
+        );
+        let thumb_height =
+            (track_height * (self.rows as f32 / count as f32)).max(px(14.0)).min(track_height);
+        let progress = self.offset.min(count - self.rows) as f32 / (count - self.rows) as f32;
+        let thumb = Bounds::new(
+            point(track.origin.x, track.origin.y + (track_height - thumb_height) * progress),
+            size(track.size.width, thumb_height),
+        );
+        Some((track, thumb))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn completion_popup_layout(
     items: &[crate::display::NebulaCompletionItem],
     selected: Option<usize>,
+    offset: usize,
     cursor_row: usize,
     cursor_col: usize,
     screen_lines: usize,
@@ -1168,7 +1228,7 @@ pub(super) fn completion_popup_layout(
     let panel_x = desired_panel_x.clamp(0.0, max_panel_x);
 
     let selected = selected.filter(|index| *index < items.len());
-    let offset = selected.filter(|index| *index >= rows).map(|index| index + 1 - rows).unwrap_or(0);
+    let offset = offset.min(items.len().saturating_sub(rows));
     Some(CompletionPopupLayout {
         content_x: px(panel_x + COMPLETION_PANEL_PAD),
         content_y: px(panel_y + COMPLETION_PANEL_PAD),
@@ -1316,6 +1376,8 @@ fn paint_completion_popup(
     cx: &mut App,
     items: &[crate::display::NebulaCompletionItem],
     selected: Option<usize>,
+    offset: usize,
+    hovered: Option<usize>,
     cursor_row: usize,
     cursor_col: usize,
     layout: &TermLayout,
@@ -1327,6 +1389,7 @@ fn paint_completion_popup(
     let Some(popup) = completion_popup_layout(
         items,
         selected,
+        offset,
         cursor_row,
         cursor_col,
         layout.rows,
@@ -1368,13 +1431,18 @@ fn paint_completion_popup(
     for (row, item) in visible.iter().enumerate() {
         let row_bounds = popup.row_bounds(bounds.origin, row);
         let is_selected = Some(popup.offset + row) == popup.selected;
+        let is_hovered = Some(popup.offset + row) == hovered;
         let visual_kind = completion_visual_kind(item);
         let semantic = completion_kind_color(colors, visual_kind);
-        let row_radius = if is_selected { px(4.0) } else { px(0.0) };
-        window.paint_quad(
-            fill(row_bounds, if is_selected { colors.selected_bg } else { colors.row_bg })
-                .corner_radii(row_radius),
-        );
+        let row_radius = if is_selected || is_hovered { px(4.0) } else { px(0.0) };
+        let background = if is_selected {
+            colors.selected_bg
+        } else if is_hovered {
+            colors.selected_bg.opacity(0.45)
+        } else {
+            colors.row_bg
+        };
+        window.paint_quad(fill(row_bounds, background).corner_radii(row_radius));
         if is_selected {
             window.paint_quad(fill(
                 Bounds::new(row_bounds.origin, size(px(2.0), row_bounds.size.height)),
@@ -1439,28 +1507,9 @@ fn paint_completion_popup(
         );
     }
 
-    if items.len() > popup.rows {
-        // 滚动条覆在面板右侧 4px 呼吸边内，不侵入固定 46px 标签列。
-        let content = popup.content_bounds(bounds.origin);
-        let track_h = content.size.height - px(4.0);
-        let track_top = content.origin.y + px(2.0);
-        let content_right = content.origin.x + content.size.width;
-        let track_bounds =
-            Bounds::new(point(content_right + px(1.0), track_top), size(px(2.0), track_h));
-        window.paint_quad(fill(track_bounds, colors.scroll_track).corner_radii(px(1.0)));
-
-        let visible_ratio = popup.rows as f32 / items.len() as f32;
-        let thumb_h = (track_h * visible_ratio).max(px(14.0)).min(track_h);
-        let max_offset = items.len() - popup.rows;
-        let progress = popup.offset.min(max_offset) as f32 / max_offset as f32;
-        let thumb_top = track_top + (track_h - thumb_h) * progress;
-        window.paint_quad(
-            fill(
-                Bounds::new(point(content_right + px(1.0), thumb_top), size(px(2.0), thumb_h)),
-                colors.scroll_thumb,
-            )
-            .corner_radii(px(1.0)),
-        );
+    if let Some((track, thumb)) = popup.scrollbar_bounds(bounds.origin, items.len()) {
+        window.paint_quad(fill(track, colors.scroll_track).corner_radii(px(1.0)));
+        window.paint_quad(fill(thumb, colors.scroll_thumb).corner_radii(px(1.0)));
     }
 }
 
@@ -1643,9 +1692,18 @@ mod tests {
             kind: NebulaCompletionKind::Command,
         }];
 
-        let popup =
-            completion_popup_layout(&items, Some(0), 2, 7, 24, 80, gpui::px(8.0), gpui::px(21.0))
-                .expect("短命令的精确候选也必须形成可见面板");
+        let popup = completion_popup_layout(
+            &items,
+            Some(0),
+            0,
+            2,
+            7,
+            24,
+            80,
+            gpui::px(8.0),
+            gpui::px(21.0),
+        )
+        .expect("短命令的精确候选也必须形成可见面板");
         assert_eq!(popup.rows, 1);
         assert!(popup.label_width >= 3);
     }
@@ -1659,10 +1717,42 @@ mod tests {
         }];
 
         let popup =
-            completion_popup_layout(&items, None, 2, 7, 24, 80, gpui::px(8.0), gpui::px(21.0))
+            completion_popup_layout(&items, None, 0, 2, 7, 24, 80, gpui::px(8.0), gpui::px(21.0))
                 .expect("空选中态仍应显示候选面板");
         assert_eq!(popup.selected, None);
         assert_eq!(popup.offset, 0);
+    }
+
+    #[test]
+    fn scrolling_is_independent_of_selection_and_popup_position() {
+        let items = (0..30)
+            .map(|index| NebulaCompletionItem {
+                label: format!("command-{index}"),
+                insert: format!("{index}"),
+                kind: NebulaCompletionKind::Command,
+            })
+            .collect::<Vec<_>>();
+        for cursor_row in [2, 22] {
+            let popup = completion_popup_layout(
+                &items,
+                Some(0),
+                10,
+                cursor_row,
+                7,
+                24,
+                80,
+                gpui::px(8.0),
+                gpui::px(21.0),
+            )
+            .unwrap();
+            assert_eq!(popup.offset, 10);
+            assert_eq!(popup.selected, Some(0));
+            let (track, thumb) = popup
+                .scrollbar_bounds(gpui::point(gpui::px(0.0), gpui::px(0.0)), items.len())
+                .unwrap();
+            assert!(thumb.origin.y >= track.origin.y);
+            assert!(thumb.bottom() <= track.bottom());
+        }
     }
 
     #[test]
@@ -1678,6 +1768,7 @@ mod tests {
         let popup = completion_popup_layout(
             &items,
             None,
+            0,
             cursor_row,
             7,
             24,

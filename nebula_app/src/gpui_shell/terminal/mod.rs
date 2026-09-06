@@ -5,6 +5,8 @@
 
 mod answer_reader;
 pub mod colors;
+mod completion_viewport;
+pub(super) mod confirmation;
 pub mod element;
 mod inline_image;
 pub mod keymap;
