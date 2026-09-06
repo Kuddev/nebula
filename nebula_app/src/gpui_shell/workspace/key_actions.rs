@@ -25,7 +25,13 @@ impl NebulaWorkspace {
         if len == 0 {
             return;
         }
-        let ix = if next { (self.active + 1) % len } else { (self.active + len - 1) % len };
+        let ix = if self.settings_open {
+            if next { 0 } else { len - 1 }
+        } else if next {
+            (self.active + 1) % len
+        } else {
+            (self.active + len - 1) % len
+        };
         self.activate_tab(ix, window, cx);
     }
 

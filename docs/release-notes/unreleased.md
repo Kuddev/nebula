@@ -20,6 +20,7 @@ This file contains changes that are not part of a numbered release yet.
 - File-name search discards results from an old root, updates after creates, renames and deletes, and handles canonical file-watcher paths without losing the visible directory root.
 - Multiline confirmation text is measured with wrapping so longer messages fit the shared confirmation dialog.
 - Improved Antigravity activity and permission detection so old spinner output and ordinary prose mentioning approval do not keep an idle session marked as running or waiting for permission.
+- Closing the last regular window and then quitting no longer replaces saved tabs and AI session identities with an empty snapshot. Closing all tabs explicitly still starts an empty workspace next time, and failed session writes are retried.
 
 ### Improved
 - Made Titanium the default application icon and adjusted small-size proportions, prompt strokes, and transparent edges.
@@ -31,6 +32,7 @@ This file contains changes that are not part of a numbered release yet.
 - Added contribution, architecture, and translation guides with explicit compatibility and review requirements. GitHub branch protection still requires separate server-side setup and verification.
 - Made the settings navigation more compact, kept Application first, labeled terminal options more clearly, and added matching navigation icons. Appearance settings now show font, cursor, interface, and background controls in groups with expandable help.
 - Reduced the intensity of hover and selected backgrounds in light themes.
+- Settings now appears as a selectable, closable item in the top tab layout. Switching tab layouts while Settings is open preserves the sidebar state, and closing the last terminal tab keeps Settings available until it is closed.
 
 ## 中文
 
@@ -50,6 +52,7 @@ This file contains changes that are not part of a numbered release yet.
 - 文件名搜索丢弃旧目录的结果，在创建、重命名和删除后更新，并正确处理文件监听器返回的规范路径，保留用户看到的目录根。
 - 多行确认文案按换行后的尺寸测量，使较长消息能完整放入共享确认框。
 - 改进 Antigravity 的活动与权限提示识别，避免历史转圈输出或普通正文中提到审批时，把空闲会话误标为运行中或等待授权。
+- 关闭最后一个普通窗口后再退出，不再用空快照覆盖已保存标签与 AI 会话身份；明确关闭全部标签后，下次仍从空工作区开始，保存失败会重试。
 
 ### 改进
 - 将钛银设为默认应用图标，并调整小尺寸比例、提示符笔画与透明边缘。
@@ -61,6 +64,7 @@ This file contains changes that are not part of a numbered release yet.
 - 新增贡献、架构和翻译指南，明确兼容性与审查要求；GitHub 分支保护仍需单独在服务端配置并核验。
 - 设置导航更紧凑，“应用”保持首项，终端选项名称更清晰，并配有含义匹配的图标；外观设置按字体、光标、界面和背景分组，提供可展开的详细说明。
 - 降低浅色主题中悬停与选中背景的色彩强度。
+- 顶部标签布局中，设置现在作为可选择、可关闭的标签显示；打开设置时切换标签布局会保留侧栏状态，关闭最后一个终端标签后仍可继续使用设置，直到关闭设置页。
 
 ## Contributors
 - [@Sakyvo](https://github.com/Sakyvo): terminal network proxy, conditional `Ctrl+C` copy, and word deletion with `Ctrl+Backspace` / 终端网络代理、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除。

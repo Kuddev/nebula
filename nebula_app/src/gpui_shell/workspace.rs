@@ -56,6 +56,8 @@ mod quick_terminal;
 mod remote_files;
 mod residency;
 mod send_to_chat;
+mod session_persistence;
+mod settings_navigation;
 mod sidebar;
 mod ssh_dialog;
 mod tab_drag;
@@ -64,6 +66,7 @@ mod tab_scroll;
 mod top_tabs;
 mod update_dialog;
 mod vcs_panel;
+mod window_titlebar;
 pub(crate) mod windowing;
 
 // 调用点分散在设置页与窗口层，原样再导出以免拆分波及它们。
@@ -1109,8 +1112,6 @@ pub struct NebulaWorkspace {
     spinner_frame_pending: std::cell::Cell<bool>,
     /// 上一次 render 是否真的画出了运行态徽章；滚出视口后不应继续唤醒窗口。
     spinner_visible: std::cell::Cell<bool>,
-    /// 最近一次写盘的会话快照（1 Hz 自动保存的去重 + 退出收尾的素材）。
-    last_saved_session: Option<crate::session::Session>,
     /// 系统关闭按钮可能连续送来多次 should-close；确认框在场时只保留一份。
     window_close_confirm_open: bool,
     /// `keep_session` 关窗后 HWND 已隐藏、PTY 仍在；托盘 / mux ATTACH 用来捞回。
@@ -1268,7 +1269,6 @@ impl NebulaWorkspace {
             cx.subscribe_in(&file_tree_search_input, window, Self::on_file_tree_search_event);
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
-        let process_dispatcher = shell_events.is_some();
         let mut this = Self {
             tabs: Vec::new(),
             tab_meta: Vec::new(),
@@ -1345,7 +1345,6 @@ impl NebulaWorkspace {
             spinner_last: std::time::Instant::now(),
             spinner_frame_pending: std::cell::Cell::new(false),
             spinner_visible: std::cell::Cell::new(false),
-            last_saved_session: None,
             window_close_confirm_open: false,
             window_hidden: false,
             window_handle: window.window_handle(),
@@ -1389,9 +1388,6 @@ impl NebulaWorkspace {
         Self::start_agent_screen_watchdog(cx);
         if let Some(shell_events) = shell_events {
             Self::start_shell_event_pump(shell_events, cx);
-        }
-        if process_dispatcher {
-            this.start_session_autosave(cx);
         }
         this.apply_custom_keybinds(cx);
         let workspace = cx.entity().downgrade();
@@ -1613,6 +1609,7 @@ impl NebulaWorkspace {
         crate::gpui_shell::apply_app_icon(runtime.app_icon, cx);
         self.sidebar_width = runtime.sidebar_width;
         self.tabs_position = runtime.tabs_position;
+        self.sync_settings_layout();
         self.sidebar_resizing = false;
         self.reveal_if_tray_disabled(cx);
         cx.notify();
@@ -1701,7 +1698,7 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) -> u64 {
         if self.settings_open {
-            self.close_settings(window, cx);
+            self.leave_settings(window, cx);
         }
         let shell_tag = Self::launch_shell_tag(&launch_session);
         let grid = self.inherited_grid(cx);
@@ -1750,7 +1747,7 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         if self.settings_open {
-            self.close_settings(window, cx);
+            self.leave_settings(window, cx);
         }
         {
             let mut lists = crate::gpui_shell::ssh_hosts::SshHostLists::load();
@@ -2000,11 +1997,13 @@ impl NebulaWorkspace {
         (0..self.tabs.len()).find_map(|tab_ix| self.busy_process_in_tab(tab_ix, None, cx))
     }
 
-    fn save_clean_window_session(&mut self, cx: &App) {
-        let mut snapshot = self.snapshot_session(cx);
-        crate::session::save_final(&mut snapshot);
-        // Drop 不再用最多滞后一秒的自动保存副本覆盖刚写下的准确快照。
-        self.last_saved_session = None;
+    fn save_clean_window_session(&mut self, cx: &mut App) {
+        windowing::save_current_window_session(
+            self.runtime_window_id,
+            self.snapshot_session(cx),
+            session_persistence::SaveReason::WindowClose,
+            cx,
+        );
     }
 
     /// GPUI 的 should-close 回调必须同步返回：无繁忙进程时直接允许系统关闭；
@@ -2378,19 +2377,6 @@ impl NebulaWorkspace {
         Session::new(active_out, tabs)
     }
 
-    /// 1 Hz 自动保存（无变化跳过；崩溃/强杀最多丢一秒）。首笔成功写盘的
-    /// 快照 `boot_attempts` 恒为 0，即旧壳「活过第一秒就解除断路器」。
-    fn start_session_autosave(&self, cx: &mut Context<Self>) {
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |_this, cx| {
-            loop {
-                executor.timer(Duration::from_millis(1000)).await;
-                cx.update(crate::gpui_shell::workspace::windowing::autosave_tick);
-            }
-        })
-        .detach();
-    }
-
     /// Open Settings as a window-level page while preserving the active tab.
     /// Side-tab mode folds its real left rail; top-tab mode has no such rail,
     /// so touching `sidebar_collapsed` there would only create hidden state.
@@ -2409,12 +2395,8 @@ impl NebulaWorkspace {
             self.settings_surface = Some((view, subscription));
         }
 
-        self.settings_restore_sidebar_collapsed =
-            settings_should_fold_sidebar(self.tabs_position).then_some(self.sidebar_collapsed);
-        if self.settings_restore_sidebar_collapsed == Some(false) {
-            self.sidebar_collapsed = true;
-            self.sidebar_fold_armed = true;
-        }
+        self.settings_open = true;
+        self.sync_settings_layout();
 
         self.settings_restore_side_panel_open = self.side_panel.open;
         if self.side_panel.open {
@@ -2423,7 +2405,6 @@ impl NebulaWorkspace {
             self.file_tree_menu = None;
         }
 
-        self.settings_open = true;
         if let Some((view, _)) = self.settings_surface.as_ref() {
             let focus = view.read(cx).focus_handle(cx);
             window.defer(cx, move |window, cx| window.focus(&focus, cx));
@@ -2435,22 +2416,10 @@ impl NebulaWorkspace {
         if !self.settings_open {
             return;
         }
-        self.settings_open = false;
-
-        if let Some(collapsed) = self.settings_restore_sidebar_collapsed.take() {
-            if self.sidebar_collapsed != collapsed {
-                self.sidebar_collapsed = collapsed;
-                self.sidebar_fold_armed = true;
-            }
+        self.leave_settings(window, cx);
+        if self.tabs.is_empty() {
+            windowing::close_empty_workspace_window(self.runtime_window_id, window, cx);
         }
-
-        let restore_side_panel = std::mem::take(&mut self.settings_restore_side_panel_open);
-        if restore_side_panel && !self.side_panel.open {
-            let view = self.side_panel.view;
-            self.toggle_side_panel(view, cx);
-        }
-        self.focus_active(window, cx);
-        cx.notify();
     }
 
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2788,21 +2757,20 @@ impl NebulaWorkspace {
             }
         }
 
-        if self.tabs.is_empty() {
-            // 一路关标签关到空 = 正常退出：落一份 clean 空会话（下次启动
-            // 走干净路径，不算崩溃）。Drop 兜底不再重写。
-            let mut empty = crate::session::Session::new(0, Vec::new());
-            crate::session::save_final(&mut empty);
-            self.last_saved_session = None;
+        if self.tabs.is_empty() && !self.settings_open {
             windowing::close_empty_workspace_window(self.runtime_window_id, window, cx);
             return;
         }
         if ix < self.active {
             self.active -= 1;
         }
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len() - 1;
-        }
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        windowing::save_current_window_session(
+            self.runtime_window_id,
+            self.snapshot_session(cx),
+            session_persistence::SaveReason::TabsClosed,
+            cx,
+        );
         self.reveal_active_tab();
         self.focus_active(window, cx);
         self.sync_side_panel_to_active(true, cx);
@@ -4285,20 +4253,6 @@ impl NebulaWorkspace {
     }
 }
 
-impl Drop for NebulaWorkspace {
-    fn drop(&mut self) {
-        // 正常退出的最后一笔：把最近的自动保存快照标上 `clean_exit` 落盘
-        // （关窗/退出应用都会走到；强杀/断电走不到，崩溃判定据此）。
-        // panic 展开也会进 Drop——那是崩溃现场，不能标成正常退出。
-        if std::thread::panicking() {
-            return;
-        }
-        if let Some(mut session) = self.last_saved_session.take() {
-            crate::session::save_final(&mut session);
-        }
-    }
-}
-
 impl Render for NebulaWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if window.is_window_active() {
@@ -4440,6 +4394,9 @@ impl Render for NebulaWorkspace {
                 this.close_active(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                if this.settings_open {
+                    return;
+                }
                 this.sidebar_collapsed = !this.sidebar_collapsed;
                 this.sidebar_fold_armed = true;
                 cx.notify();
@@ -4549,8 +4506,7 @@ impl Render for NebulaWorkspace {
                 // 侧栏模式保留旧壳的侧栏开关与齿轮。组件默认 34px 标题栏会让
                 // 32px 按钮几乎贴边，因此显式设为 48px、上下各留 8px；右侧
                 // 窗口控制仍共享同一标题带。
-                TitleBar::new()
-                    .h(px(48.0))
+                window_titlebar::settings_aware_title_bar(settings_active, cx)
                     .when(top_tabs, |bar| {
                         // 正文卡在顶部模式保留 8px 左缝；标题栏默认 12px，
                         // 这里覆写后首个 tab 才与卡内 powerline 严格同轴。
@@ -4580,7 +4536,7 @@ impl Render for NebulaWorkspace {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .when(!top_tabs, |row| {
+                    .when(!top_tabs && !settings_active, |row| {
                         row.child(self.render_sidebar_slot(window, cx)).when(
                             // 侧栏拖宽热区（旧壳 `panel_resize` 设置门控）：贴在
                             // 侧栏右缘、零布局宽，不挤压终端卡。

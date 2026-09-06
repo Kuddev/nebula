@@ -262,9 +262,14 @@ pub fn load_from(path: &Path) -> Option<Session> {
 /// The atomic replace matters here — this file is written every second and a
 /// crash mid-write must not cost the very session it exists to restore.
 pub fn save(session: &Session) {
-    if let Ok(json) = serde_json::to_string(session) {
-        let _ = crate::atomic_file::write(&session_path(), json.as_bytes());
+    if let Err(error) = try_save(session) {
+        log::warn!("Could not persist terminal session: {error}");
     }
+}
+
+pub(crate) fn try_save(session: &Session) -> std::io::Result<()> {
+    let json = serde_json::to_string(session).map_err(std::io::Error::other)?;
+    crate::atomic_file::write(&session_path(), json.as_bytes())
 }
 
 /// Write a session as a named workspace file. Pretty-printed — workspace

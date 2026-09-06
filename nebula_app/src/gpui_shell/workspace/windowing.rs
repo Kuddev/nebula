@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, Global, IntoElement,
@@ -18,6 +19,7 @@ use gpui_component::{ActiveTheme as _, Root, TitleBar};
 use nebula_split::{SplitNav, SplitTree};
 use serde_json::json;
 
+use super::session_persistence::{SaveReason, SessionPersistence, combine_sessions};
 use super::{NebulaWorkspace, TabMeta, WorkspaceTab, dock_tree};
 use crate::gpui_shell::GpuiShellEvent;
 #[cfg(windows)]
@@ -116,7 +118,7 @@ pub(crate) struct WindowRegistry {
     activation_sequence: u64,
     entries: Vec<WindowEntry>,
     runtime_hub: crate::runtime_api::RuntimeHub,
-    last_saved_session: Option<crate::session::Session>,
+    session_persistence: SessionPersistence,
     #[cfg(windows)]
     quick_terminal: Option<QuickTerminalWindow>,
     _subscriptions: Vec<Subscription>,
@@ -189,7 +191,7 @@ pub(crate) fn initialize(cx: &mut App, runtime_hub: crate::runtime_api::RuntimeH
         activation_sequence: 1,
         entries: Vec::new(),
         runtime_hub,
-        last_saved_session: None,
+        session_persistence: SessionPersistence::default(),
         #[cfg(windows)]
         quick_terminal: None,
         _subscriptions: Vec::new(),
@@ -215,6 +217,14 @@ pub(crate) fn initialize(cx: &mut App, runtime_hub: crate::runtime_api::RuntimeH
     cx.global_mut::<WindowRegistry>()
         ._subscriptions
         .extend([quit_subscription, closed_subscription]);
+
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            cx.update(autosave_tick);
+        }
+    })
+    .detach();
 }
 
 pub(crate) fn open_initial_window(
@@ -1206,8 +1216,10 @@ pub(crate) fn autosave_tick(cx: &mut App) {
     save_combined_session(cx, false);
 }
 
-fn combined_session(cx: &App) -> crate::session::Session {
-    let active_handle = cx.active_window();
+fn combined_session(
+    mut current: Option<(u64, crate::session::Session)>,
+    cx: &App,
+) -> Option<crate::session::Session> {
     let mut entries = cx
         .global::<WindowRegistry>()
         .entries
@@ -1216,32 +1228,44 @@ fn combined_session(cx: &App) -> crate::session::Session {
         .cloned()
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| entry.runtime_window_id);
-    let mut tabs = Vec::new();
-    let mut active_tab = 0usize;
+    let active_handle = cx
+        .active_window()
+        .filter(|handle| entries.iter().any(|entry| entry.handle == *handle))
+        .or_else(|| {
+            entries.iter().max_by_key(|entry| entry.last_activated).map(|entry| entry.handle)
+        });
+    let mut sessions = Vec::new();
     for entry in entries {
-        let Some(workspace) = entry.workspace.upgrade() else { continue };
-        let session = workspace.read(cx).snapshot_session(cx);
-        if active_handle.is_some_and(|handle| handle == entry.handle) {
-            active_tab = tabs.len().saturating_add(session.active_tab);
-        }
-        tabs.extend(session.tabs);
+        let session = if current.as_ref().is_some_and(|(id, _)| *id == entry.runtime_window_id) {
+            current.take().expect("current window snapshot exists").1
+        } else {
+            let Some(workspace) = entry.workspace.upgrade() else { continue };
+            workspace.read(cx).snapshot_session(cx)
+        };
+        sessions.push((active_handle == Some(entry.handle), session));
     }
-    crate::session::Session::new(active_tab.min(tabs.len().saturating_sub(1)), tabs)
+    combine_sessions(sessions)
 }
 
 fn save_combined_session(cx: &mut App, clean: bool) {
-    let mut session = combined_session(cx);
-    let unchanged = cx
-        .global::<WindowRegistry>()
-        .last_saved_session
-        .as_ref()
-        .is_some_and(|previous| previous == &session);
-    if clean {
-        crate::session::save_final(&mut session);
-    } else if !unchanged {
-        crate::session::save(&session);
+    let session = combined_session(None, cx);
+    let reason = if clean { SaveReason::Quit } else { SaveReason::Checkpoint };
+    cx.global_mut::<WindowRegistry>().session_persistence.save(session, reason);
+}
+
+pub(super) fn save_current_window_session(
+    runtime_window_id: u64,
+    session: crate::session::Session,
+    reason: SaveReason,
+    cx: &mut App,
+) {
+    if !cx.global::<WindowRegistry>().entries.iter().any(|entry| {
+        entry.runtime_window_id == runtime_window_id && entry.role == WindowRole::Regular
+    }) {
+        return;
     }
-    cx.global_mut::<WindowRegistry>().last_saved_session = Some(session);
+    let session = combined_session(Some((runtime_window_id, session)), cx);
+    cx.global_mut::<WindowRegistry>().session_persistence.save(session, reason);
 }
 
 pub(crate) fn quit_all(cx: &mut App) {
@@ -1323,19 +1347,32 @@ fn unregister(runtime_window_id: u64, cx: &mut App) {
     }
 }
 
+pub(super) fn close_saved_workspace_window(
+    runtime_window_id: u64,
+    session: crate::session::Session,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    save_current_window_session(runtime_window_id, session, SaveReason::WindowClose, cx);
+    unregister(runtime_window_id, cx);
+    window.remove_window();
+}
+
 pub(crate) fn close_empty_workspace_window(
     runtime_window_id: u64,
     window: &mut Window,
     cx: &mut App,
 ) {
+    let regular = cx.global::<WindowRegistry>().entries.iter().any(|entry| {
+        entry.runtime_window_id == runtime_window_id && entry.role == WindowRole::Regular
+    });
     unregister(runtime_window_id, cx);
-    let has_regular_window =
-        cx.global::<WindowRegistry>().entries.iter().any(|entry| entry.role == WindowRole::Regular);
-    if !has_regular_window {
-        let mut empty = crate::session::Session::new(0, Vec::new());
-        crate::session::save_final(&mut empty);
-    } else {
-        save_combined_session(cx, false);
+    if regular {
+        let session = combined_session(None, cx);
+        let reason =
+            if session.is_some() { SaveReason::TabsClosed } else { SaveReason::WindowClose };
+        let session = session.unwrap_or_else(|| crate::session::Session::new(0, Vec::new()));
+        cx.global_mut::<WindowRegistry>().session_persistence.save(Some(session), reason);
     }
     window.remove_window();
 }
@@ -1442,10 +1479,6 @@ impl NebulaWorkspace {
             self.active = self.active.min(self.tabs.len() - 1);
         }
         let source_became_empty = self.tabs.is_empty();
-        if source_became_empty {
-            // 目标窗口接管了活体标签；源 workspace Drop 不得把空快照覆盖回去。
-            self.last_saved_session = None;
-        }
         Some(DetachedTerminalTab {
             tab,
             meta,
