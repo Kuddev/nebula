@@ -105,6 +105,8 @@ jobs:
           scripts.tests.test_git_attributes
           scripts.conformance.tests.test_harness
           scripts.conformance.tests.test_resize
+          scripts.conformance.tests.test_scrollback
+          scripts.conformance.tests.test_lifecycle
 
       - name: Compile Python helpers
         run: python3 -m compileall -q scripts/preview_release.py scripts/conformance
@@ -445,6 +447,11 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - name: Test native harness process ownership and completion markers
+        run: >-
+          python -m unittest
+          scripts.conformance.tests.test_lifecycle
+          scripts.conformance.tests.test_scrollback
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

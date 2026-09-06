@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 import fnmatch
 import glob
 import json
@@ -10,6 +12,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
@@ -20,6 +23,15 @@ PROTOCOL_NAME = "nebula.runtime"
 PROTOCOL_VERSION = 1
 MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 DEFAULT_STARTUP_TIMEOUT = 20.0
+
+# The Windows gate cannot start the app until its parent assigns the exact
+# process HANDLE to a job. -I -S disables user/site startup hooks in this gate.
+_WINDOWS_LAUNCH_GATE = (
+    "import subprocess, sys\n"
+    "if sys.stdin.buffer.read(1) != b'G':\n"
+    "    raise SystemExit(125)\n"
+    "raise SystemExit(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL))\n"
+)
 
 
 class ConformanceError(RuntimeError):
@@ -244,6 +256,173 @@ class RuntimeClient:
         return response
 
 
+class _WindowsJob:
+    """Own one harness launch and its descendants, including orphaned shells.
+
+    Killing only Nebula can leave ConPTY children holding the test directory.
+    Job membership is established before the gated app launch, inherited by
+    descendants, and retained after the parent exits. No machine-wide process
+    enumeration or process-name matching is used. The job kills its members if the
+    harness itself exits unexpectedly and Windows closes its handle.
+    """
+
+    def __init__(self) -> None:
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimits),
+                ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        class Accounting(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_int64),
+                ("TotalKernelTime", ctypes.c_int64),
+                ("ThisPeriodTotalUserTime", ctypes.c_int64),
+                ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
+
+        self._accounting = Accounting
+        self._api = ctypes.WinDLL("kernel32", use_last_error=True)
+        self._api.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+        self._api.CreateJobObjectW.restype = wintypes.HANDLE
+        self._api.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        )
+        self._api.SetInformationJobObject.restype = wintypes.BOOL
+        self._api.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        self._api.AssignProcessToJobObject.restype = wintypes.BOOL
+        self._api.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        self._api.TerminateJobObject.restype = wintypes.BOOL
+        self._api.QueryInformationJobObject.argtypes = (
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        self._api.QueryInformationJobObject.restype = wintypes.BOOL
+        self._api.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        self._api.OpenProcess.restype = wintypes.HANDLE
+        self._api.IsProcessInJob.argtypes = (
+            wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL),
+        )
+        self._api.IsProcessInJob.restype = wintypes.BOOL
+        self._api.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        self._api.WaitForSingleObject.restype = wintypes.DWORD
+        self._api.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self._api.CloseHandle.restype = wintypes.BOOL
+        self._process_handles: list[int] = []
+        self._handle = self._api.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+        if not self._api.SetInformationJobObject(
+            self._handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
+        ):
+            error = ctypes.WinError(ctypes.get_last_error())
+            self.close()
+            raise error
+
+    def assign(self, process: subprocess.Popen[bytes]) -> None:
+        # CPython retains the native process handle on Windows. Using that
+        # handle avoids opening a PID that could have been recycled.
+        if not self._api.AssignProcessToJobObject(self._handle, int(process._handle)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def terminate(self, timeout: float = 5.0) -> None:
+        deadline = time.monotonic() + timeout
+        self._capture_process_handles()
+        if not self._api.TerminateJobObject(self._handle, 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+        self._capture_process_handles()
+        while True:
+            accounting = self._accounting()
+            if not self._api.QueryInformationJobObject(
+                self._handle, 1, ctypes.byref(accounting), ctypes.sizeof(accounting), None
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if accounting.ActiveProcesses == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise ConformanceError(
+                    f"Windows launch job still has {accounting.ActiveProcesses} "
+                    f"processes after {timeout:.1f}s of cleanup"
+                )
+            time.sleep(0.01)
+        # ActiveProcesses can reach zero before final process teardown closes
+        # directory handles. Wait on the retained identities, not just that
+        # accounting value, including when the launch parent exited earlier.
+        for handle in self._process_handles:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            result = self._api.WaitForSingleObject(handle, remaining_ms)
+            if result == 0xFFFFFFFF:
+                raise ctypes.WinError(ctypes.get_last_error())
+            if result != 0:
+                raise ConformanceError(f"Windows job member did not exit within {timeout:.1f}s")
+
+    def _capture_process_handles(self) -> None:
+        capacity = 16
+        while True:
+            buffer = ctypes.create_string_buffer(8 + ctypes.sizeof(ctypes.c_size_t) * capacity)
+            if self._api.QueryInformationJobObject(
+                self._handle, 3, buffer, ctypes.sizeof(buffer), None
+            ):
+                count = wintypes.DWORD.from_buffer(buffer, 4).value
+                pids = (ctypes.c_size_t * count).from_buffer(buffer, 8)
+                break
+            error = ctypes.get_last_error()
+            if error != 234:  # ERROR_MORE_DATA: members grew beyond the buffer.
+                raise ctypes.WinError(error)
+            capacity = max(capacity * 2, wintypes.DWORD.from_buffer(buffer).value)
+        for pid in pids:
+            # These are only candidates from this job, never a machine-wide
+            # process tree. Verify membership after opening to reject PID reuse.
+            handle = self._api.OpenProcess(0x00101000, False, pid)
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == 87:  # The process exited before its handle was opened.
+                    continue
+                raise ctypes.WinError(error)
+            member = wintypes.BOOL()
+            if not self._api.IsProcessInJob(handle, self._handle, ctypes.byref(member)):
+                error = ctypes.WinError(ctypes.get_last_error())
+                self._api.CloseHandle(handle)
+                raise error
+            if member.value:
+                self._process_handles.append(handle)
+            elif not self._api.CloseHandle(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self) -> None:
+        if self._handle is not None:
+            if not self._api.CloseHandle(self._handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self._handle = None
+        while self._process_handles:
+            if not self._api.CloseHandle(self._process_handles[-1]):
+                raise ctypes.WinError(ctypes.get_last_error())
+            self._process_handles.pop()
+
+
 class ConformanceContext:
     def __init__(
         self,
@@ -262,6 +441,7 @@ class ConformanceContext:
         self.artifact_dir = artifact_dir.resolve()
         self.startup_timeout = startup_timeout
         self.process: subprocess.Popen[bytes] | None = None
+        self._windows_job: _WindowsJob | None = None
         self.client: RuntimeClient | None = None
         self.description: dict[str, Any] = {}
         self.startup_ms = 0
@@ -302,7 +482,10 @@ class ConformanceContext:
         )
 
     def start(self, *, explicit_working_directory: bool = True) -> None:
-        require(self.process is None, "Nebula is already running in this context")
+        require(
+            self.process is None and self._windows_job is None,
+            "Nebula is already running in this context",
+        )
         self._launch_number += 1
         log_path = self.artifact_dir / f"nebula-{self._launch_number}.log"
         self._log_handle = log_path.open("wb")
@@ -316,14 +499,7 @@ class ConformanceContext:
             command.extend(["--working-directory", os.fspath(self.work_dir)])
         started = time.monotonic()
         try:
-            self.process = subprocess.Popen(
-                command,
-                cwd=self.work_dir,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=self._log_handle,
-                stderr=subprocess.STDOUT,
-            )
+            self.process = self._spawn_process(command, env)
         except OSError as error:
             self._close_log()
             raise ConformanceError(f"could not launch {self.app.executable}: {error}") from error
@@ -333,8 +509,7 @@ class ConformanceContext:
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
                 code = self.process.returncode
-                self.process = None
-                self._close_log()
+                self.stop(force=True)
                 raise ConformanceError(f"Nebula exited during startup with code {code}")
             if self.port_file.is_file():
                 try:
@@ -365,21 +540,69 @@ class ConformanceContext:
         self.stop(force=True)
         raise ConformanceError(f"Nebula runtime did not become ready: {last_error}")
 
-    def stop(self, *, force: bool) -> None:
-        process = self.process
-        self.process = None
-        self.client = None
-        if process is not None and process.poll() is None:
-            if force:
-                process.kill()
-            else:
-                process.terminate()
+    def _spawn_process(self, command: list[str], env: dict[str, str]) -> subprocess.Popen[bytes]:
+        options = {
+            "cwd": self.work_dir,
+            "env": env,
+            "stdout": self._log_handle,
+            "stderr": subprocess.STDOUT,
+        }
+        if os.name != "nt":
+            return subprocess.Popen(command, stdin=subprocess.DEVNULL, **options)
+        job = _WindowsJob()
+        process = None
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-S", "-c", _WINDOWS_LAUNCH_GATE, *command],
+                stdin=subprocess.PIPE, **options,
+            )
+            job.assign(process)
+            assert process.stdin is not None
+            with process.stdin:
+                process.stdin.write(b"G")
+        except BaseException:
             try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-        self._close_log()
+                # Before assignment the gate has no child; after assignment
+                # the job owns anything it could have started.
+                if process is not None:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+                    if process.stdin is not None:
+                        process.stdin.close()
+                job.terminate()
+            finally:
+                job.close()
+            raise
+        self._windows_job = job
+        return process
+
+    def stop(self, *, force: bool, timeout: float = 5.0) -> None:
+        process = self.process
+        try:
+            if self._windows_job is not None:
+                deadline = time.monotonic() + timeout
+                self._windows_job.terminate(timeout)
+                if process is not None:
+                    process.wait(timeout=max(0, deadline - time.monotonic()))
+                self._windows_job.close()
+            elif process is not None and process.poll() is None:
+                if force:
+                    process.kill()
+                else:
+                    process.terminate()
+                try:
+                    process.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=timeout)
+        finally:
+            self._close_log()
+        # Preserve ownership if cleanup fails, so a caller can retry and the
+        # failure is not replaced by a silent temporary-directory exclusion.
+        self.process = None
+        self._windows_job = None
+        self.client = None
 
     def restart(self) -> int:
         self.stop(force=True)
@@ -608,20 +831,24 @@ class ConformanceContext:
 
     def scrollback_command(self, lines: int, marker: str) -> str:
         shell = self.shell
+        require(len(marker) >= 2, "completion marker must contain at least two characters")
+        # The command is echoed before its output arrives. Only execution may
+        # assemble the complete token that wait_for_line uses as completion.
+        completion = self.marker_command(marker[:-1], marker[-1])
         if shell in {"powershell", "pwsh"}:
-            return f"1..{lines} | ForEach-Object {{ 'NEBULA_SCROLL_' + $_ }}; '{marker}'"
+            return f"1..{lines} | ForEach-Object {{ 'NEBULA_SCROLL_' + $_ }}; {completion}"
         if shell == "cmd":
-            return f"for /L %i in (1,1,{lines}) do @echo NEBULA_SCROLL_%i & echo {marker}"
+            return f"(for /L %i in (1,1,{lines}) do @echo NEBULA_SCROLL_%i) & {completion}"
         if shell == "fish":
-            return f"for i in (seq 1 {lines}); echo NEBULA_SCROLL_$i; end; echo {marker}"
+            return f"for i in (seq 1 {lines}); echo NEBULA_SCROLL_$i; end; {completion}"
         if shell == "nu":
             return (
                 f"1..{lines} | each {{ |i| print $'NEBULA_SCROLL_($i)' }}; "
-                f"print '{marker}'"
+                f"{completion}"
             )
         return (
             f"i=1; while [ \"$i\" -le {lines} ]; do printf 'NEBULA_SCROLL_%s\\n' \"$i\"; "
-            f"i=$((i + 1)); done; printf '%s\\n' '{marker}'"
+            f"i=$((i + 1)); done; {completion}"
         )
 
     def ensure_single_tab(self) -> None:
@@ -659,6 +886,7 @@ class ConformanceContext:
         require(self.process is not None, "Nebula process is not running")
         process = self.process
         started = time.monotonic()
+        deadline = started + timeout
         try:
             self.api("window.close", {"window_id": self.window_id})
         except ApiFailure:
@@ -668,12 +896,10 @@ class ConformanceContext:
             # response is observed. The owned process exit is authoritative.
             pass
         try:
-            process.wait(timeout=timeout)
+            process.wait(timeout=max(0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as error:
             raise ConformanceError(f"window.close did not exit within {timeout:.1f}s") from error
-        self.process = None
-        self.client = None
-        self._close_log()
+        self.stop(force=True, timeout=max(0, deadline - time.monotonic()))
         if process.returncode != 0:
             raise ConformanceError(f"Nebula exited with code {process.returncode}")
         return round((time.monotonic() - started) * 1000)
