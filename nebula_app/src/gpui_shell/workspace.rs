@@ -428,19 +428,12 @@ type SplitBoundsStore = Rc<RefCell<HashMap<(usize, Vec<bool>), Bounds<Pixels>>>>
 type PaneBoundsStore = Rc<RefCell<HashMap<u64, Bounds<Pixels>>>>;
 
 fn decode_sidebar_logo(
-    bytes: &[u8],
-    tint: Option<([u8; 3], bool)>,
+    logo: crate::display::AiLogo,
+    dark: bool,
     target_size: u32,
 ) -> Option<Arc<RenderImage>> {
-    let mut rgba = image::load_from_memory(bytes).ok()?.into_rgba8();
-    if let Some((ink, preserve_luma)) = tint {
-        for pixel in rgba.chunks_exact_mut(4) {
-            let luma = if preserve_luma { u16::from(pixel[0]) } else { 255 };
-            pixel[0] = (u16::from(ink[0]) * luma / 255) as u8;
-            pixel[1] = (u16::from(ink[1]) * luma / 255) as u8;
-            pixel[2] = (u16::from(ink[2]) * luma / 255) as u8;
-        }
-    }
+    let mut rgba = image::load_from_memory(logo.png(dark)).ok()?.into_rgba8();
+    logo.tint_pixels(&mut rgba, if dark { [236, 239, 245] } else { [35, 40, 50] });
     // 直接复用旧壳的 Lanczos3 物理像素预缩放与 alpha 质量中心校正。
     // 先 tint 再缩放，避免 1024px 原图在 GPUI paint 阶段临时压到十几个
     // 逻辑像素时产生灰边、锯齿与非整数 DPI 采样。
@@ -464,41 +457,12 @@ fn sidebar_logo_images(
     use crate::display::AiLogo;
 
     let mut images = HashMap::new();
-    if let Some(image) =
-        decode_sidebar_logo(include_bytes!("../../../extra/logo/ai_claude.png"), None, target_size)
-    {
-        images.insert((AiLogo::Claude, true), image.clone());
-        images.insert((AiLogo::Claude, false), image);
-    }
-    for (logo, bytes, preserve_luma) in [
-        (AiLogo::OpenAi, include_bytes!("../../../extra/logo/ai_openai.png").as_slice(), false),
-        (AiLogo::OpenCode, include_bytes!("../../../extra/logo/ai_opencode.png").as_slice(), true),
-        (AiLogo::Pi, include_bytes!("../../../extra/logo/ai_pi.png").as_slice(), false),
-    ] {
-        if let Some(image) =
-            decode_sidebar_logo(bytes, Some(([236, 239, 245], preserve_luma)), target_size)
-        {
-            images.insert((logo, true), image);
+    for logo in AiLogo::ALL {
+        for dark in [false, true] {
+            if let Some(image) = decode_sidebar_logo(logo, dark, target_size) {
+                images.insert((logo, dark), image);
+            }
         }
-        if let Some(image) =
-            decode_sidebar_logo(bytes, Some(([35, 40, 50], preserve_luma)), target_size)
-        {
-            images.insert((logo, false), image);
-        }
-    }
-    if let Some(image) = decode_sidebar_logo(
-        include_bytes!("../../../extra/logo/ai_grok_light.png"),
-        None,
-        target_size,
-    ) {
-        images.insert((AiLogo::Grok, true), image);
-    }
-    if let Some(image) = decode_sidebar_logo(
-        include_bytes!("../../../extra/logo/ai_grok_dark.png"),
-        None,
-        target_size,
-    ) {
-        images.insert((AiLogo::Grok, false), image);
     }
     images
 }

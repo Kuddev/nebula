@@ -23,6 +23,13 @@
 # 停在等人表态的框上。per-agent 的 900/700 规则更精确时由它们取胜；这里
 # 只保证「装了新 CLI 但还没写 blocked 规则」时不至于把权限框当成工作中。
 [[rules]]
+id = "shared_binary_confirmation"
+state = "blocked"
+priority = 800
+region = "bottom_non_empty_lines(1)"
+line_regex = ['^.+\s*(?:\(\s*y(?:es)?\s*/\s*n(?:o)?\s*\)|\[\s*y(?:es)?\s*/\s*n(?:o)?\s*\])\s*[:?]?\s*$']
+
+[[rules]]
 id = "shared_awaiting_answer"
 state = "blocked"
 priority = 800

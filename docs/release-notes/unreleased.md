@@ -11,6 +11,7 @@ This file contains changes that are not part of a numbered release yet.
 - Added an answer reader for captured Claude Code and Codex responses, with Markdown, formulas, source-text mode, and local image previews.
 - Added UI language choices for Traditional Chinese, French, German, Spanish, Brazilian Portuguese, Italian, Russian, Japanese, and Korean alongside English and Simplified Chinese. Initial coverage includes navigation, common actions, appearance, and network controls; untranslated text falls back to English.
 - Added a settings search that opens the matching section and a confirmed Restore defaults action that backs up preferences while retaining saved hosts and other user data.
+- Added the Antigravity product icon to terminal tabs and the sidebar, including its common launcher aliases, while retaining its original colors in light and dark themes.
 
 ### Fixed
 - `Ctrl+C` copies and clears a terminal selection, and still sends an interrupt when no selection is present. Text inputs keep their own copy behavior.
@@ -18,6 +19,7 @@ This file contains changes that are not part of a numbered release yet.
 - Running tab indicators keep animating when another window has focus; hidden or minimized windows stop requesting animation frames.
 - File-name search discards results from an old root, updates after creates, renames and deletes, and handles canonical file-watcher paths without losing the visible directory root.
 - Multiline confirmation text is measured with wrapping so longer messages fit the shared confirmation dialog.
+- Improved Antigravity activity and permission detection so old spinner output and ordinary prose mentioning approval do not keep an idle session marked as running or waiting for permission.
 
 ### Improved
 - Made Titanium the default application icon and adjusted small-size proportions, prompt strokes, and transparent edges.
@@ -39,6 +41,7 @@ This file contains changes that are not part of a numbered release yet.
 - 为已捕获的 Claude Code 和 Codex 回答新增阅读视图，支持 Markdown、公式、原文模式和本地图片预览。
 - 在英语和简体中文之外，界面语言新增繁体中文、法语、德语、西班牙语、巴西葡萄牙语、意大利语、俄语、日语及韩语。初版覆盖导航、常用操作、外观与网络控件，未翻译文案回退英文。
 - 新增可跳转到匹配分区的设置搜索，以及需要确认的“恢复默认”操作；重置前备份偏好设置，并保留已保存主机等用户数据。
+- 终端标签与侧栏新增 Antigravity 产品图标，支持常见启动别名，并在浅色和深色主题中保留图标原色。
 
 ### 修复
 - 终端中 `Ctrl+C` 会复制并清除选区，没有选区时仍发送中断；文本输入框保留自身的复制行为。
@@ -46,6 +49,7 @@ This file contains changes that are not part of a numbered release yet.
 - 其他窗口获得焦点后，运行中的标签指示器继续播放动画；窗口隐藏或最小化时停止请求动画帧。
 - 文件名搜索丢弃旧目录的结果，在创建、重命名和删除后更新，并正确处理文件监听器返回的规范路径，保留用户看到的目录根。
 - 多行确认文案按换行后的尺寸测量，使较长消息能完整放入共享确认框。
+- 改进 Antigravity 的活动与权限提示识别，避免历史转圈输出或普通正文中提到审批时，把空闲会话误标为运行中或等待授权。
 
 ### 改进
 - 将钛银设为默认应用图标，并调整小尺寸比例、提示符笔画与透明边缘。
