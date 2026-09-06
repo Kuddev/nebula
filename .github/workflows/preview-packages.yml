@@ -104,6 +104,7 @@ jobs:
           scripts.tests.test_app_icons
           scripts.tests.test_git_attributes
           scripts.conformance.tests.test_harness
+          scripts.conformance.tests.test_resize
 
       - name: Compile Python helpers
         run: python3 -m compileall -q scripts/preview_release.py scripts/conformance
@@ -143,6 +144,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Test workspace natively
         run: cargo test --locked --workspace
@@ -187,6 +190,8 @@ jobs:
           tar -tzf "$archive" "$root/usr/share/applications/io.github.kuddev.nebula.preview.desktop"
 
       - name: Run AppImage conformance under X11
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
           xvfb-run -a -s "-screen 0 1600x1000x24" \
             python3 scripts/conformance/run.py \
@@ -195,6 +200,8 @@ jobs:
               --output dist/conformance/linux-appimage-report.json
 
       - name: Run AppImage conformance under Wayland
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
           runtime_directory="$RUNNER_TEMP/nebula-wayland-runtime"
           mkdir -p "$runtime_directory" dist/conformance
@@ -235,6 +242,8 @@ jobs:
               --output dist/conformance/linux-appimage-wayland-report.json
 
       - name: Install and run Debian package conformance under X11
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
           sudo apt-get install -y \
             "./dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.deb"
@@ -298,6 +307,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Test workspace natively
         run: cargo test --locked --workspace
@@ -371,6 +382,8 @@ jobs:
             --force "${signing_args[@]}"
 
       - name: Mount final DMG and run conformance
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
           dmg="dist/NebulaTerminal-v$ASSET_VERSION-macos-${{ matrix.architecture }}.dmg"
           mount_point="$RUNNER_TEMP/nebula-preview-${{ matrix.architecture }}"
@@ -436,6 +449,8 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Test workspace natively
         run: cargo test --locked --workspace
       - name: Test SSH confirmation and password dialogs
@@ -443,6 +458,8 @@ jobs:
       - name: Build GPUI comparison binary
         run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
       - name: Run Windows conformance
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: >-
           python scripts/conformance/run.py --app target/release/nebula.exe
           --platform windows-x86_64 --output dist/conformance/windows-report.json
