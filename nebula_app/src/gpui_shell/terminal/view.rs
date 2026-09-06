@@ -1928,7 +1928,22 @@ impl TerminalView {
         let mods = &ks.modifiers;
         let plain_mods = !mods.control && !mods.alt && !mods.platform;
         match ks.key.as_str() {
-            "enter" => self.commit_line(cx),
+            "enter" => {
+                // 与 keymap 的 Shift+Enter 分流一致；传统 VT 仍发送 CR 并提交。
+                let is_negotiated_multiline = mods.shift
+                    && !mods.control
+                    && !mods.alt
+                    && (mode.intersects(
+                        TermMode::DISAMBIGUATE_ESC_CODES
+                            | TermMode::REPORT_ALL_KEYS_AS_ESC
+                            | TermMode::REPORT_EVENT_TYPES,
+                    ) || (cfg!(windows)
+                        && mode.contains(TermMode::WIN32_INPUT_MODE)
+                        && !mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL)));
+                if !is_negotiated_multiline {
+                    self.commit_line(cx);
+                }
+            },
             "backspace" if mods.control && !mods.alt && !mods.platform => {
                 crate::display::nebula_input_delete_word(&mut self.suggest);
             },

@@ -165,8 +165,18 @@ fn virtual_key_of(key: &str) -> Option<u16> {
 /// Tab=0x09、Backspace=0x08）：OpenConsole 1.22 的 VT 翻译层会丢弃 uChar=0
 /// 的 VK_ESCAPE，于是读字节流的那类应用（Claude Code）收不到 Esc。修饰键与
 /// 功能键保持 0，与真实键盘一致。逐条同旧壳 `control_char_fallback`。
+///
+/// Shift+Enter 在支持的终端应用中语义为换行（uChar=0x0A / 10）。
+/// 普通 Enter 保持 0x0D（CR），让子进程如常执行回车提交。
 #[cfg(windows)]
 fn unicode_char_of(ks: &Keystroke) -> u16 {
+    if ks.key.as_str() == "enter" {
+        return if ks.modifiers.shift && !ks.modifiers.control && !ks.modifiers.alt {
+            b'\n' as u16
+        } else {
+            b'\r' as u16
+        };
+    }
     // 平台已经判出文本的（含 Ctrl 变体）以它为准，与 WM_CHAR 语义一致。
     // `key_char` 若是 NUL，当作没文本：真实键盘的 Esc 不会写出 U+0000。
     if let Some(text) = ks.key_char.as_deref() {
@@ -179,7 +189,6 @@ fn unicode_char_of(ks: &Keystroke) -> u16 {
     }
     match ks.key.as_str() {
         "escape" => 0x1b,
-        "enter" => b'\r' as u16,
         "tab" => b'\t' as u16,
         // 真实控制台的 Ctrl+Backspace 记录携带 Uc=DEL（0x7f，WM_CHAR 语义），
         // PSReadLine 的原生 Ctrl+Backspace=BackwardKillWord 绑定按此匹配。
@@ -287,6 +296,14 @@ pub fn encode(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
 
     match ks.key.as_str() {
         "enter" => {
+            // Kitty 模式下 Shift+Enter 编码为 CSI 13;2u，避免修饰丢失变成普通回车；
+            // 启用 REPORT_ALL_KEYS_AS_ESC 且无修饰时出 CSI 13u。
+            if kitty_keyboard_active(mode) && ks.modifiers.shift && !ks.modifiers.control && !ks.modifiers.alt {
+                return Some(b"\x1b[13;2u".to_vec());
+            }
+            if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) && modifier_param(ks) == 1 {
+                return Some(b"\x1b[13u".to_vec());
+            }
             return Some(if mods.alt { b"\x1b\r".to_vec() } else { b"\r".to_vec() });
         },
         "backspace" => {
@@ -510,5 +527,62 @@ mod tests {
         assert_eq!(encode(&keystroke("backspace"), &mode), Some(b"\x7f".to_vec()));
         let kitty = TermMode::DISAMBIGUATE_ESC_CODES;
         assert_eq!(encode(&keystroke("backspace"), &kitty), Some(b"\x7f".to_vec()));
+    }
+
+    /// 传统 VT 路径：Enter 提交（\r），Alt+Enter 带 ESC 前缀（\x1b\r）。
+    #[test]
+    fn enter_emits_cr_in_legacy_vt() {
+        let mode = TermMode::default();
+        let mut ks = keystroke("enter");
+        assert_eq!(encode(&ks, &mode), Some(b"\r".to_vec()));
+        ks.modifiers.shift = true;
+        assert_eq!(encode(&ks, &mode), Some(b"\r".to_vec()));
+        ks.modifiers.shift = false;
+        ks.modifiers.control = true;
+        assert_eq!(encode(&ks, &mode), Some(b"\r".to_vec()));
+
+        let mut alt_enter = keystroke("enter");
+        alt_enter.modifiers.alt = true;
+        assert_eq!(encode(&alt_enter, &mode), Some(b"\x1b\r".to_vec()));
+        alt_enter.modifiers.shift = true;
+        assert_eq!(encode(&alt_enter, &mode), Some(b"\x1b\r".to_vec()));
+    }
+
+    /// kitty 协议下，Shift+Enter 编码为 CSI 13;2u，避免修饰丢失变成普通回车；
+    /// 仅 REPORT_ALL_KEYS_AS_ESC 下无修饰 Enter 编码为 CSI 13u。
+    #[test]
+    fn enter_emits_kitty_u_sequence_when_modified() {
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let mut ks = keystroke("enter");
+        // DISAMBIGUATE_ESC_CODES 下裸回车不转义，回落为 \r
+        assert_eq!(encode(&ks, &mode), Some(b"\r".to_vec()));
+
+        ks.modifiers.shift = true;
+        assert_eq!(encode(&ks, &mode), Some(b"\x1b[13;2u".to_vec()));
+
+        // REPORT_ALL_KEYS_AS_ESC 下裸回车也是 CSI 13u
+        let all_keys_mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let bare = keystroke("enter");
+        assert_eq!(encode(&bare, &all_keys_mode), Some(b"\x1b[13u".to_vec()));
+    }
+
+    /// Win32 input mode 下，Shift+Enter 携带 uChar=10（\n），裸 Enter 携带 uChar=13（\r）。
+    #[cfg(windows)]
+    #[test]
+    fn enter_win32_record_carries_newline_for_shift() {
+        let mode = TermMode::WIN32_INPUT_MODE;
+        let parse_record = |bytes: Vec<u8>| -> (String, String) {
+            let text = String::from_utf8(bytes).unwrap();
+            let first_record = text.split('_').next().unwrap();
+            let fields: Vec<&str> = first_record.strip_prefix("\x1b[").unwrap().split(';').collect();
+            (fields[0].to_owned(), fields[2].to_owned())
+        };
+
+        let bare = keystroke("enter");
+        assert_eq!(parse_record(encode(&bare, &mode).unwrap()), ("13".to_string(), "13".to_string()));
+
+        let mut shift_enter = keystroke("enter");
+        shift_enter.modifiers.shift = true;
+        assert_eq!(parse_record(encode(&shift_enter, &mode).unwrap()), ("13".to_string(), "10".to_string()));
     }
 }
