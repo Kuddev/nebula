@@ -67,11 +67,14 @@ mod font_install;
 mod git_worktree;
 #[cfg(feature = "gpui-shell")]
 mod gpui_shell;
+mod i18n;
 #[cfg(feature = "legacy-shell")]
 mod input;
 #[cfg(all(feature = "gpui-shell", not(feature = "legacy-shell")))]
 #[path = "product_input.rs"]
 mod input;
+#[path = "i18n/outcomes.rs"]
+mod localized_status;
 mod logging;
 #[cfg(target_os = "macos")]
 mod macos;

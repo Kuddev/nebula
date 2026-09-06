@@ -433,12 +433,10 @@ impl NebulaWorkspace {
                                 window,
                                 cx,
                                 crate::display::ToastKind::Info,
-                                match language {
-                                    crate::display::UiLanguage::EnUs => {
-                                        format!("Sent to {target}")
-                                    },
-                                    _ => format!("已发送到 {target}"),
-                                },
+                                language.format(
+                                    crate::i18n::Message::CommonSentTo,
+                                    &[("target", &target)],
+                                ),
                             );
                             true
                         },

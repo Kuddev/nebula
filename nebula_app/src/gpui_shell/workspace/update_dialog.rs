@@ -20,15 +20,12 @@ pub(crate) fn show_update_notification(
 ) {
     let language = workspace_ui_language();
     let title: SharedString = language.pick("发现新版本", "Update available").into();
-    let message: SharedString = match language {
-        crate::display::UiLanguage::ZhCn => {
-            format!("Nebula v{} 已发布（当前 v{}）", result.latest, result.current)
-        },
-        crate::display::UiLanguage::EnUs => {
-            format!("Nebula v{} is available (current v{})", result.latest, result.current)
-        },
-    }
-    .into();
+    let message: SharedString = language
+        .format(
+            crate::i18n::Message::CommonUpdateNotice,
+            &[("latest", &result.latest), ("current", &result.current)],
+        )
+        .into();
     let action_label: SharedString = language.pick("查看更新", "View update").into();
     let action_result = result.clone();
     let notification = Notification::warning(message)
@@ -127,7 +124,7 @@ fn show_download_outcome_notification(
                             format_bytes(bytes)
                         )
                     },
-                    crate::display::UiLanguage::EnUs => format!(
+                    _ => format!(
                         "The v{} installer passed SHA-256 verification ({})",
                         downloaded_version,
                         format_bytes(bytes)

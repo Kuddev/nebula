@@ -27,8 +27,8 @@ use crate::gpui_shell::prelude::*;
 use crate::gpui_shell::settings_pane::{SettingsPane, SettingsPaneEvent, SshStatus};
 use crate::gpui_shell::widgets::NebulaButton;
 
-mod editor;
 mod advanced;
+mod editor;
 
 /// 删除撤销窗口时长，旧壳 Undo 条同值。
 const SSH_DELETE_UNDO_SECS: u64 = 8;
@@ -258,7 +258,8 @@ impl SettingsPane {
         let profile_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
         match crate::ssh_profiles::SshProfiles::load(&profile_path) {
             Ok(mut profiles) => {
-                let proxy_credential = profiles.for_destination(&host).connection.proxy_credential_target(&host);
+                let proxy_credential =
+                    profiles.for_destination(&host).connection.proxy_credential_target(&host);
                 profiles.remove(&host);
                 if let Err(error) = profiles.save(&profile_path) {
                     cleanup_errors.push(format!("Profile: {error}"));
@@ -338,7 +339,10 @@ impl SettingsPane {
         let mut editor = SshEditorState::new(self.ssh_editor_seq, destination);
         editor.username_suggestions = profiles.usernames();
         let labels = profiles.labels();
-        editor.jump_choices = self.ssh_hosts.merged().into_iter()
+        editor.jump_choices = self
+            .ssh_hosts
+            .merged()
+            .into_iter()
             .filter(|host| editor.original_destination.as_deref() != Some(host))
             .map(|host| {
                 let label = labels.get(&host).cloned().unwrap_or_else(|| host.clone());
@@ -358,17 +362,24 @@ impl SettingsPane {
             editor.original_connection = profile.connection.clone();
         }
         let connection = &editor.connection;
-        self.ssh_proxy_host_input.update(cx, |input, cx| input.set_value(connection.proxy_host.clone(), window, cx));
+        self.ssh_proxy_host_input
+            .update(cx, |input, cx| input.set_value(connection.proxy_host.clone(), window, cx));
         self.ssh_proxy_port_input.update(cx, |input, cx| {
-            input.set_value(connection.proxy_port.map(|port| port.to_string()).unwrap_or_default(), window, cx);
+            input.set_value(
+                connection.proxy_port.map(|port| port.to_string()).unwrap_or_default(),
+                window,
+                cx,
+            );
             input.set_placeholder(connection.effective_proxy_port().to_string(), window, cx);
         });
-        self.ssh_proxy_username_input.update(cx, |input, cx| input.set_value(connection.proxy_username.clone(), window, cx));
+        self.ssh_proxy_username_input
+            .update(cx, |input, cx| input.set_value(connection.proxy_username.clone(), window, cx));
         self.ssh_proxy_password_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
             input.set_masked(true, window, cx);
         });
-        self.ssh_jump_host_input.update(cx, |input, cx| input.set_value(connection.jump_host.clone(), window, cx));
+        self.ssh_jump_host_input
+            .update(cx, |input, cx| input.set_value(connection.jump_host.clone(), window, cx));
         let label = profile.and_then(|profile| profile.label).unwrap_or_default();
         self.ssh_username_input.update(cx, |input, cx| input.set_value(username, window, cx));
         self.ssh_destination_input.update(cx, |input, cx| input.set_value(address, window, cx));
@@ -378,11 +389,15 @@ impl SettingsPane {
         self.ssh_password_input.update(cx, |input, cx| {
             input.set_value("", window, cx);
             let language = crate::gpui_shell::config::ui_language(cx);
-            input.set_placeholder(if adding {
-                language.pick("留空则连接时询问", "Leave empty to ask when connecting")
-            } else {
-                language.pick("留空则保留原有凭据", "Leave empty to keep existing credentials")
-            }, window, cx);
+            input.set_placeholder(
+                if adding {
+                    language.pick("留空则连接时询问", "Leave empty to ask when connecting")
+                } else {
+                    language.pick("留空则保留原有凭据", "Leave empty to keep existing credentials")
+                },
+                window,
+                cx,
+            );
         });
         // 图标选择器每次开编辑器都从收起、无搜索词开始：上一台主机的搜索词
         // 留在框里，下一台打开时列表看着像被莫名筛过。
@@ -510,14 +525,15 @@ impl SettingsPane {
                 return;
             },
         };
-        let (proxy_password, password) = match self.ssh_test_passwords(&destination, &connection, cx) {
-            Ok(passwords) => passwords,
-            Err(error) => {
-                self.ssh_status = Some(SshStatus::Error(error.to_string()));
-                cx.notify();
-                return;
-            },
-        };
+        let (proxy_password, password) =
+            match self.ssh_test_passwords(&destination, &connection, cx) {
+                Ok(passwords) => passwords,
+                Err(error) => {
+                    self.ssh_status = Some(SshStatus::Error(error.to_string()));
+                    cx.notify();
+                    return;
+                },
+            };
         let Some(editor) = self.ssh_editor.as_mut() else { return };
         if editor.testing() {
             return;
@@ -671,8 +687,12 @@ impl SettingsPane {
             cx.notify();
             return;
         }
-        let mut password = zeroize::Zeroizing::new(self.ssh_password_input.read(cx).value().to_string());
-        if password.is_empty() && editor.save_password && crate::display::auth_sections(editor.auth).0 {
+        let mut password =
+            zeroize::Zeroizing::new(self.ssh_password_input.read(cx).value().to_string());
+        if password.is_empty()
+            && editor.save_password
+            && crate::display::auth_sections(editor.auth).0
+        {
             if let Some(original) = original.as_deref().filter(|old| *old != destination) {
                 match crate::ssh_credentials::load_stored_password(original) {
                     Ok(Some(secret)) => {
@@ -680,7 +700,8 @@ impl SettingsPane {
                         match std::str::from_utf8(&secret) {
                             Ok(secret) => *password = secret.to_owned(),
                             Err(error) => {
-                                self.ssh_status = Some(SshStatus::CredentialSaveFailed(error.to_string()));
+                                self.ssh_status =
+                                    Some(SshStatus::CredentialSaveFailed(error.to_string()));
                                 self.ssh_editor = Some(editor);
                                 cx.notify();
                                 return;

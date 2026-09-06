@@ -51,8 +51,8 @@
 
 pub mod caret;
 mod color_math;
-pub mod guardrails;
 pub(crate) mod geometry;
+pub mod guardrails;
 pub mod icons;
 pub mod keycap;
 mod keycap_model;

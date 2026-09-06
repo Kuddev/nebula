@@ -10,8 +10,8 @@
 //! 1. **层次是正交维度的乘积，不是字号堆叠。** 字号只有两档（正文 / 说明），
 //!    层级交给字重（600/500/400）和位置（标题出线）。把标题一放大就会出现三
 //!    套字号，那是另一种病。
-//! 2. **留白表达归属，不表达距离。** 2 / 16 / 24 三级：2px 说"这两行是同一
-//!    件事"，16px 说"这是两件事"，24px 说"这是两组事"。均匀间距无论调多大都
+//! 2. **留白表达归属，不表达距离。** 4 / 24 / 32 三级：4px 说"这两行是同一
+//!    件事"，24px 说"这是两件事"，32px 说"这是两组事"。均匀间距无论调多大都
 //!    只会得到一条稀疏的平线。
 //! 3. **说明写后果，不写定义。**「关掉后关窗即杀掉所有 shell」比「控制会话
 //!    保留行为」有用——用户在这一行要做的判断是"关掉会怎样"。
@@ -25,15 +25,15 @@ use super::*;
 /// 说明文字相对正文的字号比。全页只有两档字号：正文走用户基准字号，说明小
 /// 一档。
 pub(super) const DESC_SCALE: f32 = 0.82;
-/// label ↔ 说明。这 2px 在说"这两行是同一件事"。
-const LABEL_DESC_GAP: f32 = 2.0;
+/// label ↔ 说明。这 4px 在说"这两行是同一件事"。
+const LABEL_DESC_GAP: f32 = 4.0;
 /// 行内上下留白，行与行之间因此是它的两倍。用 padding 而不是行间 gap，左侧
 /// 轨道才连得上——断成一截一截的话，"哪几段亮着"根本读不出来。
-const ROW_PAD_Y: f32 = 8.0;
+const ROW_PAD_Y: f32 = 12.0;
 /// 紧凑密度下的同一个值（「界面外观」里的密度开关对设置页真实生效）。
-const ROW_PAD_Y_COMPACT: f32 = 5.0;
+const ROW_PAD_Y_COMPACT: f32 = 8.0;
 /// 组与组。
-pub(super) const GROUP_GAP: f32 = 24.0;
+pub(super) const GROUP_GAP: f32 = 32.0;
 /// 轨道宽度。
 const RAIL_W: f32 = 2.0;
 /// 内容相对轨道的缩进。标题左对齐轨道本身、行内容缩进这么多——标题是命名者
@@ -79,7 +79,7 @@ impl SettingsPane {
         // 不设宽度则走 flex 交叉轴 stretch：布局算法直接拉伸，不依赖父宽解析。
         v_flex().w_full().child(
             div()
-                .pb(px(5.0))
+                .pb(px(10.0))
                 .text_size(px(base_px * DESC_SCALE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(cx.theme().muted_foreground)
@@ -102,11 +102,11 @@ impl SettingsPane {
     pub(crate) fn row(
         &self,
         label: &'static str,
-        desc: &'static str,
+        desc: impl Into<SettingHelp>,
         control: impl IntoElement,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        self.row_shell(label, desc, None, false, RowLayout::Standard, control, cx)
+        self.row_shell(label, desc.into(), None, false, RowLayout::Standard, control, cx)
     }
 
     /// 带撤销的设置行：该项被覆盖过时，左侧轨道这一段亮起来，行内出现 ↶。
@@ -117,7 +117,7 @@ impl SettingsPane {
     pub(crate) fn row_with_reset(
         &self,
         label: &'static str,
-        desc: &'static str,
+        desc: impl Into<SettingHelp>,
         dirty: bool,
         on_reset: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         control: impl IntoElement,
@@ -147,7 +147,7 @@ impl SettingsPane {
                 .child(Icon::new(IconName::Undo2).xsmall())
                 .into_any_element()
         });
-        self.row_shell(label, desc, reset, dirty, RowLayout::Standard, control, cx)
+        self.row_shell(label, desc.into(), reset, dirty, RowLayout::Standard, control, cx)
     }
 
     /// 行 hover 组名。↶ 要跟着**整行**的 hover 显形，而不是自己被指到才现
@@ -200,7 +200,7 @@ impl SettingsPane {
     fn row_shell(
         &self,
         label: &'static str,
-        desc: &'static str,
+        desc: SettingHelp,
         reset: Option<gpui::AnyElement>,
         dirty: bool,
         layout: RowLayout,
@@ -209,6 +209,7 @@ impl SettingsPane {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let base_px = self.font_size_px(cx);
+        let expanded = self.expanded_setting_help.contains(label);
         let pad_y = if self.runtime.density == nebula_settings::DensityName::Compact {
             ROW_PAD_Y_COMPACT
         } else {
@@ -227,16 +228,51 @@ impl SettingsPane {
                             .text_color(theme.foreground)
                             .child(label),
                     )
+                    .when(desc.details.is_some(), |heading| {
+                        let language = crate::gpui_shell::config::ui_language(cx);
+                        let action = if expanded {
+                            language.pick("收起说明", "Hide details")
+                        } else {
+                            language.pick("详细说明", "More details")
+                        };
+                        heading.child(
+                            Button::new(SharedString::from(format!("settings-help-{label}")))
+                                .icon(IconName::Info)
+                                .ghost()
+                                .size(px(22.0))
+                                .text_color(theme.muted_foreground)
+                                .accessibility_id(SharedString::from(format!(
+                                    "settings-help-{label}"
+                                )))
+                                .toggled(expanded)
+                                .tooltip(format!("{label}: {action}"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if !this.expanded_setting_help.insert(label) {
+                                        this.expanded_setting_help.remove(label);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                    })
                     .children(reset),
             )
-            .when(!desc.is_empty(), |text| {
+            .when(!desc.summary.is_empty(), |text| {
                 text.child(
                     div()
                         .mt(px(LABEL_DESC_GAP))
                         .text_size(px(base_px * DESC_SCALE))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(theme.muted_foreground)
-                        .child(Self::desc_text(desc, cx)),
+                        .child(Self::desc_text(desc.summary, cx)),
+                )
+            })
+            .when_some(desc.details.filter(|_| expanded), |text, details| {
+                text.child(
+                    div()
+                        .mt(px(8.0))
+                        .text_size(px(base_px * DESC_SCALE))
+                        .text_color(theme.muted_foreground)
+                        .child(Self::desc_text(details, cx)),
                 )
             });
         let control = control.into_any_element();

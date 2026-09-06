@@ -769,11 +769,8 @@ async fn authenticated_route<H: SshEventHost>(
     unattended: bool,
 ) -> Result<AcquiredSession, SessionError> {
     let key = route.pool_key();
-    let existing = if unattended {
-        None
-    } else {
-        connection_pool().lock().await.get(&key).cloned()
-    };
+    let existing =
+        if unattended { None } else { connection_pool().lock().await.get(&key).cloned() };
     if let Some(existing) = existing {
         if !existing.lock().await.is_closed() {
             info!("复用已认证 SSH 连接: {key}");
@@ -868,13 +865,10 @@ async fn open_transport(
         RouteTransport::Jump(jump) => {
             let spec = &jump.destination.original;
             info!("经跳板 {spec} 连接 {}:{}", destination.host, destination.port);
-            let acquired = Box::pin(authenticated_route(
-                jump,
-                None::<&NoopSshEventHost>,
-                unattended,
-            ))
-            .await
-            .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
+            let acquired =
+                Box::pin(authenticated_route(jump, None::<&NoopSshEventHost>, unattended))
+                    .await
+                    .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
             let channel = {
                 let session = acquired.session.lock().await;
                 session
@@ -905,8 +899,7 @@ async fn open_transport(
             client::connect_stream(config, stream, handler).await?
         },
         RouteTransport::Direct => {
-            client::connect(config, (destination.host.as_str(), destination.port), handler)
-                .await?
+            client::connect(config, (destination.host.as_str(), destination.port), handler).await?
         },
     };
     Ok(OpenedTransport { session, jump_sessions })
@@ -950,7 +943,9 @@ async fn authenticate(
                     reusable_password =
                         crate::ssh_credentials::load_stored_password(&destination.original)
                             .unwrap_or_else(|error| {
-                                warn!("Could not read saved SSH password; prompting instead: {error}");
+                                warn!(
+                                    "Could not read saved SSH password; prompting instead: {error}"
+                                );
                                 None
                             });
                     loaded_stored_password = true;
@@ -1177,9 +1172,7 @@ async fn run_test(request: SshTestRequest) -> SshTestResult {
     let outcome = tokio::time::timeout(TEST_TIMEOUT, async {
         let resolved = tokio::task::spawn_blocking({
             let raw = raw.clone();
-            move || {
-                SshDestination::resolve(&raw)
-            }
+            move || SshDestination::resolve(&raw)
         })
         .await
         .map_err(|err| -> SessionError {
@@ -1193,13 +1186,9 @@ async fn run_test(request: SshTestRequest) -> SshTestResult {
             icon: None,
             connection: request.connection.clone(),
         };
-        let route = resolve_connection_route(
-            &resolved,
-            &profile,
-            0,
-            request.proxy_password.clone(),
-        )
-        .await?;
+        let route =
+            resolve_connection_route(&resolved, &profile, 0, request.proxy_password.clone())
+                .await?;
         test_connect(&route, &request).await
     })
     .await;
@@ -1452,15 +1441,15 @@ async fn proxy_test_stream(
             let route = resolve_connection_route(&jump_destination, &jump_profile, 1, None)
                 .await
                 .map_err(|error| ProxyTestFailure::JumpConnect {
+                target: spec.clone(),
+                error: error.to_string(),
+            })?;
+            let jump = authenticated_route(&route, None::<&NoopSshEventHost>, true).await.map_err(
+                |error| ProxyTestFailure::JumpConnect {
                     target: spec.clone(),
                     error: error.to_string(),
-                })?;
-            let jump = authenticated_route(&route, None::<&NoopSshEventHost>, true)
-                .await
-                .map_err(|error| ProxyTestFailure::JumpConnect {
-                    target: spec.clone(),
-                    error: error.to_string(),
-                })?;
+                },
+            )?;
             let channel = {
                 let session = jump.session.lock().await;
                 session
@@ -1490,10 +1479,7 @@ async fn proxy_test_stream(
     }
 }
 
-async fn test_connect(
-    route: &ResolvedRoute,
-    request: &SshTestRequest,
-) -> Result<(), SessionError> {
+async fn test_connect(route: &ResolvedRoute, request: &SshTestRequest) -> Result<(), SessionError> {
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
         keepalive_interval: None,
@@ -1685,7 +1671,8 @@ async fn try_private_key(
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(|passphrase| russh::keys::load_secret_key(path, Some(passphrase)).ok());
         if key.is_none() && stored.is_some() {
-            if let Err(error) = crate::ssh_credentials::forget_private_key_passphrase(&private_key) {
+            if let Err(error) = crate::ssh_credentials::forget_private_key_passphrase(&private_key)
+            {
                 warn!("Could not remove rejected SSH key passphrase: {error}");
             }
         }
@@ -1809,8 +1796,10 @@ async fn prompt_secret(
     if crate::ssh_prompt::available() {
         let _initial = zeroize::Zeroizing::new(initial.unwrap_or_default());
         return crate::ssh_prompt::secret(
-            destination, allow_save && crate::platform::credentials::can_store(),
-        ).await;
+            destination,
+            allow_save && crate::platform::credentials::can_store(),
+        )
+        .await;
     }
     tokio::task::spawn_blocking(move || {
         let initial = zeroize::Zeroizing::new(initial.unwrap_or_default());
@@ -1854,8 +1843,12 @@ fn render_error<H: SshEventHost>(
 async fn confirm_new_host(host: &str, port: u16, key: &ssh_key::PublicKey) -> bool {
     if crate::ssh_prompt::available() {
         return crate::ssh_prompt::confirm_host(
-            host, port, key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
-        ).await.unwrap_or_else(|error| {
+            host,
+            port,
+            key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+        )
+        .await
+        .unwrap_or_else(|error| {
             warn!("SSH host confirmation failed: {error}");
             false
         });

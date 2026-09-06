@@ -702,11 +702,15 @@ impl TerminalView {
         // 进程就是主 agent（子代理必须由它 spawn，不可能先到）。
         let from_primary_agent = self.claim_primary_agent(event);
         if from_primary_agent && self.ssh_destination.is_none() && self.exited.is_none() {
-            if self.answers.observe(event, self.pane_id) && let Some(reader) = &self.answer_reader {
+            if self.answers.observe(event, self.pane_id)
+                && let Some(reader) = &self.answer_reader
+            {
                 reader.update(cx, |reader, cx| reader.answer_arrived(cx));
             }
         }
-        if event.kind == AiHookKind::NeedsAttention && let Some(reader) = &self.answer_reader {
+        if event.kind == AiHookKind::NeedsAttention
+            && let Some(reader) = &self.answer_reader
+        {
             reader.update(cx, |reader, cx| reader.needs_attention(cx));
         }
         if from_primary_agent

@@ -18,8 +18,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
     ("nebula_app/src/display/settings.rs", 8650),
     // 2026-08-31 下调（5150 → 4980）：VCS 抽屉页搬到 workspace/vcs_panel.rs。
     ("nebula_app/src/gpui_shell/workspace.rs", 4880),
-    // 2026-08-17 下调（3600 → 3550）：网络区拆到 network_settings.rs。
-    ("nebula_app/src/gpui_shell/settings_pane.rs", 3120),
     ("nebula_app/src/display/command_palette.rs", 3980),
     ("nebula_app/src/window_context.rs", 3750),
     ("nebula_app/src/event.rs", 3620),

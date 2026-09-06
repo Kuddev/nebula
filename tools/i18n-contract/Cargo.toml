@@ -1,0 +1,31 @@
+[package]
+name = "pebrel-i18n-contract"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+path = "../../nebula_app/tests/i18n_contract.rs"
+
+[dependencies]
+nebula-settings = { path = "../../nebula_settings" }
+serde = "1"
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Globalization"] }
+
+[build-dependencies]
+nebula-settings = { path = "../../nebula_settings" }
+serde = "1"
+serde_json = "1"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+debug = 0
+incremental = false

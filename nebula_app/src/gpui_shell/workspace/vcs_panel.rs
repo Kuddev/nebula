@@ -177,11 +177,7 @@ impl NebulaWorkspace {
                                         ),
                                     )
                                     .child(
-                                        div()
-                                            .truncate()
-                                            .text_xs()
-                                            .text_color(muted)
-                                            .child(meta),
+                                        div().truncate().text_xs().text_color(muted).child(meta),
                                     ),
                             )
                             .into_any_element(),
@@ -1172,11 +1168,7 @@ fn git_graph_rows(commits: &[crate::display::side_panel::GitCommit]) -> Vec<GitG
                 occupied.extend(parent_lanes.iter().cloned());
                 allocate_git_lane_color(&occupied, &mut next_color)
             };
-            parent_lanes.push(GitActiveLane {
-                id: next_lane_id,
-                target: parent.clone(),
-                color,
-            });
+            parent_lanes.push(GitActiveLane { id: next_lane_id, target: parent.clone(), color });
             next_lane_id = next_lane_id.wrapping_add(1);
         }
         let parent_count = parent_lanes.len();

@@ -76,7 +76,6 @@ pub(crate) mod context_menu;
 mod context_menu_model;
 mod document_model;
 mod file_operations;
-mod i18n;
 pub mod markdown_view;
 mod message_queue_entry;
 mod network_proxy_model;
@@ -101,6 +100,7 @@ pub(crate) fn quick_terminal_hotkey_from_settings(config: &UiConfig) -> String {
     settings::nebula_settings_load(config).quick_terminal_hotkey
 }
 
+pub use crate::i18n::{LanguagePreference, UiLanguage};
 pub use background_color_model::BgPickerPart;
 pub(crate) use background_color_model::{BACKGROUND_SWATCHES, hsv_to_rgb, rgb_to_hsv};
 pub(crate) use chrome::chrome_settings_button_rect;
@@ -112,7 +112,6 @@ pub(crate) use command_completion::{
 };
 pub use context_menu_model::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 pub(crate) use file_operations::send_to_recycle_bin;
-pub use i18n::{LanguagePreference, UiLanguage};
 pub(crate) use input_state::{
     nebula_clear_line, nebula_input_backspace, nebula_input_char, nebula_input_delete_word,
     nebula_input_text, nebula_shell_prompt_restored_from_raw_grid,

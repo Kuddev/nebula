@@ -168,8 +168,7 @@ pub(super) const BACKGROUND_ALIGNMENT_OPTIONS: [BackgroundImageAlignment; 9] = [
     BackgroundImageAlignment::BottomRight,
 ];
 
-pub(super) const LANGUAGE_OPTIONS: [LanguagePreference; 3] =
-    [LanguagePreference::System, LanguagePreference::ZhCn, LanguagePreference::EnUs];
+pub(super) const LANGUAGE_OPTIONS: &[LanguagePreference] = LanguagePreference::ALL;
 
 pub(super) const ACCEPT_OPTIONS: [AcceptKey; 3] =
     [AcceptKey::Both, AcceptKey::Tab, AcceptKey::Right];
@@ -532,8 +531,7 @@ fn backup_remote_input_display(
 fn language_label(preference: LanguagePreference, language: UiLanguage) -> &'static str {
     match preference {
         LanguagePreference::System => language.pick("跟随系统", "Follow system"),
-        LanguagePreference::ZhCn => "简体中文",
-        LanguagePreference::EnUs => "English",
+        _ => preference.shared().native_name(),
     }
 }
 
@@ -7973,12 +7971,12 @@ pub(super) fn draw_text(
 mod tests {
     use super::{
         CELL_WIDTH_MODE_OPTIONS, CellWidthMode, KeymapPaneState, NEW_TAB_POSITION_OPTIONS,
-        NebulaSettingsSection, NewTabPosition, ProxyChoice, ProxyPaneState,
-        SHOW_BACKUP_SETTINGS, SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W, SettingsHit,
-        TabRevealMotion, UiLanguage, advanced_content_end, background_color_popup,
-        cell_width_mode_label, font_popup_row_count, font_popup_slot, new_tab_position_label,
-        opacity_from_pointer, proxy_section_title_y, row_action_rect, settings_geometry,
-        settings_hit, ssh_proxy_manual_controls, ssh_proxy_mode_control, ssh_proxy_test_button,
+        NebulaSettingsSection, NewTabPosition, ProxyChoice, ProxyPaneState, SHOW_BACKUP_SETTINGS,
+        SHOW_WEBDAV_SYNC_SETTINGS, STANDARD_ROW_ACTION_W, SettingsHit, TabRevealMotion, UiLanguage,
+        advanced_content_end, background_color_popup, cell_width_mode_label, font_popup_row_count,
+        font_popup_slot, new_tab_position_label, opacity_from_pointer, proxy_section_title_y,
+        row_action_rect, settings_geometry, settings_hit, ssh_proxy_manual_controls,
+        ssh_proxy_mode_control, ssh_proxy_test_button,
     };
     use crate::display::SizeInfo;
     use crate::display::ui::tokens::Density;

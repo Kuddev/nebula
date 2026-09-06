@@ -77,42 +77,19 @@ pub(super) struct AppearanceColors {
 impl AppearanceColors {
     pub(super) fn current(cx: &App) -> Self {
         let light = crate::gpui_shell::theme::chrome_theme_resolved(cx).palette().is_light;
-        let colors = if light {
-            [
-                0xffffff, 0xf6f7f8, 0xe5e9ed, 0x2c3440, 0x697586, 0x7e8998, 0xe9ecf0, 0xd9dfe6,
-                0x35414f, 0xffffff, 0x1d2733,
-            ]
-        } else {
-            [
-                0x282d36, 0x303640, 0x3f4957, 0xe3e8ef, 0xafb9c7, 0x99a5b5, 0x3a414d, 0x4b5564,
-                0xd8e1ed, 0x25303f, 0x080c14,
-            ]
-        };
-        let [
-            surface,
-            subtle,
-            selected,
-            ink,
-            secondary,
-            muted,
-            line,
-            control,
-            primary,
-            on_primary,
-            scrim,
-        ] = colors.map(|color| Hsla::from(gpui::rgb(color)));
+        let theme = cx.theme();
         Self {
-            surface,
-            subtle,
-            selected,
-            ink,
-            secondary,
-            muted,
-            line,
-            control,
-            primary,
-            on_primary,
-            scrim: scrim.opacity(if light { 0.30 } else { 0.42 }),
+            surface: crate::gpui_shell::theme::settings_panel_bg(cx),
+            subtle: crate::gpui_shell::theme::settings_hover_bg(cx, false),
+            selected: theme.list_active,
+            ink: theme.foreground,
+            secondary: theme.muted_foreground,
+            muted: crate::gpui_shell::theme::faint_ink(cx),
+            line: crate::gpui_shell::theme::settings_hairline(cx),
+            control: theme.border,
+            primary: theme.primary,
+            on_primary: theme.primary_foreground,
+            scrim: Hsla::from(gpui::rgb(0x000000)).opacity(if light { 0.30 } else { 0.42 }),
         }
     }
 }

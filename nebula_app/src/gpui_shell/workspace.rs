@@ -819,12 +819,8 @@ fn reveal_in_file_manager(path: &Path) {
 }
 
 fn workspace_ui_language() -> crate::display::UiLanguage {
-    match nebula_settings::RuntimeSettings::load().language {
-        nebula_settings::LanguagePref::System => crate::display::LanguagePreference::System,
-        nebula_settings::LanguagePref::ZhCn => crate::display::LanguagePreference::ZhCn,
-        nebula_settings::LanguagePref::EnUs => crate::display::LanguagePreference::EnUs,
-    }
-    .resolved()
+    crate::display::LanguagePreference::from(nebula_settings::RuntimeSettings::load().language)
+        .resolved()
 }
 
 fn new_tab_insert_index(

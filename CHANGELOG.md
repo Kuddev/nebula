@@ -13,6 +13,8 @@ Every release entry is provided in English and Simplified Chinese.
 - Added an opt-in terminal network proxy setting. On Windows, new local sessions inherit the system HTTP/HTTPS proxy when enabled; existing sessions keep their environment.
 - Added per-host SSH proxy and jump-host options, with separate proxy credentials and a connection-route preview.
 - Added an answer reader for captured Claude Code and Codex responses, with Markdown, formulas, source-text mode, and local image previews.
+- Added UI language choices for Traditional Chinese, French, German, Spanish, Brazilian Portuguese, Italian, Russian, Japanese, and Korean alongside English and Simplified Chinese. Initial coverage includes navigation, common actions, appearance, and network controls; untranslated text falls back to English.
+- Added a settings search that opens the matching section and a confirmed Restore defaults action that backs up preferences while retaining saved hosts and other user data.
 
 #### Fixed
 - `Ctrl+C` copies and clears a terminal selection, and still sends an interrupt when no selection is present. Text inputs keep their own copy behavior.
@@ -29,6 +31,8 @@ Every release entry is provided in English and Simplified Chinese.
 - Added native platform adapters and preview packaging instructions for Linux and macOS. Native build, test and package validation remains a separate requirement before publishing those previews.
 - Updated the public project and installation guides to use Pebrel consistently, while retaining the existing repository, command, configuration, and download identifiers.
 - Added contribution, architecture, and translation guides with explicit compatibility and review requirements. GitHub branch protection still requires separate server-side setup and verification.
+- Made the settings navigation more compact, kept Application first, labeled terminal options more clearly, and added matching navigation icons. Appearance settings now show font, cursor, interface, and background controls in groups with expandable help.
+- Reduced the intensity of hover and selected backgrounds in light themes.
 
 ### 简体中文
 
@@ -37,6 +41,8 @@ Every release entry is provided in English and Simplified Chinese.
 - 新增默认关闭的终端网络代理设置。Windows 下启用后，新建本地会话继承系统 HTTP/HTTPS 代理；现有会话保留原有环境。
 - SSH 主机新增独立的代理与跳板配置，支持单独保存代理凭据并预览连接路线。
 - 为已捕获的 Claude Code 和 Codex 回答新增阅读视图，支持 Markdown、公式、原文模式和本地图片预览。
+- 在英语和简体中文之外，界面语言新增繁体中文、法语、德语、西班牙语、巴西葡萄牙语、意大利语、俄语、日语及韩语。初版覆盖导航、常用操作、外观与网络控件，未翻译文案回退英文。
+- 新增可跳转到匹配分区的设置搜索，以及需要确认的“恢复默认”操作；重置前备份偏好设置，并保留已保存主机等用户数据。
 
 #### 修复
 - 终端中 `Ctrl+C` 会复制并清除选区，没有选区时仍发送中断；文本输入框保留自身的复制行为。
@@ -53,6 +59,8 @@ Every release entry is provided in English and Simplified Chinese.
 - 新增 Linux 和 macOS 原生平台适配及预览打包说明；发布这些预览前仍需单独完成原生构建、测试和打包验证。
 - 公开项目说明与安装指南统一采用 Pebrel 名称，同时保留现有仓库、命令、配置与下载标识。
 - 新增贡献、架构和翻译指南，明确兼容性与审查要求；GitHub 分支保护仍需单独在服务端配置并核验。
+- 设置导航更紧凑，“应用”保持首项，终端选项名称更清晰，并配有含义匹配的图标；外观设置按字体、光标、界面和背景分组，提供可展开的详细说明。
+- 降低浅色主题中悬停与选中背景的色彩强度。
 
 ### Contributors
 - [@Sakyvo](https://github.com/Sakyvo): terminal network proxy, conditional `Ctrl+C` copy, and word deletion with `Ctrl+Backspace` / 终端网络代理、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除。

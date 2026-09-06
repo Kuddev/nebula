@@ -141,12 +141,8 @@ fn paste_needs_confirmation(text: &str, mode: TermMode) -> bool {
 /// 当前 UI 语言。`RuntimeSettings` 每次读盘，所以只在用户动作（复制提示、
 /// 粘贴确认）时取，不进渲染热路径。
 fn ui_language() -> crate::display::UiLanguage {
-    match nebula_settings::RuntimeSettings::load().language {
-        nebula_settings::LanguagePref::System => crate::display::LanguagePreference::System,
-        nebula_settings::LanguagePref::ZhCn => crate::display::LanguagePreference::ZhCn,
-        nebula_settings::LanguagePref::EnUs => crate::display::LanguagePreference::EnUs,
-    }
-    .resolved()
+    crate::display::LanguagePreference::from(nebula_settings::RuntimeSettings::load().language)
+        .resolved()
 }
 
 /// 终端视图对宿主（Panel/Workspace）暴露的状态变化。
@@ -1127,9 +1123,8 @@ impl TerminalView {
 
     fn drive_inline_image_decode(&mut self, cx: &mut Context<Self>) {
         let Some(pending) = self.inline_images.start_next() else { return };
-        let decode = cx
-            .background_executor()
-            .spawn(async move { super::inline_image::decode(pending) });
+        let decode =
+            cx.background_executor().spawn(async move { super::inline_image::decode(pending) });
         cx.spawn(async move |this, cx| {
             let result = decode.await;
             let _ = this.update(cx, |view, cx| {
@@ -1631,12 +1626,8 @@ impl TerminalView {
             // 原始按键可能紧接着再次到来；先清除选区，下一次 Copy 才能按
             // “未处理”传播回终端，而不是重复复制并再次弹 toast。
             session.term.lock().selection = None;
-            let message = match ui_language() {
-                crate::display::UiLanguage::EnUs => {
-                    format!("Copied {lines} lines to clipboard")
-                },
-                _ => format!("已复制 {lines} 行到剪贴板"),
-            };
+            let message = ui_language()
+                .format(crate::i18n::Message::CommonCopiedLines, &[("lines", &lines.to_string())]);
             crate::gpui_shell::toast::toast(window, cx, crate::display::ToastKind::Info, message);
             cx.notify();
         }
@@ -1672,11 +1663,9 @@ impl TerminalView {
         // bracketed 的对端（codex/vim/PSReadLine）整块收下、自己决定怎么处理；
         // 裸 shell 是换行落地即执行。风险不同，话就得说得不一样。
         let runs_line_by_line = !self.term_mode().contains(TermMode::BRACKETED_PASTE);
-        let title: SharedString = match language {
-            crate::display::UiLanguage::EnUs => format!("Paste {lines} lines?"),
-            _ => format!("粘贴 {lines} 行文本？"),
-        }
-        .into();
+        let title: SharedString = language
+            .format(crate::i18n::Message::CommonPasteLines, &[("lines", &lines.to_string())])
+            .into();
         let body: SharedString = if runs_line_by_line {
             language.pick(
                 "shell 会把这些内容逐行执行。请确认来源可信。",
@@ -2141,7 +2130,10 @@ impl Drop for TerminalView {
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.answer_reader.as_ref().map_or_else(|| self.focus_handle.clone(), |reader| reader.read(cx).focus_handle.clone())
+        self.answer_reader.as_ref().map_or_else(
+            || self.focus_handle.clone(),
+            |reader| reader.read(cx).focus_handle.clone(),
+        )
     }
 }
 
@@ -2390,14 +2382,29 @@ impl Render for TerminalView {
         }
         if let Some(answer) = self.answers.latest.clone() {
             let provider = if answer.provider == "claude" { "Claude Code" } else { "Codex" };
-            return div().size_full().relative()
+            return div()
+                .size_full()
+                .relative()
                 .child(root)
-                .child(crate::gpui_shell::prelude::h_flex().absolute().top_0().right_2().px_2().gap_2().items_center()
-                    .bg(cx.theme().background)
-                    .child(div().text_xs().child(format!("{provider} · 回答")))
-                    .child(crate::gpui_shell::prelude::Button::new("answer-open")
-                        .label("阅读").small()
-                        .on_click(cx.listener(|view, _, window, cx| view.open_answer(window, cx)))))
+                .child(
+                    crate::gpui_shell::prelude::h_flex()
+                        .absolute()
+                        .top_0()
+                        .right_2()
+                        .px_2()
+                        .gap_2()
+                        .items_center()
+                        .bg(cx.theme().background)
+                        .child(div().text_xs().child(format!("{provider} · 回答")))
+                        .child(
+                            crate::gpui_shell::prelude::Button::new("answer-open")
+                                .label("阅读")
+                                .small()
+                                .on_click(
+                                    cx.listener(|view, _, window, cx| view.open_answer(window, cx)),
+                                ),
+                        ),
+                )
                 .into_any_element();
         }
         root.into_any_element()
@@ -2411,11 +2418,16 @@ impl TerminalView {
         if self.agent_status == crate::ai_agents::AgentStatus::Blocked {
             reader.update(cx, |reader, cx| reader.needs_attention(cx));
         }
-        cx.subscribe_in(&reader, window, |view, _, _: &super::answer_reader::ReaderEvent, window, cx| {
-            view.answer_reader = None;
-            window.focus(&view.focus_handle, cx);
-            cx.notify();
-        }).detach();
+        cx.subscribe_in(
+            &reader,
+            window,
+            |view, _, _: &super::answer_reader::ReaderEvent, window, cx| {
+                view.answer_reader = None;
+                window.focus(&view.focus_handle, cx);
+                cx.notify();
+            },
+        )
+        .detach();
         let focus = reader.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
         self.answer_reader = Some(reader);
@@ -2423,11 +2435,14 @@ impl TerminalView {
     }
 
     pub(super) fn uses_source_reader_math(&mut self) -> bool {
-        self.preserve_agent_math_source |= self.running_program.as_deref().is_some_and(|program| {
-            matches!(program, "claude" | "codex")
-        }) || self.ai_session.as_ref().is_some_and(|session| {
-            matches!(session.source.as_str(), "claude" | "codex")
-        });
+        self.preserve_agent_math_source |= self
+            .running_program
+            .as_deref()
+            .is_some_and(|program| matches!(program, "claude" | "codex"))
+            || self
+                .ai_session
+                .as_ref()
+                .is_some_and(|session| matches!(session.source.as_str(), "claude" | "codex"));
         self.preserve_agent_math_source
     }
 }

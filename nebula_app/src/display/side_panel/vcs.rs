@@ -1066,12 +1066,8 @@ pub(crate) fn parse_git_history(output: &str) -> Vec<GitCommit> {
             let subject = fields.next().unwrap_or_default().to_owned();
             let author = fields.next().unwrap_or_default().to_owned();
             let timestamp = fields.next().and_then(|value| value.parse().ok()).unwrap_or(0);
-            let parent_hashes = fields
-                .next()
-                .unwrap_or_default()
-                .split_whitespace()
-                .map(str::to_owned)
-                .collect();
+            let parent_hashes =
+                fields.next().unwrap_or_default().split_whitespace().map(str::to_owned).collect();
             Some(GitCommit {
                 full_hash,
                 short_hash,

@@ -670,9 +670,13 @@ pub(crate) fn dispatch_shell_events(events: Vec<GpuiShellEvent>, cx: &mut App) {
                     continue;
                 };
                 let pending = request.clone();
-                if entry.handle.update(cx, move |_, window, cx| {
-                    super::ssh_dialog::show(pending, window, cx);
-                }).is_err() {
+                if entry
+                    .handle
+                    .update(cx, move |_, window, cx| {
+                        super::ssh_dialog::show(pending, window, cx);
+                    })
+                    .is_err()
+                {
                     request.respond(crate::ssh_prompt::PromptResponse::Cancel);
                 }
             },

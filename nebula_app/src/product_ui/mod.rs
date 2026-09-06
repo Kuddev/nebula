@@ -24,8 +24,6 @@ pub(crate) mod file_dialog;
 mod file_operations;
 #[path = "../display/hint.rs"]
 pub(crate) mod hint;
-#[path = "../display/i18n.rs"]
-mod i18n;
 #[path = "../display/image_viewer.rs"]
 pub mod image_viewer;
 #[path = "../display/input_state.rs"]
@@ -60,7 +58,7 @@ mod text_path_model;
 mod toast_kind;
 pub mod ui;
 
-pub use i18n::{LanguagePreference, UiLanguage};
+pub use crate::i18n::{LanguagePreference, UiLanguage};
 pub use program_identity::AiLogo;
 pub use size_info::SizeInfo;
 pub(crate) use ssh_ui::merge_ssh_hosts;

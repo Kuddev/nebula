@@ -1413,7 +1413,7 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
         let language = self.display.ui_language();
         let message = match language {
             UiLanguage::ZhCn => format!("已复制 {lines} 行到剪贴板"),
-            UiLanguage::EnUs => format!("Copied {lines} lines to clipboard"),
+            _ => format!("Copied {lines} lines to clipboard"),
         };
         self.display.push_toast(message, ToastKind::Info);
     }
