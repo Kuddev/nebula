@@ -69,7 +69,7 @@ toml = "0.9.11"
 toml_edit = "0.24.0"
 # GPUI v1.16.1 把平台启动入口拆到独立 crate。它必须与 `gpui` 使用完全相同
 # 的 Git URL 和 rev，否则 Cargo 会把同名类型解析成两套互不兼容的 crate。
-gpui_platform = { git = "https://github.com/Kuddev/zed", rev = "eb8e1c8b5502b7007465fbbc465f4a736fa39210", version = "=0.1.0" }
+gpui_platform = { git = "https://github.com/Kuddev/zed", rev = "1b913031d01f5b3df8fcab3e8c2ac3568e7f5524", version = "=0.1.0" }
 
 # TODO: Drop this pin and return to the crates.io release once the fix ships there.
 [patch.crates-io]
@@ -95,6 +95,16 @@ winit = { path = "third_party/winit-0.30.13" }
 #   Kuddev/gpui-component nebula-v1.16.1-test-support
 #     @ fa3763c681dba5b3ea028395148488e1281d478d
 #     （c20dbef8 基线 + 下游虚拟窗口测试支持）
+#
+#   当前虚拟窗口句柄修补（2026-09-06，保留以上上游/组件基线）：
+#   Kuddev/zed nebula-v1.16.1-virtual-window-handles-20260906
+#     @ 1b913031d01f5b3df8fcab3e8c2ac3568e7f5524
+#     （TestWindow 对不存在的原生窗口/显示句柄返回 Unavailable；真实窗口路径不变）
+#   Kuddev/gpui-component nebula-v1.16.1-virtual-window-handles-20260906
+#     @ 05bb03f54d08b80ac059f7daea52707745e05956
+#     （五个 Zed 依赖同步到上面的同一提交，避免两套 GPUI 类型）
+#   原因：macOS 密码输入的原生 content-type 适配已处理 Err，但虚拟窗口此前
+#   直接 panic，阻止完整对话框回归测试。上游包含此合同后可撤销这份薄修补。
 #
 # 所有 Zed 依赖统一使用 Kuddev URL：Cargo 的 source identity 包含 URL，应用
 # 与 component 内部若混用官方/自有 URL，即使 SHA 相同也会解析成两套 gpui
@@ -161,6 +171,6 @@ winit = { path = "third_party/winit-0.30.13" }
 #      上游提供等价的下游 headless 测试支持后撤销本补丁。
 #
 # 当前精确引用已包含补丁 1-3 与 6；Input 补丁 4-5 仍保持独立，尚未带入本次升级。
-gpui = { git = "https://github.com/Kuddev/zed", rev = "eb8e1c8b5502b7007465fbbc465f4a736fa39210", version = "=0.2.2" }
-gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "fa3763c681dba5b3ea028395148488e1281d478d", version = "=0.5.2" }
-gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "fa3763c681dba5b3ea028395148488e1281d478d", version = "=0.5.1" }
+gpui = { git = "https://github.com/Kuddev/zed", rev = "1b913031d01f5b3df8fcab3e8c2ac3568e7f5524", version = "=0.2.2" }
+gpui-component = { git = "https://github.com/Kuddev/gpui-component", rev = "05bb03f54d08b80ac059f7daea52707745e05956", version = "=0.5.2" }
+gpui-component-assets = { git = "https://github.com/Kuddev/gpui-component", rev = "05bb03f54d08b80ac059f7daea52707745e05956", version = "=0.5.1" }
