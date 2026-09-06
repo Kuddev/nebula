@@ -45,6 +45,7 @@ Every release entry is provided in English and Simplified Chinese.
 - SSH editing now offers common usernames alongside recent entries, keeps manual usernames available, and makes host icons and pin controls clearer. Connection screens show completed stages and failures more accurately.
 - Terminal completion lists now scroll to reveal keyboard selections, support wheel scrolling and hover feedback, and clear stale list positions when the query changes.
 - Completion, bell, and Agent attention notifications now follow their source pane, including after a tab moves to another window. Clicking a notification focuses that pane, and activity in one pane no longer suppresses another pane's notification.
+- Contributors can run the shared source-size, dependency-direction, translation, and branding checks locally and in the architecture workflow. Cross-platform metadata checks are documented separately from native build and UI validation.
 
 ### 简体中文
 
@@ -85,6 +86,7 @@ Every release entry is provided in English and Simplified Chinese.
 - SSH 编辑器在最近使用项之外提供常用用户名，保留手动输入，并改进主机图标与置顶控件；连接界面更准确地显示已完成阶段和失败状态。
 - 终端补全列表现在会滚动到键盘选中项，支持滚轮浏览与悬停反馈，并在查询变化后清除过期列表位置。
 - 命令完成、响铃和 Agent 待处理通知现在跟随来源 pane，即使标签已移动到另一个窗口；点击通知会聚焦来源 pane，一个 pane 的活动不再抑制另一个 pane 的通知。
+- 贡献者可在本地及架构工作流中运行统一的源码规模、依赖方向、翻译和品牌检查；跨平台元数据检查与原生构建、界面验证的边界分别说明。
 
 ### Contributors
 - [@Sakyvo](https://github.com/Sakyvo): terminal network proxy, conditional `Ctrl+C` copy, and word deletion with `Ctrl+Backspace` / 终端网络代理、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除。

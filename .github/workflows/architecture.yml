@@ -1,0 +1,72 @@
+name: Architecture contracts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: architecture-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  architecture-contracts:
+    name: architecture-contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      CARGO_TARGET_DIR: ${{ runner.temp }}/pebrel-i18n-contract
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test the guardrails themselves
+        run: >-
+          python3 -m unittest
+          scripts.tests.test_architecture_budgets
+          scripts.tests.test_architecture_dependencies
+          scripts.tests.test_architecture_governance
+      - name: Check source size and dependency direction
+        env:
+          ARCHITECTURE_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          arguments=()
+          if [[ -n "$ARCHITECTURE_BASE" && ! "$ARCHITECTURE_BASE" =~ ^0+$ ]]; then
+            arguments+=(--base "$ARCHITECTURE_BASE")
+          fi
+          python3 scripts/check_architecture.py "${arguments[@]}"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+      - name: Test shared settings without the UI dependency graph
+        run: |
+          mkdir -p "$RUNNER_TEMP/pebrel-contracts"
+          rustc --test --edition 2024 --crate-name nebula_settings \
+            nebula_settings/src/lib.rs -o "$RUNNER_TEMP/pebrel-contracts/settings"
+          "$RUNNER_TEMP/pebrel-contracts/settings"
+      - name: Test the Rust line-budget adapter
+        env:
+          CARGO_MANIFEST_DIR: ${{ github.workspace }}/nebula_app
+        run: |
+          rustc --test --edition 2024 nebula_app/tests/file_line_budget.rs \
+            -o "$RUNNER_TEMP/pebrel-contracts/line-budget"
+          "$RUNNER_TEMP/pebrel-contracts/line-budget"
+      - name: Test renderer-independent translation and allocation contracts
+        run: cargo test --manifest-path tools/i18n-contract/Cargo.toml --locked
+      - name: Test branding and image compatibility
+        run: >-
+          python3 -m unittest
+          scripts.tests.test_pebrel_branding
+          scripts.tests.test_windows_resources
+          scripts.tests.test_app_icons
