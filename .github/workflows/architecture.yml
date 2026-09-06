@@ -22,7 +22,6 @@ jobs:
     env:
       PYTHONUTF8: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-      CARGO_TARGET_DIR: ${{ runner.temp }}/pebrel-i18n-contract
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,6 +62,8 @@ jobs:
             -o "$RUNNER_TEMP/pebrel-contracts/line-budget"
           "$RUNNER_TEMP/pebrel-contracts/line-budget"
       - name: Test renderer-independent translation and allocation contracts
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/pebrel-i18n-contract
         run: cargo test --manifest-path tools/i18n-contract/Cargo.toml --locked
       - name: Test branding and image compatibility
         run: >-
