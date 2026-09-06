@@ -1264,7 +1264,7 @@ impl Render for SettingsPane {
         let font_picker_open = self.font_picker_open;
         let bg_picker_open = self.bg_picker_open && self.active_section == 1;
         let bg_dragging = self.bg_picker_drag.is_some();
-        let ssh_editor_modal = self.ssh_editor_modal(cx);
+        let ssh_editor_modal = self.ssh_editor_modal(window, cx);
         let appearance_picker_modal = self.appearance_picker_modal(window, cx);
         let application_page = self.active_section == 0;
         let header = self.render_search_header(window, cx);

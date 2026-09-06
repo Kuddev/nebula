@@ -21,6 +21,8 @@ This file contains changes that are not part of a numbered release yet.
 - Multiline confirmation text is measured with wrapping so longer messages fit the shared confirmation dialog.
 - Improved Antigravity activity and permission detection so old spinner output and ordinary prose mentioning approval do not keep an idle session marked as running or waiting for permission.
 - Closing the last regular window and then quitting no longer replaces saved tabs and AI session identities with an empty snapshot. Closing all tabs explicitly still starts an empty workspace next time, and failed session writes are retried.
+- SSH startup now waits for PTY and shell confirmation before showing Ready, supports cancellation during connection setup, and stops stalled startup stages within a bounded timeout. Unexpected disconnects retain the pane and its failure state; explicit shell exits still close normally.
+- Duplicated SSH tabs retain the known remote working directory and quote it when starting the new remote shell.
 
 ### Improved
 - Made Titanium the default application icon and adjusted small-size proportions, prompt strokes, and transparent edges.
@@ -33,6 +35,7 @@ This file contains changes that are not part of a numbered release yet.
 - Made the settings navigation more compact, kept Application first, labeled terminal options more clearly, and added matching navigation icons. Appearance settings now show font, cursor, interface, and background controls in groups with expandable help.
 - Reduced the intensity of hover and selected backgrounds in light themes.
 - Settings now appears as a selectable, closable item in the top tab layout. Switching tab layouts while Settings is open preserves the sidebar state, and closing the last terminal tab keeps Settings available until it is closed.
+- SSH editing now offers common usernames alongside recent entries, keeps manual usernames available, and makes host icons and pin controls clearer. Connection screens show completed stages and failures more accurately.
 
 ## 中文
 
@@ -53,6 +56,8 @@ This file contains changes that are not part of a numbered release yet.
 - 多行确认文案按换行后的尺寸测量，使较长消息能完整放入共享确认框。
 - 改进 Antigravity 的活动与权限提示识别，避免历史转圈输出或普通正文中提到审批时，把空闲会话误标为运行中或等待授权。
 - 关闭最后一个普通窗口后再退出，不再用空快照覆盖已保存标签与 AI 会话身份；明确关闭全部标签后，下次仍从空工作区开始，保存失败会重试。
+- SSH 启动现在等待 PTY 与 shell 确认后才显示就绪，连接准备期间可取消，停滞的启动阶段会在限定时间内结束；意外断连会保留 pane 与失败状态，明确退出 shell 时仍正常关闭。
+- 复制 SSH 标签时保留已知远端工作目录，并在启动新远端 shell 时正确引用该路径。
 
 ### 改进
 - 将钛银设为默认应用图标，并调整小尺寸比例、提示符笔画与透明边缘。
@@ -65,6 +70,7 @@ This file contains changes that are not part of a numbered release yet.
 - 设置导航更紧凑，“应用”保持首项，终端选项名称更清晰，并配有含义匹配的图标；外观设置按字体、光标、界面和背景分组，提供可展开的详细说明。
 - 降低浅色主题中悬停与选中背景的色彩强度。
 - 顶部标签布局中，设置现在作为可选择、可关闭的标签显示；打开设置时切换标签布局会保留侧栏状态，关闭最后一个终端标签后仍可继续使用设置，直到关闭设置页。
+- SSH 编辑器在最近使用项之外提供常用用户名，保留手动输入，并改进主机图标与置顶控件；连接界面更准确地显示已完成阶段和失败状态。
 
 ## Contributors
 - [@Sakyvo](https://github.com/Sakyvo): terminal network proxy, conditional `Ctrl+C` copy, and word deletion with `Ctrl+Backspace` / 终端网络代理、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除。

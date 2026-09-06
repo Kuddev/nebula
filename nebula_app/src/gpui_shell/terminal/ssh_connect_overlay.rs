@@ -17,12 +17,65 @@ use gpui::{
 use crate::display::ssh_connect::{self, SshConnectState, stage_labels, stage_message};
 use crate::gpui_shell::prelude::*;
 
+pub(super) fn update_connection_state(
+    state: &mut Option<SshConnectState>,
+    destination: Option<&str>,
+    stage: crate::ssh_session::SshStage,
+) {
+    use crate::ssh_session::SshStage;
+
+    if stage == SshStage::Ready {
+        *state = None;
+        return;
+    }
+    let Some(destination) = destination else { return };
+    if state.is_none() || stage == SshStage::Resolve {
+        *state = Some(SshConnectState::new(destination.to_owned()));
+    }
+    if let Some(state) = state.as_mut() {
+        state.set_stage(stage);
+    }
+}
+
+#[cfg(test)]
+mod connection_state_tests {
+    use super::*;
+    use crate::ssh_session::SshStage;
+
+    #[test]
+    fn a_disconnected_ready_session_regains_a_retry_surface() {
+        let mut state = Some(SshConnectState::new("test@example.invalid".to_owned()));
+        update_connection_state(&mut state, Some("test@example.invalid"), SshStage::Ready);
+        assert!(state.is_none());
+        update_connection_state(
+            &mut state,
+            Some("test@example.invalid"),
+            SshStage::Failed("Connection lost".to_owned()),
+        );
+        let state = state.unwrap();
+        assert!(state.failed());
+        assert!(state.visible());
+        assert_eq!(state.destination(), "test@example.invalid");
+        assert_eq!(state.failure(), Some("Connection lost"));
+    }
+
+    #[test]
+    fn retry_resets_failure_and_ready_removes_the_surface() {
+        let mut state = None;
+        update_connection_state(&mut state, Some("host"), SshStage::Failed("failed".into()));
+        update_connection_state(&mut state, Some("host"), SshStage::Resolve);
+        assert!(!state.as_ref().unwrap().failed());
+        update_connection_state(&mut state, Some("host"), SshStage::Authenticate);
+        assert_eq!(state.as_ref().unwrap().stage(), SshStage::Authenticate);
+        update_connection_state(&mut state, Some("host"), SshStage::Ready);
+        assert!(state.is_none());
+    }
+}
+
 /// UiLanguage 由设置折算（两壳同源）。
 pub(super) fn language() -> crate::display::UiLanguage {
     let runtime = nebula_settings::RuntimeSettings::load();
-    crate::display::LanguagePreference::parse(runtime.language.settings_value())
-        .unwrap_or_default()
-        .resolved()
+    crate::display::LanguagePreference::from(runtime.language).resolved()
 }
 
 fn hsla_from_rgba(r: u8, g: u8, b: u8) -> Hsla {

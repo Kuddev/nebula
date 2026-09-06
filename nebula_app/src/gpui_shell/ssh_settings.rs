@@ -33,10 +33,52 @@ mod editor;
 /// 删除撤销窗口时长，旧壳 Undo 条同值。
 const SSH_DELETE_UNDO_SECS: u64 = 8;
 
-const SSH_EDITOR_CTL_H: f32 = 36.0;
+const SSH_EDITOR_CTL_H: f32 = 39.0;
 const SSH_EDITOR_AVATAR_H: f32 = 44.0;
 const SSH_HOST_ROW_H: f32 = 58.0;
 const SSH_HOST_GAP: f32 = 8.0;
+const COMMON_SSH_USERNAMES: &[&str] = &["root", "ubuntu", "deploy", "admin", "debian", "ec2-user"];
+
+fn username_candidates(recent: &[String], query: &str) -> Vec<String> {
+    let query = query.trim().to_ascii_lowercase();
+    let mut candidates = Vec::new();
+    for username in recent.iter().map(String::as_str).chain(COMMON_SSH_USERNAMES.iter().copied()) {
+        let username = username.trim();
+        if !username.is_empty()
+            && (query.is_empty() || username.to_ascii_lowercase().contains(&query))
+            && !candidates.iter().any(|existing| existing == username)
+        {
+            candidates.push(username.to_owned());
+        }
+    }
+    candidates.truncate(8);
+    candidates
+}
+
+#[cfg(test)]
+mod username_tests {
+    use super::*;
+
+    #[test]
+    fn common_usernames_are_available_without_history() {
+        let candidates = username_candidates(&[], "");
+        assert_eq!(&candidates[..4], &["root", "ubuntu", "deploy", "admin"]);
+    }
+
+    #[test]
+    fn recent_usernames_are_kept_first_and_deduplicated() {
+        let recent = vec!["operator".to_owned(), "root".to_owned(), "operator".to_owned()];
+        let candidates = username_candidates(&recent, "");
+        assert_eq!(&candidates[..2], &["operator", "root"]);
+        assert_eq!(candidates.iter().filter(|username| *username == "root").count(), 1);
+    }
+
+    #[test]
+    fn unmatched_manual_input_has_no_forced_suggestion() {
+        assert!(username_candidates(&[], "Custom-User").is_empty());
+        assert_eq!(username_candidates(&[], "DEP"), vec!["deploy"]);
+    }
+}
 
 fn push_username_suggestion(suggestions: &mut Vec<String>, username: &str) {
     let username = username.trim();
@@ -766,7 +808,7 @@ impl SettingsPane {
 
     // ---- UI：可编辑用户名历史 ----
 
-    fn ssh_username_control(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn ssh_username_control(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let pane = cx.entity().downgrade();
         let open = self.ssh_username_picker_open;
         let language = crate::gpui_shell::config::ui_language(cx);
@@ -777,18 +819,14 @@ impl SettingsPane {
             // 否则聚焦刚把候选打开，同一次点击又会被遮罩立即关闭。
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
-                Input::new(&self.ssh_username_input)
-                    .h(px(SSH_EDITOR_CTL_H))
-                    .text_sm()
-                    .aria_label(language.pick("用户名", "Username"))
-                    .bg(cx.theme().popover)
+                editor::editor_input(&self.ssh_username_input, language.pick("用户名", "Username"), window, cx)
                     .suffix(Button::new("ssh-username-history")
                     .icon(if open { IconName::ChevronUp } else { IconName::ChevronDown })
                     .ghost()
                     .xsmall()
                     .tooltip(crate::gpui_shell::config::ui_language(cx).pick(
-                        "最近使用的用户名",
-                        "Recently used usernames",
+                        "选择常用或最近使用的用户名",
+                        "Choose a common or recent username",
                     ))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_ssh_username_picker(window, cx);
@@ -844,18 +882,17 @@ impl SettingsPane {
         let theme = cx.theme();
         let query = self.ssh_username_input.read(cx).value().trim().to_ascii_lowercase();
         let current = self.ssh_username_input.read(cx).value().trim().to_owned();
-        let suggestions = self.ssh_editor.as_ref()?.username_suggestions.clone();
+        let suggestions =
+            username_candidates(&self.ssh_editor.as_ref()?.username_suggestions, &query);
         let rows: Vec<gpui::AnyElement> = suggestions
             .into_iter()
-            .filter(|username| query.is_empty() || username.to_ascii_lowercase().contains(&query))
-            .take(8)
             .enumerate()
             .map(|(index, username)| {
                 let selected = username == current;
                 let picked = username.clone();
                 h_flex()
                     .id(SharedString::from(format!("ssh-username-row-{index}")))
-                    .h(px(30.0))
+                    .h(px(34.0))
                     .w_full()
                     .px_2()
                     .items_center()
@@ -890,11 +927,14 @@ impl SettingsPane {
                     .items_center()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(language.pick("没有匹配的历史用户名", "No matching usernames"))
+                    .child(language.pick(
+                        "没有匹配项，可直接输入用户名",
+                        "No matches. Enter a username directly.",
+                    ))
                     .into_any_element()
             } else {
                 v_flex()
-                    .h(px((row_count as f32 * 30.0).min(240.0)))
+                    .h(px((row_count as f32 * 34.0).min(272.0)))
                     .overflow_y_scrollbar()
                     .children(rows)
                     .into_any_element()
@@ -945,19 +985,42 @@ impl SettingsPane {
             .justify_center()
             .cursor_pointer()
             .hover(|avatar| avatar.bg(theme.list_hover))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             // Nerd Font 的 advance 固定为 0.6em，墨迹却能宽到 1.2em；直接
             // 居中文本盒会把溢出的那一半全留在右边。固定墨迹槽后，视觉中心
             // 才不会随图标变化。
             .child(
                 div()
                     .w(px(target_ink_width))
-                    .font_family(self.current_font_chain(cx))
+                    .font_family(crate::font_install::REQUIRED_FONT_FAMILY)
                     .text_size(px(icon_size))
                     .child(icon.glyph.to_string()),
             )
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_ssh_icon_picker(window, cx);
             }))
+            .child(
+                div()
+                    .id("ssh-icon-avatar-caret")
+                    .absolute()
+                    .right(px(-4.0))
+                    .bottom(px(-4.0))
+                    .size(px(15.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.popover)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_ssh_icon_picker(window, cx);
+                    }))
+                    .child(Icon::new(IconName::ChevronDown).size(px(11.0)).text_color(theme.muted_foreground)),
+            )
             // 与字体目录同法：零绘制 canvas 捕获头像的真实窗口坐标，弹层
             // 据此锚定；滚动与 DPI 变化后依然贴着头像。
             .child(
@@ -1024,7 +1087,7 @@ impl SettingsPane {
         let muted = theme.muted_foreground;
         let hover_bg = theme.list_hover;
         let selected_bg = theme.list_active;
-        let font_chain = self.current_font_chain(cx);
+        let font_chain: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let current = self
             .ssh_editor
             .as_ref()
@@ -1205,6 +1268,8 @@ impl SettingsPane {
                 .px_3()
                 .items_center()
                 .gap_3()
+                .when(ix == 0, |row| row.rounded_t(px(8.0)))
+                .when(ix + 1 == host_count, |row| row.rounded_b(px(8.0)))
                 .when(ix + 1 < host_count, |row| {
                     row.border_b_1().border_color(theme.border.opacity(0.5))
                 })
@@ -1222,20 +1287,7 @@ impl SettingsPane {
                         .text_size(px(18.0))
                         .text_color(muted)
                         .text_center()
-                        .child(os_icon.glyph.to_string())
-                        // 旧壳把置顶记号压在图标槽右缘，不额外占一列；否则
-                        // 置顶行的主机标题会比其它行整体右移。
-                        .when(pinned, |slot| {
-                            slot.child(
-                                div()
-                                    .absolute()
-                                    .right(px(-2.0))
-                                    .bottom(px(7.0))
-                                    .text_size(px(8.0))
-                                    .text_color(theme.primary)
-                                    .child("\u{eab4}"),
-                            )
-                        }),
+                        .child(os_icon.glyph.to_string()),
                 )
                 .child(
                     v_flex()
@@ -1309,15 +1361,17 @@ impl SettingsPane {
                 )
                 .child(
                     Button::new(SharedString::from(format!("ssh-pin-{ix}")))
-                        .icon(if pinned { IconName::StarOff } else { IconName::Star })
+                        .icon(Icon::default().path(crate::gpui_shell::assets::nav::PIN))
                         .ghost()
                         .small()
+                        .selected(pinned)
+                        .toggled(pinned)
                         .tooltip(if pinned {
                             language.pick("取消置顶", "Unpin")
                         } else {
                             language.pick("置顶", "Pin")
                         })
-                        .invisible()
+                        .when(!pinned, |button| button.invisible())
                         .group_hover(row_group.clone(), |button| button.visible())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.ssh_apply(

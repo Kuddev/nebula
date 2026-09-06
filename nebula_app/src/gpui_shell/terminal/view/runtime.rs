@@ -27,6 +27,28 @@ fn progress_sidebar_activity(
 }
 
 impl TerminalView {
+    pub(super) fn apply_ssh_stage(
+        &mut self,
+        stage: crate::ssh_session::SshStage,
+        cx: &mut Context<Self>,
+    ) {
+        self.ssh_stage = Some(stage.clone());
+        super::super::ssh_connect_overlay::update_connection_state(
+            &mut self.ssh_connect,
+            self.ssh_destination.as_deref(),
+            stage.clone(),
+        );
+        self.ssh_connect_last_step = std::time::Instant::now();
+        if matches!(stage, crate::ssh_session::SshStage::Failed(_)) {
+            self.pending_runtime_submit = None;
+            self.command_running = false;
+            self.command_started = None;
+            self.answer_reader = None;
+        }
+        cx.emit(TerminalViewEvent::TitleChanged);
+        cx.notify();
+    }
+
     /// Clear foreground Agent identity after an authoritative command end or
     /// after the submitted shell prompt is observed again. OSC 133;D remains
     /// the primary edge; the cached-prompt path calls the same reset so the two
@@ -805,6 +827,12 @@ impl TerminalView {
     /// 1 Hz 屏幕看门狗：hook 提供精确边沿，屏幕补偿丢失边沿和无 hook 客户端。
     pub fn refresh_agent_screen_state(&mut self, cx: &mut Context<Self>) {
         use crate::ai_agents::AgentStatus;
+
+        if self.exited.is_some()
+            || matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Failed(_)))
+        {
+            return;
+        }
 
         // Wakeup 会被 synchronized-update 合并；1 Hz 看门狗提供可靠的
         // Grid 后置检查，确保 Runtime 文本回显后一定能补发 Enter。

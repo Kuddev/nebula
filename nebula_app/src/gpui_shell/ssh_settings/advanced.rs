@@ -287,7 +287,7 @@ impl SettingsPane {
         (!password.is_empty()).then(|| password.to_string())
     }
 
-    pub(super) fn ssh_editor_advanced(&self, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn ssh_editor_advanced(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let language = crate::gpui_shell::config::ui_language(cx);
         let editor = self.ssh_editor.as_ref().expect("open SSH editor");
         let theme = cx.theme();
@@ -405,22 +405,22 @@ impl SettingsPane {
                     h_flex().mt_4().gap_3().items_start()
                         .child(div().flex_1().min_w_0().child(editor_field(
                             language.pick("代理地址", "Proxy host"),
-                            editor_input(&self.ssh_proxy_host_input, language.pick("代理地址", "Proxy host"), cx),
+                            editor_input(&self.ssh_proxy_host_input, language.pick("代理地址", "Proxy host"), window, cx),
                         )))
                         .child(div().w(px(84.0)).flex_shrink_0().child(editor_field(
                             language.pick("端口", "Port"),
-                            editor_input(&self.ssh_proxy_port_input, language.pick("代理端口", "Proxy port"), cx),
+                            editor_input(&self.ssh_proxy_port_input, language.pick("代理端口", "Proxy port"), window, cx),
                         ))),
                 )
                 .child(
                     h_flex().mt_4().gap_3().items_start()
                         .child(div().flex_1().min_w_0().child(editor_field(
                             language.pick("用户名（可选）", "Username (optional)"),
-                            editor_input(&self.ssh_proxy_username_input, language.pick("代理用户名", "Proxy username"), cx),
+                            editor_input(&self.ssh_proxy_username_input, language.pick("代理用户名", "Proxy username"), window, cx),
                         )))
                         .child(div().flex_1().min_w_0().child(editor_field(
                             language.pick("密码（可选）", "Password (optional)"),
-                            editor_input(&self.ssh_proxy_password_input, language.pick("代理密码", "Proxy password"), cx)
+                            editor_input(&self.ssh_proxy_password_input, language.pick("代理密码", "Proxy password"), window, cx)
                                 .mask_toggle().disabled(editor.clear_proxy_password),
                         ))),
                 )
@@ -475,7 +475,7 @@ impl SettingsPane {
                                                 })),
                                         ),
                                 )
-                                .child(editor_input(&self.ssh_jump_host_input, language.pick("跳板主机", "Jump host"), cx))
+                                .child(editor_input(&self.ssh_jump_host_input, language.pick("跳板主机", "Jump host"), window, cx))
                                 .when(editor.jump_picker_open, |section| {
                                     let choices = editor.jump_choices.iter().filter(|(host, _)| host != &destination).collect::<Vec<_>>();
                                     if choices.is_empty() {

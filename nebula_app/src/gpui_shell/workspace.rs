@@ -1803,17 +1803,20 @@ impl NebulaWorkspace {
     ) {
         let Some(WorkspaceTab::Terminal { panes, .. }) = self.tabs.get(tab_ix) else { return };
         let Some(old) = panes.iter().find(|pane| pane.id == pane_id) else { return };
-        let grid = {
+        let (grid, remote_cwd) = {
             let view = old.view.read(cx);
             if view.ssh_destination.as_deref() != Some(destination.as_str()) {
                 return;
             }
-            (view.grid_cols() as u16, view.grid_rows() as u16)
+            (
+                (view.grid_cols() as u16, view.grid_rows() as u16),
+                (!view.cwd.is_empty()).then(|| view.cwd.clone()),
+            )
         };
 
         let launch = crate::gpui_shell::terminal::view::TerminalLaunch::Ssh {
             destination: destination.clone(),
-            cwd: None,
+            cwd: remote_cwd,
         };
         let replacement = self.new_pane(grid, launch, None, window, cx);
         let replacement_id = replacement.id;

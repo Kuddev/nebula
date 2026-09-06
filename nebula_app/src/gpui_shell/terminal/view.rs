@@ -739,38 +739,7 @@ impl TerminalView {
                         while let Some(stage) = stage_rx.next().await {
                             if this
                                 .update(cx, |view: &mut Self, cx| {
-                                    view.ssh_stage = Some(stage.clone());
-                                    // 连接卡片状态机（旧壳 ssh_connect_stage
-                                    // 同款合同）：Ready 移除；Resolve 开新卡
-                                    // 片；其余阶段推进。中途断线不会让用
-                                    // 了半天的终端凭空复活一张卡片。
-                                    match stage {
-                                        crate::ssh_session::SshStage::Ready => {
-                                            view.ssh_connect = None;
-                                        },
-                                        other => {
-                                            match &mut view.ssh_connect {
-                                                Some(state) => state.set_stage(other),
-                                                None => {
-                                                    if matches!(
-                                                        other,
-                                                        crate::ssh_session::SshStage::Resolve
-                                                    ) {
-                                                        if let Some(dest) =
-                                                            view.ssh_destination.clone()
-                                                        {
-                                                            view.ssh_connect = Some(
-                                                                crate::display::ssh_connect::SshConnectState::new(dest),
-                                                            );
-                                                            view.ssh_connect_last_step =
-                                                                std::time::Instant::now();
-                                                        }
-                                                    }
-                                                },
-                                            }
-                                        },
-                                    }
-                                    cx.notify();
+                                    view.apply_ssh_stage(stage, cx);
                                 })
                                 .is_err()
                             {
@@ -1816,7 +1785,10 @@ impl TerminalView {
     ) {
         #[cfg(windows)]
         {
-            if self.exited.is_some() || !self.ghost_enabled {
+            if self.exited.is_some()
+                || !self.ghost_enabled
+                || matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Failed(_)))
+            {
                 self.suggest_anchor = None;
                 self.suggest.clear_completion_hints();
                 return;
