@@ -75,6 +75,10 @@ impl NebulaWorkspace {
         for event in events {
             match event {
                 GpuiShellEvent::TrayFocus(pane) => self.handle_tray_focus(*pane, cx),
+                GpuiShellEvent::NotificationFocus(pane) => {
+                    let pane = *pane;
+                    cx.defer(move |cx| super::windowing::focus_notification(pane, cx));
+                },
                 GpuiShellEvent::TrayQuit => {
                     self.quit_from_tray(cx);
                     return;
@@ -180,9 +184,12 @@ impl NebulaWorkspace {
                         cx,
                     );
                 } else {
-                    while !self.tabs.is_empty() {
-                        self.close_tab(self.tabs.len() - 1, window, cx);
-                    }
+                    super::windowing::close_saved_workspace_window(
+                        self.runtime_window_id,
+                        self.snapshot_session(cx),
+                        window,
+                        cx,
+                    );
                 }
                 let snapshot = super::windowing::publish_runtime_snapshot(cx);
                 Ok(json!({
@@ -922,15 +929,7 @@ impl NebulaWorkspace {
     }
 
     fn quit_from_tray(&mut self, cx: &mut Context<Self>) {
-        self.save_clean_window_session(cx);
-        for tab in &self.tabs {
-            let WorkspaceTab::Terminal { panes, .. } = tab else { continue };
-            for pane in panes {
-                pane.view.read(cx).shutdown();
-            }
-        }
-        crate::tray::shutdown();
-        cx.quit();
+        cx.defer(super::windowing::quit_all);
     }
 
     pub(crate) fn tab_of_pane(&self, pane_id: u64) -> Option<usize> {
@@ -999,9 +998,12 @@ impl NebulaWorkspace {
         {
             return false;
         }
-        let snapshot = self.snapshot_session(cx);
-        crate::session::save(&snapshot);
-        self.last_saved_session = Some(snapshot);
+        super::windowing::save_current_window_session(
+            self.runtime_window_id,
+            self.snapshot_session(cx),
+            super::session_persistence::SaveReason::Checkpoint,
+            cx,
+        );
         crate::gpui_shell::hide_native_window(window);
         self.window_hidden = true;
         true

@@ -18,7 +18,7 @@ use crate::gpui_shell::prelude::*;
 use gpui_component::input::InputEvent;
 use nebula_settings::{format_hex_rgb, parse_hex_rgb};
 
-use super::SettingsPane;
+use super::{SettingsPane, help};
 
 const COMBOBOX_W: f32 = 220.0;
 const COMBOBOX_H: f32 = 32.0;
@@ -290,7 +290,7 @@ impl SettingsPane {
         let trigger_bounds = self.bg_picker_trigger_bounds;
         let row = self.row_with_reset(
             language.pick("背景色", "Background color"),
-            language.tr("settings.appearance.background_color_description"),
+            help("background", language),
             custom,
             |this, window, cx| {
                 this.persist(&[("background", String::new())], cx);

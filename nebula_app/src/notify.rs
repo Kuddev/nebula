@@ -23,14 +23,13 @@
 //! crash. A small global throttle keeps a bell-happy background job from
 //! flooding the Action Center.
 
-#[cfg(feature = "legacy-shell")]
-use std::sync::{Mutex, OnceLock};
+#[cfg(any(feature = "gpui-shell", test))]
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
-#[cfg(feature = "legacy-shell")]
-use winit::window::WindowId;
 
 #[cfg(feature = "legacy-shell")]
 use crate::display::window::Window;
@@ -47,6 +46,42 @@ static PROXY: OnceLock<EventLoopProxy<Event>> = OnceLock::new();
 #[cfg(feature = "legacy-shell")]
 pub fn init_proxy(proxy: EventLoopProxy<Event>) {
     let _ = PROXY.set(proxy);
+}
+
+pub use crate::platform::notifications::notify_test;
+use crate::platform::notifications::{ToastActivation, toast_clickable};
+
+#[cfg(feature = "gpui-shell")]
+static GPUI_ACTIVATION: OnceLock<std::sync::mpsc::Sender<crate::gpui_shell::GpuiShellEvent>> =
+    OnceLock::new();
+
+#[cfg(feature = "gpui-shell")]
+pub(crate) fn init_gpui_activation(
+    sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiShellEvent>,
+) {
+    let _ = GPUI_ACTIVATION.set(sender);
+}
+
+#[cfg(feature = "gpui-shell")]
+fn gpui_activation(
+    sender: std::sync::mpsc::Sender<crate::gpui_shell::GpuiShellEvent>,
+    pane_id: Option<u64>,
+) -> ToastActivation {
+    Arc::new(move || {
+        let _ = sender.send(crate::gpui_shell::GpuiShellEvent::NotificationFocus(pane_id));
+    })
+}
+
+fn application_activation(pane_id: Option<u64>) -> Option<ToastActivation> {
+    #[cfg(feature = "gpui-shell")]
+    {
+        GPUI_ACTIVATION.get().map(|sender| gpui_activation(sender.clone(), pane_id))
+    }
+    #[cfg(not(feature = "gpui-shell"))]
+    {
+        let _ = pane_id;
+        None
+    }
 }
 
 /// Something that happened in a pane which may deserve attention.
@@ -74,7 +109,7 @@ pub enum Notification {
 impl Notification {
     /// Toast title + body. Title names the source ("Nebula" or the program);
     /// body carries the human detail.
-    fn toast_text(&self) -> (String, String) {
+    pub(crate) fn toast_text(&self) -> (String, String) {
         match self {
             Self::Bell { program } => match program {
                 Some(p) => (p.clone(), "任务完成，等待输入".to_owned()),
@@ -108,6 +143,10 @@ impl Notification {
             },
         }
     }
+
+    pub(crate) fn is_attention(&self) -> bool {
+        matches!(self, Self::AiTurn { attention: true, .. })
+    }
 }
 
 /// Commands shorter than this never notify: quick `ls`-style commands would
@@ -118,6 +157,40 @@ pub const COMMAND_NOTIFY_MIN: Duration = Duration::from_secs(10);
 /// flashes the taskbar (cheap, silent, coalesced by the shell) but skips the
 /// toast, so a build script ringing BEL in a loop cannot flood Action Center.
 const TOAST_THROTTLE: Duration = Duration::from_secs(3);
+
+#[cfg(any(feature = "gpui-shell", test))]
+#[derive(Default)]
+struct PaneNotificationThrottle {
+    recent: HashMap<(u64, bool), Instant>,
+}
+
+#[cfg(any(feature = "gpui-shell", test))]
+impl PaneNotificationThrottle {
+    fn accepts(&mut self, pane_id: u64, attention: bool, now: Instant) -> bool {
+        self.recent.retain(|_, last| now.saturating_duration_since(*last) < TOAST_THROTTLE);
+        if self.recent.contains_key(&(pane_id, attention)) {
+            return false;
+        }
+        self.recent.insert((pane_id, attention), now);
+        true
+    }
+}
+
+#[cfg(feature = "gpui-shell")]
+pub(crate) fn deliver_gpui(notification: &Notification, pane_id: u64) {
+    static THROTTLE: OnceLock<Mutex<PaneNotificationThrottle>> = OnceLock::new();
+    let accepted = THROTTLE
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .accepts(pane_id, notification.is_attention(), Instant::now());
+    if !accepted {
+        log::debug!("notify: toast suppressed for pane={pane_id}: {notification:?}");
+        return;
+    }
+    let (title, body) = notification.toast_text();
+    spawn_toast(title, body, application_activation(Some(pane_id)));
+}
 
 /// Deliver `notification` for a window that is currently unfocused.
 ///
@@ -140,18 +213,18 @@ pub fn deliver(window: &Window, notification: &Notification, pane: Option<u64>) 
     }
 
     let (title, body) = notification.toast_text();
-    let focus = (window.id(), pane);
+    let window_id = window.id();
+    let activation = PROXY.get().map(|proxy| {
+        let proxy = proxy.clone();
+        Arc::new(move || {
+            let _ = proxy.send_event(Event::new(EventType::FocusWindow { pane }, window_id));
+        }) as ToastActivation
+    });
     log::debug!("notify: toast '{title}': '{body}'");
     // Fire-and-forget worker: the WinRT show() is a cross-process RPC (can
     // take tens of ms — an eternity for the event loop), and notifications
     // must never be able to take the terminal down with them.
-    if let Err(err) = std::thread::Builder::new()
-        .name("nebula-toast".into())
-        .spawn(move || toast_clickable(&title, &body, Some(focus)))
-    {
-        // Taskbar flash already fired, so the user is not left with nothing.
-        log::warn!("notify: failed to spawn toast thread: {err}");
-    }
+    spawn_toast(title, body, activation);
 }
 
 /// Global toast rate limit. Returns true when this one should be dropped.
@@ -172,225 +245,77 @@ fn throttled() -> bool {
 
 /// Raise a native system toast. Best-effort: any failure is logged and
 /// swallowed (the taskbar flash already fired, so the user is not left with
-/// nothing). Runs on the toast worker thread, never on the event loop.
-#[cfg(all(windows, feature = "legacy-shell"))]
+/// nothing). Native delivery runs on a worker thread, never on the event loop.
 pub(crate) fn toast(title: &str, body: &str) {
-    toast_clickable(title, body, None);
+    spawn_toast(title.to_owned(), body.to_owned(), application_activation(None));
 }
 
-#[cfg(all(windows, not(feature = "legacy-shell")))]
-pub(crate) fn toast(title: &str, body: &str) {
-    toast_clickable(title, body);
-}
-
-/// [`toast`], optionally wired for click-to-focus: activating the banner (or
-/// its Action Center entry) surfaces `window` and, when a pane is named, its
-/// tab. Uses the in-process WinRT Activated handler — no COM server, no
-/// protocol registration. The one trade-off: clicks after Nebula exited do
-/// nothing, which is exactly right (there is nothing left to focus).
-#[cfg(windows)]
-fn toast_clickable(
-    title: &str,
-    body: &str,
-    #[cfg(feature = "legacy-shell")] focus: Option<(WindowId, Option<u64>)>,
-) {
-    use tauri_winrt_notification::{IconCrop, Toast};
-
-    // Attribute the toast to the Nebula AUMID so it reads "Nebula" instead of
-    // "Windows PowerShell". One registry write, cached per process.
-    win::ensure_aumid();
-
-    let mut toast = Toast::new(win::AUMID)
-        .title(title)
-        .text1(body)
-        .duration(tauri_winrt_notification::Duration::Short);
-    // Belt and braces: besides the AUMID IconUri (which some Windows builds
-    // cache stale), embed the logo per-toast as appLogoOverride so the banner
-    // always carries the Nebula mark next to the message.
-    if let Some(icon) = win::icon_path() {
-        toast = toast.icon(&icon, IconCrop::Square, crate::brand::NAME);
-    }
-    #[cfg(feature = "legacy-shell")]
-    if let Some((window, pane)) = focus {
-        if let Some(proxy) = PROXY.get() {
-            let proxy = proxy.clone();
-            toast = toast.on_activated(move |_action| {
-                let _ = proxy.send_event(Event::new(EventType::FocusWindow { pane }, window));
-                Ok(())
-            });
-        }
-    }
-
-    match toast.show() {
-        Ok(()) => log::debug!("notify: toast shown"),
-        Err(err) => log::warn!("notify: toast failed: {err}"),
+fn spawn_toast(title: String, body: String, activation: Option<ToastActivation>) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("nebula-toast".into())
+        .spawn(move || toast_clickable(&title, &body, activation))
+    {
+        log::warn!("notify: failed to spawn toast thread: {error}");
     }
 }
 
-#[cfg(not(windows))]
-pub(crate) fn toast(title: &str, body: &str) {
-    crate::platform::notifications::show(title, body);
-}
+#[cfg(test)]
+mod delivery_tests {
+    use super::*;
 
-#[cfg(all(not(windows), feature = "legacy-shell"))]
-fn toast_clickable(title: &str, body: &str, _focus: Option<(WindowId, Option<u64>)>) {
-    toast(title, body);
-}
-
-/// `nebula notify-test` entrypoint: run the full toast pipeline synchronously
-/// (registration + show), printing per-step diagnostics to the console. Skips
-/// the focus policy and throttle on purpose — the tester is looking at the
-/// screen. Returns a process exit code.
-#[cfg(windows)]
-pub fn notify_test() -> i32 {
-    println!("[1/2] Registering AUMID '{}' ...", win::AUMID);
-    match win::register_aumid() {
-        Ok(()) => {
-            println!(r"      OK  (HKCU\Software\Classes\AppUserModelId\{})", win::AUMID);
-            match win::icon_path() {
-                Some(path) => println!("      icon: {}", path.display()),
-                None => println!("      icon: unavailable (banner will have no logo)"),
-            }
-        },
-        Err(err) => {
-            eprintln!("      FAILED: {err}");
-            return 1;
-        },
+    #[test]
+    fn pane_throttle_does_not_suppress_another_pane_or_attention() {
+        let now = Instant::now();
+        let mut throttle = PaneNotificationThrottle::default();
+        assert!(throttle.accepts(1, false, now));
+        assert!(throttle.accepts(2, false, now));
+        assert!(!throttle.accepts(1, false, now));
+        assert!(throttle.accepts(1, true, now));
+        assert!(!throttle.accepts(1, true, now));
+        assert!(throttle.accepts(2, true, now));
     }
 
-    println!("[2/2] Showing toast ...");
-    let mut toast = tauri_winrt_notification::Toast::new(win::AUMID)
-        .title(crate::brand::NAME)
-        .text1("通知链路正常：nebula notify-test")
-        .duration(tauri_winrt_notification::Duration::Short);
-    if let Some(icon) = win::icon_path() {
-        toast = toast.icon(&icon, tauri_winrt_notification::IconCrop::Square, crate::brand::NAME);
-    }
-    match toast.show() {
-        Ok(()) => {
-            println!("      OK  — a toast should be on screen now.");
-            println!();
-            println!("If nothing appeared, check Windows Settings > System > Notifications:");
-            println!(
-                "the global toggle, Do Not Disturb / Focus Assist, and the {} entry.",
-                crate::brand::NAME
-            );
-            0
-        },
-        Err(err) => {
-            eprintln!("      FAILED: {err}");
-            1
-        },
-    }
-}
-
-#[cfg(not(windows))]
-pub fn notify_test() -> i32 {
-    println!("notify-test: system toasts are only implemented on Windows.");
-    0
-}
-
-/// Windows-only: the Nebula AppUserModelID and its registration.
-///
-/// A WinRT toast must be attributed to an AUMID that Windows can resolve to
-/// an app identity, or it silently refuses to show. For an unpackaged app the
-/// documented lightweight route is a registry key —
-/// `HKCU\Software\Classes\AppUserModelId\<AUMID>` with a `DisplayName` value
-/// (what Microsoft's own ToastNotificationManagerCompat writes). Per-user, no
-/// admin rights, no COM, no Start-menu shortcut, and idempotent: rewriting
-/// the same value is a cheap no-op, so a broken key self-heals on next run.
-#[cfg(windows)]
-mod win {
-    use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
-    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
-
-    /// AppUserModelID for Nebula. Toast notifications fire under this identity
-    /// so the system shows "Nebula" instead of "PowerShell" / "cmd.exe".
-    pub const AUMID: &str = "com.nebula.terminal";
-
-    /// Ensure the AUMID is registered. Best-effort, cached per process: the
-    /// write itself is a few syscalls, there is just no point repeating them
-    /// for every toast.
-    pub fn ensure_aumid() {
-        static REGISTERED: Mutex<Option<nebula_settings::AppIconName>> = Mutex::new(None);
-        let variant = crate::app_icon::selected();
-        let mut registered = REGISTERED.lock().unwrap_or_else(|error| error.into_inner());
-        if *registered != Some(variant) {
-            if let Err(err) = register_icon(variant) {
-                log::warn!("notify: AUMID registration failed (toast may not appear): {err}");
-            } else {
-                *registered = Some(variant);
-            }
-        }
+    #[test]
+    fn pane_throttle_expires_without_extending_on_repeats() {
+        let now = Instant::now();
+        let mut throttle = PaneNotificationThrottle::default();
+        assert!(throttle.accepts(1, false, now));
+        assert!(!throttle.accepts(1, false, now + Duration::from_secs(2)));
+        assert!(throttle.accepts(1, false, now + TOAST_THROTTLE));
+        assert_eq!(throttle.recent.len(), 1);
     }
 
-    /// Write `DisplayName` + `IconUri` under the AUMID key. `RegSetKeyValueW`
-    /// creates the missing subkey chain itself. The icon is best-effort: a
-    /// failed write only costs the logo, never the toast.
-    pub fn register_aumid() -> Result<(), String> {
-        register_icon(crate::app_icon::selected())
-    }
-
-    fn register_icon(variant: nebula_settings::AppIconName) -> Result<(), String> {
-        let subkey = format!(r"Software\Classes\AppUserModelId\{AUMID}");
-        set_reg_sz(&subkey, "DisplayName", crate::brand::NAME)?;
-        match ensure_icon_file(variant) {
-            Some(icon) => set_reg_sz(&subkey, "IconUri", &icon.display().to_string())?,
-            None => log::debug!("notify: toast icon not materialized; banner shows no logo"),
-        }
-        Ok(())
-    }
-
-    /// The materialized icon path, for diagnostics (`nebula notify-test`).
-    pub fn icon_path() -> Option<PathBuf> {
-        ensure_icon_file(crate::app_icon::selected())
-    }
-
-    fn ensure_icon_file(variant: nebula_settings::AppIconName) -> Option<PathBuf> {
-        let bytes = crate::app_icon::png(variant, 256)?;
-        let directory = crate::platform::dirs::data_dir();
-        let path = directory.join(format!("toast_icon-{}.png", variant.settings_value()));
-        let stale = std::fs::read(&path).ok().as_deref() != Some(bytes.as_ref());
-        if stale {
-            std::fs::create_dir_all(directory).ok()?;
-            std::fs::write(&path, bytes).ok()?;
-        }
-        Some(path)
-    }
-
-    /// Set one REG_SZ value under HKCU\`subkey`, creating the key as needed.
-    fn set_reg_sz(subkey: &str, name: &str, data: &str) -> Result<(), String> {
-        let subkey_w = to_wide(subkey);
-        let name_w = to_wide(name);
-        let data_w = to_wide(data);
-        let data_bytes = (data_w.len() * std::mem::size_of::<u16>()) as u32;
-
-        // SAFETY: every pointer references a live, NUL-terminated UTF-16
-        // buffer owned by this frame; RegSetKeyValueW copies the data before
-        // returning and creates intermediate keys as needed.
-        let status = unsafe {
-            RegSetKeyValueW(
-                HKEY_CURRENT_USER,
-                subkey_w.as_ptr(),
-                name_w.as_ptr(),
-                REG_SZ,
-                data_w.as_ptr().cast(),
-                data_bytes,
-            )
+    #[test]
+    fn attention_importance_is_independent_of_completion_text() {
+        let done =
+            Notification::AiTurn { program: "codex".to_owned(), message: None, attention: false };
+        let waiting = Notification::AiTurn {
+            program: "claude".to_owned(),
+            message: Some("Confirm command".to_owned()),
+            attention: true,
         };
-
-        if status == ERROR_SUCCESS {
-            Ok(())
-        } else {
-            Err(format!("RegSetKeyValueW({name}) failed with status {status}"))
-        }
+        assert!(!done.is_attention());
+        assert!(waiting.is_attention());
+        assert_eq!(waiting.toast_text(), ("claude".to_owned(), "Confirm command".to_owned()));
+        assert!(!Notification::Bell { program: None }.is_attention());
+        assert!(
+            !Notification::Text { body: "permission".to_owned(), program: None }.is_attention()
+        );
     }
 
-    /// NUL-terminated UTF-16 for Win32 wide-string APIs.
-    fn to_wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(Some(0)).collect()
+    #[cfg(feature = "gpui-shell")]
+    #[test]
+    fn activation_preserves_exact_pane_and_generic_application_targets() {
+        use crate::gpui_shell::GpuiShellEvent;
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let pane_activation = gpui_activation(sender.clone(), Some(42));
+        let generic_activation = gpui_activation(sender, None);
+        pane_activation();
+        generic_activation();
+        assert!(matches!(receiver.try_recv(), Ok(GpuiShellEvent::NotificationFocus(Some(42)))));
+        assert!(matches!(receiver.try_recv(), Ok(GpuiShellEvent::NotificationFocus(None))));
+        drop(receiver);
+        pane_activation();
     }
 }

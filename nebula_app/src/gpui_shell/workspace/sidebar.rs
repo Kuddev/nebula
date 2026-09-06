@@ -936,6 +936,7 @@ impl NebulaWorkspace {
                         Button::new("toggle-sidebar")
                             .icon(IconName::PanelLeft)
                             .ghost()
+                            .disabled(settings_active)
                             // 侧栏是开关而非一次性动作：展开期间必须持续显示
                             // 选中底，和旧壳 `left_sidebar_visible()` 同义。
                             .selected(!self.sidebar_collapsed)
@@ -1016,6 +1017,18 @@ impl NebulaWorkspace {
     /// 吃鼠标事件，标题栏本身的拖窗和双击最大化照旧。
     fn render_collapsed_tab_title(&self, cx: &mut Context<Self>) -> gpui::Div {
         let slot = div().relative().flex_1().min_w_0().h_full();
+        if self.settings_open {
+            return slot.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(cx.theme().foreground)
+                    .child(crate::gpui_shell::config::ui_language(cx).pick("设置", "Settings")),
+            );
+        }
         if !self.sidebar_collapsed || self.tabs.is_empty() {
             return slot;
         }

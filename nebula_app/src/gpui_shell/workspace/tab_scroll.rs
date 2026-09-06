@@ -122,7 +122,11 @@ impl NebulaWorkspace {
         let window = self.tabs_window();
         let next = reveal_index(self.active, window.scroll, window.show);
         self.tabs_scroll = clamp_scroll(next, window.max);
-        self.top_tabs_scroll.scroll_to_item(self.active);
+        self.top_tabs_scroll.scroll_to_item(if self.settings_open {
+            self.tabs.len()
+        } else {
+            self.active
+        });
     }
 
     fn tabs_overlay_bar(&self) -> Option<OverlayScrollbar> {

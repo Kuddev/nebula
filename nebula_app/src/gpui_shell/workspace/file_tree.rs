@@ -325,7 +325,7 @@ impl NebulaWorkspace {
                         indexed_count,
                         indexed_more
                     ),
-                    crate::display::UiLanguage::EnUs => format!(
+                    _ => format!(
                         "{} results · {}{} indexed",
                         self.side_panel.file_search_total(),
                         indexed_count,

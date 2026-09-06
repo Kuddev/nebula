@@ -27,6 +27,10 @@ macro_rules! icons {
 const NEBULA_ICONS: &[(&str, &[u8])] = icons![
     "command-manager",
     "keymap",
+    "layout-grid",
+    "mouse-pointer",
+    "sliders",
+    "pin",
     "pencil",
     "trash-2",
     "vcs-changes",
@@ -59,6 +63,10 @@ impl AssetSource for NebulaAssets {
 
 /// 自带图标的路径。走路径而不是 `IconName`：扩展那个枚举等于改 fork。
 pub mod nav {
+    pub const LAYOUT_GRID: &str = "icons/nebula-layout-grid.svg";
+    pub const MOUSE_POINTER: &str = "icons/nebula-mouse-pointer.svg";
+    pub const SLIDERS: &str = "icons/nebula-sliders.svg";
+    pub const PIN: &str = "icons/nebula-pin.svg";
     /// 保存命令列表。闪电表达快捷执行，右侧三横线表达可管理的命令集合。
     pub const COMMAND_MANAGER: &str = "icons/nebula-command-manager.svg";
     /// 键盘。lucide 没有，而「按键映射」原来错挂在字号图标上。

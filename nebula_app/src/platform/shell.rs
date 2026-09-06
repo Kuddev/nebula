@@ -17,7 +17,8 @@ pub fn default_shell_id() -> String {
     #[cfg(unix)]
     {
         let shell = nebula_terminal::tty::default_shell_program().unwrap_or_default();
-        Path::new(&shell).file_name()
+        Path::new(&shell)
+            .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
             .unwrap_or(default_unix_shell_id())

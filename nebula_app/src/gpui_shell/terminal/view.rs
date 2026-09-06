@@ -1,6 +1,8 @@
 //! 终端视图：持有会话、处理输入与 IME、驱动重绘。
 
 mod broadcast;
+mod confirmation;
+mod notifications;
 mod pointer;
 mod runtime;
 
@@ -141,12 +143,8 @@ fn paste_needs_confirmation(text: &str, mode: TermMode) -> bool {
 /// 当前 UI 语言。`RuntimeSettings` 每次读盘，所以只在用户动作（复制提示、
 /// 粘贴确认）时取，不进渲染热路径。
 fn ui_language() -> crate::display::UiLanguage {
-    match nebula_settings::RuntimeSettings::load().language {
-        nebula_settings::LanguagePref::System => crate::display::LanguagePreference::System,
-        nebula_settings::LanguagePref::ZhCn => crate::display::LanguagePreference::ZhCn,
-        nebula_settings::LanguagePref::EnUs => crate::display::LanguagePreference::EnUs,
-    }
-    .resolved()
+    crate::display::LanguagePreference::from(nebula_settings::RuntimeSettings::load().language)
+        .resolved()
 }
 
 /// 终端视图对宿主（Panel/Workspace）暴露的状态变化。
@@ -172,9 +170,13 @@ pub enum TerminalViewEvent {
     /// Provider 明确上报的 permission/awaiting-input 上下文。宿主拥有 Window，
     /// 由它负责驻留提示、后台 Tab 标记和系统通知；raw context 不进入文案。
     AiAttention(crate::ai_hook::AttentionContext),
+    Notification(crate::notify::Notification),
     /// 非应用鼠标模式下右键命中真实终端选区。菜单由 workspace 根持有，
     /// 避免每个 pane 都渲染一份带叠加阴影的 PopupMenu。
-    SelectionContextMenuRequested { position: Point<Pixels>, text: String },
+    SelectionContextMenuRequested {
+        position: Point<Pixels>,
+        text: String,
+    },
     /// 程序上报的任务进度（OSC 9;4）变了。宿主把 pane 级状态投到 tab badge，
     /// 并且只把当前聚焦 pane 投到窗口级任务栏。
     ProgressChanged(crate::taskbar::TaskProgress),
@@ -252,6 +254,7 @@ pub enum SidebarActivity {
 
 pub struct TerminalView {
     pub(super) answers: crate::assistant_answer::AnswerInbox,
+    confirmation: super::confirmation::ConfirmationState,
     pub(super) answer_reader: Option<gpui::Entity<super::answer_reader::AnswerReader>>,
     preserve_agent_math_source: bool,
     pub pane_id: u64,
@@ -331,8 +334,6 @@ pub struct TerminalView {
     /// 的 working/blocked 屏幕或权威 hook 前，不允许它伪造完成边沿。
     agent_runtime_submit_pending: bool,
     pending_runtime_submit: Option<crate::display::state::RuntimeSubmitBarrier>,
-    /// OSC 9 程序通知，攒到 render（那里才有 `Window` 判聚焦）再呈现。
-    pending_notify: Vec<String>,
     /// OSC 1337 图片的串行后台解码队列和有界像素缓存。图片不进入字符网格，
     /// 只用事件携带的绝对行锚定到对应的 scrollback 位置。
     pub(super) inline_images: super::inline_image::InlineImageStore,
@@ -420,6 +421,7 @@ pub struct TerminalView {
     /// 计算在 `display::suggest_engine`，数据源在 `terminal::suggest` 的
     /// 进程级单例。cwd 由 NEBULA| 标题协议同步进来。
     pub(super) suggest: crate::display::NebulaPaneState,
+    pub(super) completion_viewport: super::completion_viewport::CompletionViewport,
     /// `suggest` 取样时的可视光标位置。旧壳在一次 Term 锁内同时读取提示行
     /// 与光标；GPUI 的 render/paint 分两次取锁，因此用此锚点拒绝跨世代组合
     /// （典型是退格回显夹在两次取锁之间造成 ghost 左右跳）。
@@ -441,8 +443,6 @@ pub struct TerminalView {
     /// BEL 视觉闪烁：整 pane 盖一层前景 12%，约 150ms。
     pub(super) bell_flash: bool,
     bell_flash_epoch: u64,
-    /// 失焦时再递系统 toast / 驻留横幅（render 里才有 Window）。
-    pending_bell_notify: Option<(String, String)>,
 }
 
 impl TerminalView {
@@ -743,38 +743,7 @@ impl TerminalView {
                         while let Some(stage) = stage_rx.next().await {
                             if this
                                 .update(cx, |view: &mut Self, cx| {
-                                    view.ssh_stage = Some(stage.clone());
-                                    // 连接卡片状态机（旧壳 ssh_connect_stage
-                                    // 同款合同）：Ready 移除；Resolve 开新卡
-                                    // 片；其余阶段推进。中途断线不会让用
-                                    // 了半天的终端凭空复活一张卡片。
-                                    match stage {
-                                        crate::ssh_session::SshStage::Ready => {
-                                            view.ssh_connect = None;
-                                        },
-                                        other => {
-                                            match &mut view.ssh_connect {
-                                                Some(state) => state.set_stage(other),
-                                                None => {
-                                                    if matches!(
-                                                        other,
-                                                        crate::ssh_session::SshStage::Resolve
-                                                    ) {
-                                                        if let Some(dest) =
-                                                            view.ssh_destination.clone()
-                                                        {
-                                                            view.ssh_connect = Some(
-                                                                crate::display::ssh_connect::SshConnectState::new(dest),
-                                                            );
-                                                            view.ssh_connect_last_step =
-                                                                std::time::Instant::now();
-                                                        }
-                                                    }
-                                                },
-                                            }
-                                        },
-                                    }
-                                    cx.notify();
+                                    view.apply_ssh_stage(stage, cx);
                                 })
                                 .is_err()
                             {
@@ -829,6 +798,7 @@ impl TerminalView {
             math: super::math_overlay::MathOverlay::default(),
             answers: crate::assistant_answer::AnswerInbox::default(),
             answer_reader: None,
+            confirmation: super::confirmation::ConfirmationState::default(),
             preserve_agent_math_source: false,
             font: mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal),
             font_bold: mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal),
@@ -862,7 +832,6 @@ impl TerminalView {
             idle_screen_streak: 0,
             agent_runtime_submit_pending: false,
             pending_runtime_submit: None,
-            pending_notify: Vec::new(),
             inline_images: super::inline_image::InlineImageStore::default(),
             ssh_destination,
             exec_context,
@@ -909,6 +878,7 @@ impl TerminalView {
                 state
             },
             suggest_anchor: None,
+            completion_viewport: super::completion_viewport::CompletionViewport::default(),
             ghost_enabled,
             accept,
             completion_style,
@@ -918,7 +888,6 @@ impl TerminalView {
             last_task_state: None,
             bell_flash: false,
             bell_flash_epoch: 0,
-            pending_bell_notify: None,
         };
         // 出生即把亮暗种进 Term：`Term::color_scheme_dark` 的默认值是「暗」，
         // 浅色主题下启动的 pane 如果不种，第一个 DECSET 2031 的订阅方会拿到
@@ -1084,6 +1053,7 @@ impl TerminalView {
                 if self.pending_runtime_submit.is_some() {
                     return;
                 }
+                self.notify_command_done(cx);
                 self.last_command_failed = exit_code.is_some_and(|code| code != 0);
                 // 旧壳同款收尾：CLI 退回提示符后，它不再是这个 pane 的前台
                 // 事实——hook 稍后若仍在跑会重新点亮（handle_ai_hook 覆写）。
@@ -1097,13 +1067,12 @@ impl TerminalView {
                 cx.notify();
             },
             TermEvent::Notify(body) => {
-                // 程序自己发的 OSC 9 通知：旧壳只在窗口没聚焦时才递出去
-                // （event.rs:3291），聚焦时用户本来就在看这个 pane。这里攒着，
-                // render 拿到 `Window` 才判聚焦。
                 let body = body.trim().to_owned();
                 if !body.is_empty() {
-                    self.pending_notify.push(body);
-                    cx.notify();
+                    cx.emit(TerminalViewEvent::Notification(crate::notify::Notification::Text {
+                        body,
+                        program: self.running_program.clone(),
+                    }));
                 }
             },
             TermEvent::AiHookEnvelope(envelope) => {
@@ -1127,9 +1096,8 @@ impl TerminalView {
 
     fn drive_inline_image_decode(&mut self, cx: &mut Context<Self>) {
         let Some(pending) = self.inline_images.start_next() else { return };
-        let decode = cx
-            .background_executor()
-            .spawn(async move { super::inline_image::decode(pending) });
+        let decode =
+            cx.background_executor().spawn(async move { super::inline_image::decode(pending) });
         cx.spawn(async move |this, cx| {
             let result = decode.await;
             let _ = this.update(cx, |view, cx| {
@@ -1145,6 +1113,7 @@ impl TerminalView {
 
     /// `Exited` 只对宿主发一次；重复的退出信号（ChildExit 之后必然跟 Exit）只更新文案。
     fn mark_exited(&mut self, message: String, cx: &mut Context<Self>) {
+        self.confirmation.invalidate();
         self.pending_runtime_submit = None;
         self.suggest.pending_command_prompt = None;
         if self.exited.is_none() {
@@ -1185,6 +1154,7 @@ impl TerminalView {
 
     /// 输入后回到底部并请求重绘。
     fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.confirmation.observe_input(&bytes);
         self.awaiting_input = false;
         if let Some(session) = &self.session {
             {
@@ -1266,11 +1236,9 @@ impl TerminalView {
         if mode.visual() || (mode.audible() && !audible_ok) {
             self.flash_bell(cx);
         }
-        let program = self.running_program.clone();
-        self.pending_bell_notify = Some(match program {
-            Some(name) => (name, "任务完成，等待输入".to_owned()),
-            None => (crate::brand::NAME.to_owned(), "终端响铃".to_owned()),
-        });
+        cx.emit(TerminalViewEvent::Notification(crate::notify::Notification::Bell {
+            program: self.running_program.clone(),
+        }));
         cx.emit(TerminalViewEvent::Bell);
         cx.notify();
     }
@@ -1631,12 +1599,8 @@ impl TerminalView {
             // 原始按键可能紧接着再次到来；先清除选区，下一次 Copy 才能按
             // “未处理”传播回终端，而不是重复复制并再次弹 toast。
             session.term.lock().selection = None;
-            let message = match ui_language() {
-                crate::display::UiLanguage::EnUs => {
-                    format!("Copied {lines} lines to clipboard")
-                },
-                _ => format!("已复制 {lines} 行到剪贴板"),
-            };
+            let message = ui_language()
+                .format(crate::i18n::Message::CommonCopiedLines, &[("lines", &lines.to_string())]);
             crate::gpui_shell::toast::toast(window, cx, crate::display::ToastKind::Info, message);
             cx.notify();
         }
@@ -1672,11 +1636,9 @@ impl TerminalView {
         // bracketed 的对端（codex/vim/PSReadLine）整块收下、自己决定怎么处理；
         // 裸 shell 是换行落地即执行。风险不同，话就得说得不一样。
         let runs_line_by_line = !self.term_mode().contains(TermMode::BRACKETED_PASTE);
-        let title: SharedString = match language {
-            crate::display::UiLanguage::EnUs => format!("Paste {lines} lines?"),
-            _ => format!("粘贴 {lines} 行文本？"),
-        }
-        .into();
+        let title: SharedString = language
+            .format(crate::i18n::Message::CommonPasteLines, &[("lines", &lines.to_string())])
+            .into();
         let body: SharedString = if runs_line_by_line {
             language.pick(
                 "shell 会把这些内容逐行执行。请确认来源可信。",
@@ -1827,14 +1789,19 @@ impl TerminalView {
     ) {
         #[cfg(windows)]
         {
-            if self.exited.is_some() || !self.ghost_enabled {
+            if self.exited.is_some()
+                || !self.ghost_enabled
+                || matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Failed(_)))
+            {
                 self.suggest_anchor = None;
                 self.suggest.clear_completion_hints();
+                self.completion_viewport.clear();
                 return;
             }
             if self.session.is_none() {
                 self.suggest_anchor = None;
                 self.suggest.clear_completion_hints();
+                self.completion_viewport.clear();
                 return;
             }
             match line {
@@ -1847,11 +1814,16 @@ impl TerminalView {
                         self.ghost_enabled,
                         self.completion_style,
                     );
+                    self.completion_viewport.update_query(
+                        &self.suggest.screen_line,
+                        self.suggest.completion_items.len(),
+                    );
                 },
                 None => {
                     self.suggest_anchor = None;
                     self.suggest.screen_line.clear();
                     self.suggest.clear_completion_hints();
+                    self.completion_viewport.clear();
                 },
             }
         }
@@ -1928,6 +1900,9 @@ impl TerminalView {
         let mods = &ks.modifiers;
         let plain_mods = !mods.control && !mods.alt && !mods.platform;
         match ks.key.as_str() {
+            "enter" if keymap::preserves_enter_modifiers(ks, mode) => {
+                crate::display::nebula_clear_line(&mut self.suggest);
+            },
             "enter" => self.commit_line(cx),
             "backspace" if mods.control && !mods.alt && !mods.platform => {
                 crate::display::nebula_input_delete_word(&mut self.suggest);
@@ -2011,17 +1986,24 @@ impl TerminalView {
             if suggest::popup_active(&self.suggest) {
                 match ks.key.as_str() {
                     // 候选自动出现时保持未选中，让 Up/Down 继续交给 shell
-                    // 历史；Tab 或鼠标先建立选中态后，方向键才导航列表。
+                    // 历史；Tab 先建立选中态后，方向键才导航列表。
                     key @ ("tab" | "down" | "up")
                         if key == "tab" || self.suggest.completion_selected.is_some() =>
                     {
                         suggest::popup_move(&mut self.suggest, if key == "up" { -1 } else { 1 });
+                        let rows = self.completion_popup_geometry().map_or(8, |popup| popup.rows);
+                        self.completion_viewport.reveal(
+                            self.suggest.completion_selected,
+                            self.suggest.completion_items.len(),
+                            rows,
+                        );
                         cx.notify();
                         cx.stop_propagation();
                         return;
                     },
                     "escape" => {
                         if suggest::popup_dismiss(&mut self.suggest) {
+                            self.completion_viewport.clear();
                             cx.notify();
                             cx.stop_propagation();
                             return;
@@ -2087,6 +2069,7 @@ impl TerminalView {
         self.track_encoded_key(ks, &mode, cx);
 
         if let Some(bytes) = keymap::encode(ks, &mode) {
+            keymap::trace_enter(ks, &mode, &bytes);
             self.write_user_key(ks.clone(), bytes, cx);
             cx.stop_propagation();
         }
@@ -2141,7 +2124,10 @@ impl Drop for TerminalView {
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.answer_reader.as_ref().map_or_else(|| self.focus_handle.clone(), |reader| reader.read(cx).focus_handle.clone())
+        self.answer_reader.as_ref().map_or_else(
+            || self.focus_handle.clone(),
+            |reader| reader.read(cx).focus_handle.clone(),
+        )
     }
 }
 
@@ -2251,38 +2237,6 @@ impl Render for TerminalView {
         if let Some(reader) = &self.answer_reader {
             return div().size_full().child(reader.clone()).into_any_element();
         }
-        // OSC 9 程序通知：旧壳只在窗口没聚焦时递出去，聚焦时用户本来就在看这
-        // 个 pane。这里是最早能同时拿到 `Window` 和 view 可变引用的地方。用驻留
-        // 式 banner 而不是 toast——人不在看的时候弹一条 5 秒自动消失的提示等于
-        // 没弹。推送 defer 到本轮 effect 之后，不在 render 中途改 `Root`。
-        if !self.pending_notify.is_empty() {
-            let notes = std::mem::take(&mut self.pending_notify);
-            if !window.is_window_active() {
-                window.defer(cx, move |window, cx| {
-                    for body in notes {
-                        crate::gpui_shell::toast::banner(
-                            window,
-                            cx,
-                            crate::display::ToastKind::Info,
-                            body,
-                        );
-                    }
-                });
-            }
-        }
-        if let Some((title, body)) = self.pending_bell_notify.take() {
-            if !window.is_window_active() {
-                crate::notify::toast(&title, &body);
-                window.defer(cx, move |window, cx| {
-                    crate::gpui_shell::toast::banner(
-                        window,
-                        cx,
-                        crate::display::ToastKind::Info,
-                        format!("{title} · {body}"),
-                    );
-                });
-            }
-        }
         // 文件树拖到终端时的落点高亮：强调色压到很低的不透明度，与 hover 的
         // 中性灰区分开——用户要能一眼看出"松手会落在这里"。
         let drop_highlight = cx.theme().accent.opacity(0.18);
@@ -2344,6 +2298,9 @@ impl Render for TerminalView {
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
                     this.clear_link_hover(cx);
+                    if this.completion_viewport.hovered.take().is_some() {
+                        cx.notify();
+                    }
                 }
             }));
 
@@ -2390,14 +2347,29 @@ impl Render for TerminalView {
         }
         if let Some(answer) = self.answers.latest.clone() {
             let provider = if answer.provider == "claude" { "Claude Code" } else { "Codex" };
-            return div().size_full().relative()
+            return div()
+                .size_full()
+                .relative()
                 .child(root)
-                .child(crate::gpui_shell::prelude::h_flex().absolute().top_0().right_2().px_2().gap_2().items_center()
-                    .bg(cx.theme().background)
-                    .child(div().text_xs().child(format!("{provider} · 回答")))
-                    .child(crate::gpui_shell::prelude::Button::new("answer-open")
-                        .label("阅读").small()
-                        .on_click(cx.listener(|view, _, window, cx| view.open_answer(window, cx)))))
+                .child(
+                    crate::gpui_shell::prelude::h_flex()
+                        .absolute()
+                        .top_0()
+                        .right_2()
+                        .px_2()
+                        .gap_2()
+                        .items_center()
+                        .bg(cx.theme().background)
+                        .child(div().text_xs().child(format!("{provider} · 回答")))
+                        .child(
+                            crate::gpui_shell::prelude::Button::new("answer-open")
+                                .label("阅读")
+                                .small()
+                                .on_click(
+                                    cx.listener(|view, _, window, cx| view.open_answer(window, cx)),
+                                ),
+                        ),
+                )
                 .into_any_element();
         }
         root.into_any_element()
@@ -2411,11 +2383,16 @@ impl TerminalView {
         if self.agent_status == crate::ai_agents::AgentStatus::Blocked {
             reader.update(cx, |reader, cx| reader.needs_attention(cx));
         }
-        cx.subscribe_in(&reader, window, |view, _, _: &super::answer_reader::ReaderEvent, window, cx| {
-            view.answer_reader = None;
-            window.focus(&view.focus_handle, cx);
-            cx.notify();
-        }).detach();
+        cx.subscribe_in(
+            &reader,
+            window,
+            |view, _, _: &super::answer_reader::ReaderEvent, window, cx| {
+                view.answer_reader = None;
+                window.focus(&view.focus_handle, cx);
+                cx.notify();
+            },
+        )
+        .detach();
         let focus = reader.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
         self.answer_reader = Some(reader);
@@ -2423,11 +2400,14 @@ impl TerminalView {
     }
 
     pub(super) fn uses_source_reader_math(&mut self) -> bool {
-        self.preserve_agent_math_source |= self.running_program.as_deref().is_some_and(|program| {
-            matches!(program, "claude" | "codex")
-        }) || self.ai_session.as_ref().is_some_and(|session| {
-            matches!(session.source.as_str(), "claude" | "codex")
-        });
+        self.preserve_agent_math_source |= self
+            .running_program
+            .as_deref()
+            .is_some_and(|program| matches!(program, "claude" | "codex"))
+            || self
+                .ai_session
+                .as_ref()
+                .is_some_and(|session| matches!(session.source.as_str(), "claude" | "codex"));
         self.preserve_agent_math_source
     }
 }

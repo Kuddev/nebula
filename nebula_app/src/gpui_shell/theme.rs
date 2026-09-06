@@ -467,7 +467,7 @@ pub fn settings_hairline(cx: &App) -> Hsla {
 
 pub fn settings_hover_bg(cx: &App, strong: bool) -> Hsla {
     let sk = chrome_theme(effective_theme_name(cx)).skin();
-    let (hover_alpha, strong_alpha) = if sk.is_light { (22, 34) } else { (30, 46) };
+    let (hover_alpha, strong_alpha) = if sk.is_light { (10, 18) } else { (30, 46) };
     let alpha = if strong { strong_alpha } else { hover_alpha };
     wash(Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, alpha))
 }
@@ -571,16 +571,27 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     theme.overlay = wash(sk.veil);
 
     // 悬停 / 选中水洗。
-    theme.accent = wash(sk.hover);
+    let hover = if sk.is_light {
+        wash(Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 10))
+    } else {
+        wash(sk.hover)
+    };
+    let selected = if sk.is_light {
+        wash(Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 18))
+    } else {
+        wash(sk.accent_soft)
+    };
+    let list_selected = if sk.is_light { selected } else { wash(sk.hover_strong) };
+    theme.accent = hover;
     theme.accent_foreground = ink(sk.ink_strong);
-    theme.list_hover = wash(sk.hover);
-    theme.list_active = wash(sk.hover_strong);
+    theme.list_hover = hover;
+    theme.list_active = list_selected;
     theme.list_active_border = transparent;
     theme.sidebar_foreground = ink(sk.ink);
-    theme.sidebar_accent = wash(sk.accent_soft);
+    theme.sidebar_accent = selected;
     theme.sidebar_accent_foreground = ink(sk.ink_strong);
     theme.tab_foreground = ink(sk.ink_dim);
-    theme.tab_active = wash(sk.accent_soft);
+    theme.tab_active = selected;
     theme.tab_active_foreground = ink(sk.ink_strong);
 
     // 按钮。
@@ -594,8 +605,8 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     theme.primary_active = shift3(soft_accent.r, soft_accent.g, soft_accent.b, 0.18);
     theme.primary_foreground = ink(sk.ink_on_accent);
     theme.secondary = wash(sk.surface);
-    theme.secondary_hover = wash(sk.hover);
-    theme.secondary_active = wash(sk.hover_strong);
+    theme.secondary_hover = hover;
+    theme.secondary_active = list_selected;
     theme.secondary_foreground = ink(sk.ink);
 
     // 语义三色。

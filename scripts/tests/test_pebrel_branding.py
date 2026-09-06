@@ -66,7 +66,7 @@ class PebrelBrandingTests(unittest.TestCase):
         self.assertNotIn("Pebrel-", download)
 
     def test_notification_identity_is_not_renamed(self):
-        source = self.source("nebula_app/src/notify.rs")
+        source = self.source("nebula_app/src/platform/notifications.rs")
         self.assertIn('AUMID: &str = "com.nebula.terminal";', source)
         self.assertIn('set_reg_sz(&subkey, "DisplayName", crate::brand::NAME)', source)
 

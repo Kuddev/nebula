@@ -742,7 +742,9 @@ fn parse_envelope(bytes: &[u8]) -> Option<AiHookEvent> {
         raw_context: sanitized_raw_context(&payload),
     });
     let answer = crate::assistant_answer::AssistantAnswer::from_hook(&source, &payload);
-    let answer_cwd = payload.get("cwd").and_then(Value::as_str)
+    let answer_cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
         .filter(|path| path.len() <= 4096 && !path.chars().any(char::is_control))
         .map(std::path::PathBuf::from)
         .filter(|path| path.is_absolute());

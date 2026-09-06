@@ -27,11 +27,35 @@ fn progress_sidebar_activity(
 }
 
 impl TerminalView {
+    pub(super) fn apply_ssh_stage(
+        &mut self,
+        stage: crate::ssh_session::SshStage,
+        cx: &mut Context<Self>,
+    ) {
+        self.ssh_stage = Some(stage.clone());
+        super::super::ssh_connect_overlay::update_connection_state(
+            &mut self.ssh_connect,
+            self.ssh_destination.as_deref(),
+            stage.clone(),
+        );
+        self.ssh_connect_last_step = std::time::Instant::now();
+        if matches!(stage, crate::ssh_session::SshStage::Failed(_)) {
+            self.pending_runtime_submit = None;
+            self.command_running = false;
+            self.command_started = None;
+            self.confirmation.invalidate();
+            self.answer_reader = None;
+        }
+        cx.emit(TerminalViewEvent::TitleChanged);
+        cx.notify();
+    }
+
     /// Clear foreground Agent identity after an authoritative command end or
     /// after the submitted shell prompt is observed again. OSC 133;D remains
     /// the primary edge; the cached-prompt path calls the same reset so the two
     /// lifecycle routes cannot drift apart.
     pub(super) fn clear_foreground_agent_state(&mut self) -> bool {
+        self.confirmation.observe_waiting(false);
         self.answers.close();
         let title_changed =
             self.running_program.take().is_some() || self.ai_session.take().is_some();
@@ -702,11 +726,15 @@ impl TerminalView {
         // 进程就是主 agent（子代理必须由它 spawn，不可能先到）。
         let from_primary_agent = self.claim_primary_agent(event);
         if from_primary_agent && self.ssh_destination.is_none() && self.exited.is_none() {
-            if self.answers.observe(event, self.pane_id) && let Some(reader) = &self.answer_reader {
+            if self.answers.observe(event, self.pane_id)
+                && let Some(reader) = &self.answer_reader
+            {
                 reader.update(cx, |reader, cx| reader.answer_arrived(cx));
             }
         }
-        if event.kind == AiHookKind::NeedsAttention && let Some(reader) = &self.answer_reader {
+        if event.kind == AiHookKind::NeedsAttention
+            && let Some(reader) = &self.answer_reader
+        {
             reader.update(cx, |reader, cx| reader.needs_attention(cx));
         }
         if from_primary_agent
@@ -772,11 +800,30 @@ impl TerminalView {
                 }
             },
         }
-        if event.kind == AiHookKind::NeedsAttention
-            && let Some(mut attention) = event.attention.clone()
+        if from_primary_agent {
+            self.confirmation.observe_waiting(self.agent_status == AgentStatus::Blocked);
+        }
+        if event.kind == AiHookKind::NeedsAttention {
+            self.confirmation.set_provider_request(event.event_id.as_deref());
+            if let Some(mut attention) = event.attention.clone() {
+                attention.pane_id = Some(self.pane_id);
+                cx.emit(TerminalViewEvent::AiAttention(attention));
+            } else {
+                cx.emit(TerminalViewEvent::Notification(crate::notify::Notification::AiTurn {
+                    program: event.source.clone(),
+                    message: event.message.clone(),
+                    attention: true,
+                }));
+            }
+        } else if from_primary_agent
+            && event.kind == AiHookKind::TurnDone
+            && matches!(self.agent_status, AgentStatus::Done | AgentStatus::Blocked)
         {
-            attention.pane_id = Some(self.pane_id);
-            cx.emit(TerminalViewEvent::AiAttention(attention));
+            cx.emit(TerminalViewEvent::Notification(crate::notify::Notification::AiTurn {
+                program: event.source.clone(),
+                message: event.message.clone(),
+                attention: self.agent_status == AgentStatus::Blocked,
+            }));
         }
         cx.emit(TerminalViewEvent::TitleChanged);
         cx.notify();
@@ -801,6 +848,12 @@ impl TerminalView {
     /// 1 Hz 屏幕看门狗：hook 提供精确边沿，屏幕补偿丢失边沿和无 hook 客户端。
     pub fn refresh_agent_screen_state(&mut self, cx: &mut Context<Self>) {
         use crate::ai_agents::AgentStatus;
+
+        if self.exited.is_some()
+            || matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Failed(_)))
+        {
+            return;
+        }
 
         // Wakeup 会被 synchronized-update 合并；1 Hz 看门狗提供可靠的
         // Grid 后置检查，确保 Runtime 文本回显后一定能补发 Enter。
@@ -852,23 +905,22 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        let program = match self.running_program.clone() {
-            Some(program) => program,
-            None => {
-                let Some(agent) = crate::ai_agents::identify(&screen) else {
-                    self.idle_screen_streak = 0;
-                    return;
-                };
-                let program = agent.slug().to_owned();
-                log::debug!("agent identity from screen: pane={} program={program}", self.pane_id);
-                self.running_program = Some(program.clone());
-                self.agent_status_source = crate::ai_agents::AgentStatusSource::Screen;
-                self.agent_status_rule = None;
-                cx.emit(TerminalViewEvent::TitleChanged);
-                cx.notify();
-                program
-            },
+        let identify =
+            super::notifications::screen_identity_allowed(self.running_program.as_deref());
+        let detected = identify.then(|| crate::ai_agents::identify(&screen)).flatten();
+        let Some(program) =
+            super::notifications::screen_program(self.running_program.as_deref(), detected)
+        else {
+            self.idle_screen_streak = 0;
+            return;
         };
+        if self.running_program.as_deref() != Some(program.as_str()) {
+            self.running_program = Some(program.clone());
+            self.agent_status_source = crate::ai_agents::AgentStatusSource::Screen;
+            self.agent_status_rule = None;
+            cx.emit(TerminalViewEvent::TitleChanged);
+            cx.notify();
+        }
         if crate::ai_agents::AgentKind::parse(&program).is_none() {
             return;
         }
@@ -931,7 +983,17 @@ impl TerminalView {
                 return;
             },
         };
+        self.confirmation.observe_waiting(next == AgentStatus::Blocked);
         if next != self.agent_status {
+            if let Some(attention) =
+                super::notifications::screen_notification(self.agent_status, next)
+            {
+                cx.emit(TerminalViewEvent::Notification(crate::notify::Notification::AiTurn {
+                    program: program.clone(),
+                    message: None,
+                    attention,
+                }));
+            }
             log::debug!(
                 "agent screen state: pane={} program={} {:?}->{next:?} rule={}",
                 self.pane_id,
@@ -1041,6 +1103,10 @@ impl TerminalView {
     }
 
     fn runtime_screen_snapshot(&self) -> Option<String> {
+        self.runtime_screen_state().map(|(screen, _)| screen)
+    }
+
+    pub(super) fn runtime_screen_state(&self) -> Option<(String, TermMode)> {
         let session = self.session.as_ref()?;
         let term = session.term.lock();
         let lines = term.screen_lines();
@@ -1049,7 +1115,7 @@ impl TerminalView {
         }
         let start = TermPoint::new(Line(0), Column(0));
         let end = TermPoint::new(Line(lines as i32 - 1), Column(term.columns().saturating_sub(1)));
-        Some(term.bounds_to_string(start, end))
+        Some((term.bounds_to_string(start, end), *term.mode()))
     }
 
     pub(super) fn flush_pending_runtime_submit(&mut self, cx: &mut Context<Self>) {

@@ -3,8 +3,10 @@
 //! 边界：本模块之外不出现 nebula_terminal 类型；nebula_terminal 之内不出现
 //! GPUI 类型。会话生命周期归 `session`，绘制归 `element`，交互归 `view`。
 
-pub mod colors;
 mod answer_reader;
+pub mod colors;
+mod completion_viewport;
+pub(super) mod confirmation;
 pub mod element;
 mod inline_image;
 pub mod keymap;

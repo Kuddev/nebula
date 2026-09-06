@@ -86,30 +86,12 @@ pub(super) fn classify_private_key_contents(contents: &[u8]) -> PrivateKeyFileKi
         return PrivateKeyFileKind::PublicKey;
     }
     if [
-        concat!(
-            "-----BEGIN OPENSSH ",
-            "PRIVATE KEY-----"
-        ),
-        concat!(
-            "-----BEGIN RSA ",
-            "PRIVATE KEY-----"
-        ),
-        concat!(
-            "-----BEGIN EC ",
-            "PRIVATE KEY-----"
-        ),
-        concat!(
-            "-----BEGIN ENCRYPTED ",
-            "PRIVATE KEY-----"
-        ),
-        concat!(
-            "-----BEGIN ",
-            "PRIVATE KEY-----"
-        ),
-        concat!(
-            "PuTTY-User-Key-",
-            "File-"
-        ),
+        concat!("-----BEGIN OPENSSH ", "PRIVATE KEY-----"),
+        concat!("-----BEGIN RSA ", "PRIVATE KEY-----"),
+        concat!("-----BEGIN EC ", "PRIVATE KEY-----"),
+        concat!("-----BEGIN ENCRYPTED ", "PRIVATE KEY-----"),
+        concat!("-----BEGIN ", "PRIVATE KEY-----"),
+        concat!("PuTTY-User-Key-", "File-"),
     ]
     .iter()
     .any(|header| trimmed.starts_with(header))
@@ -254,21 +236,15 @@ mod tests {
     fn encrypted_and_putty_private_key_headers_are_accepted_for_later_unlock() {
         assert_eq!(
             classify_private_key_contents(
-                concat!(
-                    "-----BEGIN OPENSSH ",
-                    "PRIVATE KEY-----\nnot-decoded-until-passphrase\n"
-                )
-                .as_bytes()
+                concat!("-----BEGIN OPENSSH ", "PRIVATE KEY-----\nnot-decoded-until-passphrase\n")
+                    .as_bytes()
             ),
             PrivateKeyFileKind::PrivateKey
         );
         assert_eq!(
             classify_private_key_contents(
-                concat!(
-                    "PuTTY-User-Key-",
-                    "File-3: ssh-ed25519\nEncryption: aes256-cbc"
-                )
-                .as_bytes()
+                concat!("PuTTY-User-Key-", "File-3: ssh-ed25519\nEncryption: aes256-cbc")
+                    .as_bytes()
             ),
             PrivateKeyFileKind::PrivateKey
         );

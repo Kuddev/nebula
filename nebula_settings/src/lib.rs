@@ -18,6 +18,10 @@ use std::path::PathBuf;
 
 mod app_icon;
 pub use app_icon::{AppIconName, AppIconPalette};
+mod language;
+pub use language::{LanguageInfo, LanguagePref};
+mod reset;
+pub use reset::restore_default_settings;
 
 /// Settings/data directory shared by every shell and renderer.
 ///
@@ -571,33 +575,6 @@ impl CursorShapeName {
 
 /// 下面的小枚举都是 `nebula_settings.txt` 的键值域，取值与旧壳设置页
 /// 逐字一致（parse 宽容：未知值回退默认）。
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub enum LanguagePref {
-    #[default]
-    System,
-    ZhCn,
-    EnUs,
-}
-
-impl LanguagePref {
-    pub fn from_settings(value: &str) -> Option<Self> {
-        match value.trim() {
-            "system" => Some(Self::System),
-            "zh-CN" => Some(Self::ZhCn),
-            "en-US" => Some(Self::EnUs),
-            _ => None,
-        }
-    }
-
-    pub fn settings_value(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::ZhCn => "zh-CN",
-            Self::EnUs => "en-US",
-        }
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum AcceptKeyName {

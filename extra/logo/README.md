@@ -110,3 +110,19 @@ open-source asset license. These files are used only to identify a running
 `grok` or `grok-cli` process and do not imply xAI endorsement, approval, or
 sponsorship. The application selects the supplied dark or light file for
 contrast and scales it only when rendering; the committed files are unchanged.
+
+### Google Antigravity
+
+`ai_antigravity.png` is an unmodified copy of the full-color product icon from
+Google's Antigravity press assets, verified on 2026-09-06:
+
+- Press assets: https://antigravity.google/press/
+- PNG: https://antigravity.google/assets/image/brand/antigravity-icon__full-color.png
+- Dimensions: 540 x 540, with transparency
+- SHA-256: `E0CD08CCD10CD8D08CCF0BA449823EE88495825C0841619618100D3AB089F51E`
+
+Google retains rights to its product names and logos. Publication in a press kit
+does not make the logo an open-source asset or imply endorsement. The icon is
+used to identify running `antigravity`, `antigravity-cli` and `agy` processes.
+Both UI shells keep its original colors on light and dark themes and resize it
+only for rendering. No LobeHub asset is embedded for Antigravity.

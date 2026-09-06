@@ -235,7 +235,7 @@ impl SettingsPane {
         }
         self.row(
             language.pick("终端字体", "Terminal font"),
-            language.tr("settings.font.fallback_description"),
+            help("font_family", language),
             control,
             cx,
         )

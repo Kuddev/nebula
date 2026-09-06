@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthChar;
 
+#[cfg(feature = "legacy-shell")]
+use super::NebulaTheme;
 use super::SizeInfo;
 use super::color::Rgb;
-use super::i18n::UiLanguage;
 #[cfg(feature = "legacy-shell")]
 use super::ui::icons;
 use super::ui::tokens::{Density, radius, space, type_scale};
-#[cfg(feature = "legacy-shell")]
-use super::NebulaTheme;
+use crate::i18n::UiLanguage;
 #[cfg(feature = "legacy-shell")]
 use crate::renderer::ui::{Gradient, Rgba, UiQuad};
 #[cfg(feature = "legacy-shell")]

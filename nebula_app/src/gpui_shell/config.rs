@@ -94,7 +94,7 @@ pub(crate) fn ui_language(cx: &App) -> UiLanguage {
 
 #[inline]
 fn resolve_ui_language(preference: nebula_settings::LanguagePref) -> UiLanguage {
-    LanguagePreference::parse(preference.settings_value()).unwrap_or_default().resolved()
+    LanguagePreference::from(preference).resolved()
 }
 
 impl Settings {

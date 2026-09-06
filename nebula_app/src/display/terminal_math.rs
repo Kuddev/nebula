@@ -949,8 +949,8 @@ impl TextGrid {
         mut position: GridPosition,
         delimiter: &[char],
     ) -> Option<GridPosition> {
-        let standalone_opener = self.span_is_blank(open.row, position.column, self.columns)
-            && open.row == position.row;
+        let standalone_opener =
+            self.span_is_blank(open.row, position.column, self.columns) && open.row == position.row;
         let last_row = open.row.saturating_add(DISPLAY_BLOCK_GAP_SEARCH_ROWS);
         let mut content_rows = 0usize;
         let mut bridged = false;

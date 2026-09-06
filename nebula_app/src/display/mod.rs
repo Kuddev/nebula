@@ -76,7 +76,6 @@ pub(crate) mod context_menu;
 mod context_menu_model;
 mod document_model;
 mod file_operations;
-mod i18n;
 pub mod markdown_view;
 mod message_queue_entry;
 mod network_proxy_model;
@@ -101,6 +100,7 @@ pub(crate) fn quick_terminal_hotkey_from_settings(config: &UiConfig) -> String {
     settings::nebula_settings_load(config).quick_terminal_hotkey
 }
 
+pub use crate::i18n::{LanguagePreference, UiLanguage};
 pub use background_color_model::BgPickerPart;
 pub(crate) use background_color_model::{BACKGROUND_SWATCHES, hsv_to_rgb, rgb_to_hsv};
 pub(crate) use chrome::chrome_settings_button_rect;
@@ -112,7 +112,6 @@ pub(crate) use command_completion::{
 };
 pub use context_menu_model::{ContextMenuAction, ContextMenuHit, ContextMenuTarget};
 pub(crate) use file_operations::send_to_recycle_bin;
-pub use i18n::{LanguagePreference, UiLanguage};
 pub(crate) use input_state::{
     nebula_clear_line, nebula_input_backspace, nebula_input_char, nebula_input_delete_word,
     nebula_input_text, nebula_shell_prompt_restored_from_raw_grid,
@@ -751,16 +750,6 @@ pub(crate) fn replays_untrusted_terminal_output(line: &str) -> bool {
         [kubectl, logs, ..] if kubectl == "kubectl" && logs == "logs"
     ) || matches!(words.as_slice(), [journalctl, ..] if journalctl == "journalctl")
 }
-
-/// Embedded brand logo assets, kept at their source pixel dimensions.
-const AI_LOGO_CLAUDE_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_claude.png");
-const AI_LOGO_GROK_DARK_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_grok_dark.png");
-const AI_LOGO_GROK_LIGHT_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_grok_light.png");
-const AI_LOGO_OPENAI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_openai.png");
-/// opencode's mark, rasterized from their `favicon.svg`. RGB carries luma
-/// (frame=255, block=90), alpha the shape; tinted `ink × luma/255` at runtime.
-const AI_LOGO_OPENCODE_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_opencode.png");
-const AI_LOGO_PI_PNG: &[u8] = include_bytes!("../../../extra/logo/ai_pi.png");
 
 /// Texture ids for chrome logos live far above the inline-image counter
 /// (which starts at 1), so the two id spaces can share the renderer cache.
@@ -2418,12 +2407,12 @@ impl Display {
         ink: Rgb,
         target_size: u32,
     ) -> Option<(u64, std::sync::Arc<Vec<u8>>, (u32, u32))> {
-        // Claude and Grok keep their source colors. Grok ships official dark
+        // Color assets keep their source colors. Grok ships official dark
         // and light marks, selected to match the chrome ink without tinting.
         let grok_uses_light_mark =
             u32::from(ink.r) * 299 + u32::from(ink.g) * 587 + u32::from(ink.b) * 114 >= 128_000;
         let key = match logo {
-            AiLogo::Claude => (logo, [0, 0, 0], target_size),
+            AiLogo::Claude | AiLogo::Antigravity => (logo, [0, 0, 0], target_size),
             AiLogo::Grok if grok_uses_light_mark => (logo, [255, 255, 255], target_size),
             AiLogo::Grok => (logo, [0, 0, 0], target_size),
             AiLogo::OpenAi | AiLogo::OpenCode | AiLogo::Pi => {
@@ -2433,14 +2422,7 @@ impl Display {
         if let Some(cached) = self.nebula_ai_logo_cache.get(&key) {
             return Some(cached.clone());
         }
-        let bytes: &[u8] = match logo {
-            AiLogo::Claude => AI_LOGO_CLAUDE_PNG,
-            AiLogo::Grok if grok_uses_light_mark => AI_LOGO_GROK_LIGHT_PNG,
-            AiLogo::Grok => AI_LOGO_GROK_DARK_PNG,
-            AiLogo::OpenAi => AI_LOGO_OPENAI_PNG,
-            AiLogo::OpenCode => AI_LOGO_OPENCODE_PNG,
-            AiLogo::Pi => AI_LOGO_PI_PNG,
-        };
+        let bytes = logo.png(grok_uses_light_mark);
         let (width, height, mut rgba) = match crate::renderer::image::decode_png_bytes(bytes) {
             Ok(decoded) => decoded,
             // Unreachable for a valid embedded asset; degrade to no icon.
@@ -2449,26 +2431,8 @@ impl Display {
                 return None;
             },
         };
-        match logo {
-            AiLogo::OpenAi | AiLogo::Pi => {
-                for px in rgba.chunks_exact_mut(4) {
-                    (px[0], px[1], px[2]) = (ink.r, ink.g, ink.b);
-                }
-            },
-            AiLogo::OpenCode => {
-                // Stored grayscale = luma map (frame 255, screen-block 90).
-                // Tint to theme ink scaled by luma: frame → full ink, inner
-                // block → ~35% ink, keeping the two-tone mark on every theme.
-                for px in rgba.chunks_exact_mut(4) {
-                    let luma = px[0] as u16; // R==G==B in the asset
-                    px[0] = (ink.r as u16 * luma / 255) as u8;
-                    px[1] = (ink.g as u16 * luma / 255) as u8;
-                    px[2] = (ink.b as u16 * luma / 255) as u8;
-                }
-            },
-            AiLogo::Claude | AiLogo::Grok => {},
-        }
-        let (rgba, width, height) = if logo == AiLogo::Grok {
+        logo.tint_pixels(&mut rgba, [ink.r, ink.g, ink.b]);
+        let (rgba, width, height) = if matches!(logo, AiLogo::Grok | AiLogo::Antigravity) {
             prepare_ai_logo_texture(&rgba, width, height, target_size)
         } else {
             (rgba, width, height)
@@ -10992,92 +10956,6 @@ mod nebula_ux_tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
-    }
-
-    fn logo_for_command(command: &str) -> Option<AiLogo> {
-        extract_program(command).as_deref().and_then(ai_logo)
-    }
-
-    #[test]
-    fn running_program_identity_normalizes_grok_without_changing_fallbacks() {
-        for command in [
-            "grok",
-            "grok-cli",
-            "GROK.CMD",
-            "C:\\Tools\\GROK-CLI.EXE --help",
-            "/usr/local/bin/grok",
-        ] {
-            assert_eq!(logo_for_command(command), Some(AiLogo::Grok), "{command}");
-        }
-
-        assert_eq!(logo_for_command("codex"), Some(AiLogo::OpenAi));
-        assert_eq!(logo_for_command("C:\\Tools\\CLAUDE.EXE --resume"), Some(AiLogo::Claude));
-        assert_eq!(program_icon("cargo"), "\u{e7a8}");
-        assert_eq!(logo_for_command("unlisted-program"), None);
-        assert_eq!(program_icon("unlisted-program"), "\u{f04b}");
-        assert_eq!(extract_program(""), None);
-    }
-
-    #[cfg(all(feature = "png", not(target_os = "macos")))]
-    #[test]
-    fn official_grok_logos_are_embedded_unchanged_and_decodable() {
-        use sha2::{Digest, Sha256};
-
-        let assets = [
-            (
-                AI_LOGO_GROK_DARK_PNG,
-                [
-                    0x37, 0xdd, 0xbc, 0xb6, 0xe2, 0xa7, 0xf2, 0xe4, 0xb3, 0xbe, 0x78, 0xa7, 0xd4,
-                    0x12, 0x96, 0xa3, 0xbc, 0x7e, 0xdf, 0x69, 0x26, 0x36, 0x24, 0x34, 0xef, 0xc0,
-                    0x0d, 0xf5, 0xa5, 0x6a, 0x35, 0x86,
-                ],
-            ),
-            (
-                AI_LOGO_GROK_LIGHT_PNG,
-                [
-                    0x35, 0x90, 0x56, 0xee, 0x89, 0x83, 0xcf, 0xa0, 0xba, 0x7e, 0x72, 0x79, 0x50,
-                    0x78, 0xc7, 0xc0, 0xdd, 0xf6, 0xc5, 0xd7, 0xa1, 0x87, 0x04, 0x01, 0xab, 0x96,
-                    0x0e, 0xd4, 0xf9, 0xdf, 0x9e, 0x53,
-                ],
-            ),
-        ];
-
-        for (png, expected_sha256) in assets {
-            assert_eq!(Sha256::digest(png).as_slice(), expected_sha256);
-            let (width, height, rgba) = crate::renderer::image::decode_png_bytes(png).unwrap();
-            assert_eq!((width, height), (1024, 1024));
-            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
-        }
-    }
-
-    #[cfg(all(feature = "png", not(target_os = "macos")))]
-    #[test]
-    fn official_grok_logos_prepare_sharp_optically_centered_physical_textures() {
-        for png in [AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG] {
-            let (width, height, rgba) = crate::renderer::image::decode_png_bytes(png).unwrap();
-            let (rgba, width, height) = prepare_ai_logo_texture(&rgba, width, height, 18);
-
-            assert_eq!((width, height, rgba.len()), (18, 18, 18 * 18 * 4));
-            let alpha_levels = rgba
-                .chunks_exact(4)
-                .map(|pixel| pixel[3])
-                .filter(|alpha| *alpha > 0)
-                .collect::<std::collections::HashSet<_>>();
-            assert!(alpha_levels.len() >= 8);
-
-            let (mass, weighted_x, weighted_y) = rgba.chunks_exact(4).enumerate().fold(
-                (0.0, 0.0, 0.0),
-                |(mass, weighted_x, weighted_y), (index, pixel)| {
-                    let alpha = f64::from(pixel[3]);
-                    let x = (index as u32 % width) as f64 + 0.5;
-                    let y = (index as u32 / width) as f64 + 0.5;
-                    (mass + alpha, weighted_x + x * alpha, weighted_y + y * alpha)
-                },
-            );
-            let center = f64::from(width) / 2.0;
-            assert!((weighted_x / mass - center).abs() <= 0.5);
-            assert!((weighted_y / mass - center).abs() <= 0.5);
-        }
     }
 
     #[test]

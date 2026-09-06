@@ -11,8 +11,8 @@
 
 use std::path::PathBuf;
 
-use super::{NebulaTheme, SizeInfo};
 use super::ui::geometry as layout_geometry;
+use super::{NebulaTheme, SizeInfo};
 use crate::config::ui_config::Profile;
 use crate::shell_detect::DetectedShell;
 use unicode_width::UnicodeWidthChar;

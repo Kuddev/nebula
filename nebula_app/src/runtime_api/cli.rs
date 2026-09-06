@@ -39,17 +39,40 @@ pub(super) fn request_once(
 }
 
 pub(super) fn print_response(response: &ApiResponse, pretty: bool) -> Result<(), Box<dyn Error>> {
-    if pretty {
-        println!("{}", serde_json::to_string_pretty(response)?);
+    write_cli_response(&mut std::io::stdout().lock(), response, pretty)
+}
+
+fn write_cli_response(
+    output: &mut impl Write,
+    response: &ApiResponse,
+    pretty: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut json = if pretty {
+        serde_json::to_string_pretty(response)?
     } else {
-        println!("{}", serde_json::to_string(response)?);
-    }
+        serde_json::to_string(response)?
+    };
+    json.push('\n');
+    write_cli_output(output, json.as_bytes())?;
     if response.ok {
         Ok(())
     } else {
         let error =
             response.error.as_ref().map_or("runtime request failed", |error| &error.message);
         Err(PrintedCliError(error.to_owned()).into())
+    }
+}
+
+fn write_cli_output(output: &mut impl Write, bytes: &[u8]) -> Result<bool, IoError> {
+    match output.write_all(bytes).and_then(|()| output.flush()) {
+        Ok(()) => Ok(true),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::BrokenPipe
+                || (cfg!(windows) && matches!(error.raw_os_error(), Some(109 | 232 | 233))) =>
+        {
+            Ok(false)
+        },
+        Err(error) => Err(error),
     }
 }
 
@@ -472,16 +495,19 @@ fn subscribe_cli(since: Option<u64>, timeout: Duration) -> Result<(), Box<dyn Er
         )
         .into());
     }
-    print!("{line}");
-    std::io::stdout().flush()?;
+    let mut output = std::io::stdout().lock();
+    if !write_cli_output(&mut output, line.as_bytes())? {
+        return Ok(());
+    }
     reader.get_mut().set_read_timeout(None)?;
     loop {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
             return Ok(());
         }
-        print!("{line}");
-        std::io::stdout().flush()?;
+        if !write_cli_output(&mut output, line.as_bytes())? {
+            return Ok(());
+        }
     }
 }
 
@@ -508,6 +534,80 @@ impl fmt::Display for CliError {
 }
 
 impl Error for CliError {}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    struct FailingOutput {
+        error: Option<IoError>,
+        fail_flush: bool,
+    }
+
+    impl Write for FailingOutput {
+        fn write(&mut self, bytes: &[u8]) -> Result<usize, IoError> {
+            if self.fail_flush { Ok(bytes.len()) } else { Err(self.error.take().unwrap()) }
+        }
+
+        fn flush(&mut self) -> Result<(), IoError> {
+            Err(self.error.take().unwrap())
+        }
+    }
+
+    #[test]
+    fn json_output_keeps_compact_and_pretty_response_contracts() {
+        let response = ApiResponse::success("probe", json!({ "tabs": 2 }));
+        for pretty in [false, true] {
+            let mut output = Vec::new();
+            write_cli_response(&mut output, &response, pretty).unwrap();
+            assert_eq!(output.last(), Some(&b'\n'));
+            assert_eq!(serde_json::from_slice::<ApiResponse>(&output).unwrap(), response);
+        }
+    }
+
+    #[test]
+    fn closed_output_on_write_or_flush_ends_without_panicking() {
+        let response = ApiResponse::success("probe", json!({}));
+        for fail_flush in [false, true] {
+            let mut output = FailingOutput {
+                error: Some(IoError::from(std::io::ErrorKind::BrokenPipe)),
+                fail_flush,
+            };
+            write_cli_response(&mut output, &response, false).unwrap();
+        }
+    }
+
+    #[test]
+    fn subscriptions_stop_when_the_output_consumer_disconnects() {
+        let mut output = FailingOutput {
+            error: Some(IoError::from(std::io::ErrorKind::BrokenPipe)),
+            fail_flush: false,
+        };
+        assert!(!write_cli_output(&mut output, b"event\n").unwrap());
+    }
+
+    #[test]
+    fn unrelated_output_errors_are_not_silently_ignored() {
+        let mut output = FailingOutput {
+            error: Some(IoError::from(std::io::ErrorKind::PermissionDenied)),
+            fail_flush: false,
+        };
+        assert_eq!(
+            write_cli_output(&mut output, b"event\n").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_closing_errors_do_not_trigger_runtime_error_dialogs() {
+        for code in [109, 232, 233] {
+            let mut output =
+                FailingOutput { error: Some(IoError::from_raw_os_error(code)), fail_flush: false };
+            assert!(!write_cli_output(&mut output, b"event\n").unwrap());
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct PrintedCliError(String);

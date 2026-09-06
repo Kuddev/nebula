@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, Serialize};
 
 mod connection;
-pub use connection::{SshConnectionOptions, SshHostJumpMode, SshHostProxyMode};
 pub(crate) use connection::validate_ssh_destination;
+pub use connection::{SshConnectionOptions, SshHostJumpMode, SshHostProxyMode};
 
 const PROFILE_VERSION: u32 = 1;
 const USERNAME_HISTORY_CAP: usize = 12;

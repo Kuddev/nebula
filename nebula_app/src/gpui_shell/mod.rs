@@ -58,6 +58,7 @@ pub(crate) fn try_write_stderr(args: std::fmt::Arguments<'_>) {
 /// GPUI 壳的跨线程唤醒：托盘、mux ATTACH、runtime 控制都汇到工作区 pump。
 pub(crate) enum GpuiShellEvent {
     TrayFocus(Option<u64>),
+    NotificationFocus(Option<u64>),
     TrayQuit,
     MuxAttach,
     RuntimeControl(std::sync::Arc<crate::runtime_api::RuntimeDispatch>),
@@ -71,6 +72,7 @@ pub(crate) enum GpuiShellEvent {
 /// spike 形态从专用线程调用。一个进程内只允许调用一次。
 pub fn run_shell(initial_cwd: Option<std::path::PathBuf>) {
     let (shell_tx, shell_rx) = std::sync::mpsc::channel();
+    crate::notify::init_gpui_activation(shell_tx.clone());
     crate::ssh_prompt::install({
         let sender = shell_tx.clone();
         move |request| sender.send(GpuiShellEvent::SshPrompt(request)).is_ok()

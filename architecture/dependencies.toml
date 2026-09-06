@@ -1,0 +1,37 @@
+version = 1
+renderer_packages = ["gpui", "gpui_platform", "gpui-component", "gpui-component-assets", "winit", "glutin", "crossfont"]
+
+[crates.nebula_app]
+layer = "application"
+dependencies = ["nebula_terminal", "nebula_config", "nebula_config_derive", "nebula_settings", "nebula_split", "nebula-completions"]
+build-dependencies = ["nebula_settings"]
+dev-dependencies = []
+
+[crates.nebula_terminal]
+layer = "core"
+
+[crates.nebula_config]
+layer = "core"
+dev-dependencies = ["nebula_config_derive"]
+
+[crates.nebula_config_derive]
+layer = "core"
+dev-dependencies = ["nebula_config"]
+
+[crates.nebula-completions]
+layer = "core"
+
+[crates.nebula_settings]
+layer = "core"
+zero_production_dependencies = true
+
+[crates.nebula_split]
+layer = "core"
+zero_production_dependencies = true
+
+[crates.nebula_hook]
+layer = "hook"
+zero_production_dependencies = true
+
+[crates.nebula_gpui]
+layer = "lab"

@@ -21,7 +21,7 @@ use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, W
 use gpui_component::notification::Notification;
 use gpui_component::{Root, WindowExt as _};
 
-use crate::gpui_shell::prelude::v_flex;
+use crate::gpui_shell::prelude::*;
 
 pub use crate::display::ToastKind;
 
@@ -46,6 +46,26 @@ const TOAST_MAX_WIDTH: f32 = 440.0;
 const BANNER_TTL: Duration = Duration::from_secs(90);
 
 static LAST_TOAST: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+static PANE_BANNERS: Mutex<PaneBannerGate> = Mutex::new(PaneBannerGate { recent: Vec::new() });
+
+#[derive(Default)]
+struct PaneBannerGate {
+    recent: Vec<(u64, ToastKind, String, Instant)>,
+}
+
+impl PaneBannerGate {
+    fn accepts(&mut self, pane_id: u64, kind: ToastKind, text: &str, now: Instant) -> bool {
+        self.recent
+            .retain(|(_, _, _, born)| now.saturating_duration_since(*born) < DUPLICATE_COOLDOWN);
+        if self.recent.iter().any(|(pane, previous_kind, previous_text, _)| {
+            *pane == pane_id && *previous_kind == kind && previous_text == text
+        }) {
+            return false;
+        }
+        self.recent.push((pane_id, kind, text.to_owned(), now));
+        true
+    }
+}
 
 fn is_duplicate(text: &str) -> bool {
     let mut last = LAST_TOAST.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -137,7 +157,131 @@ pub fn banner(window: &mut Window, cx: &mut App, kind: ToastKind, text: impl Int
         return;
     }
     log::warn!("banner [{kind:?}]: {text}");
-    let note = note(kind, text).autohide(false);
+    push_banner(window, cx, note(kind, text));
+}
+
+pub(crate) fn banner_for_pane(
+    window: &mut Window,
+    cx: &mut App,
+    kind: ToastKind,
+    text: impl Into<String>,
+    pane_id: u64,
+) {
+    let text = text.into();
+    if text.trim().is_empty()
+        || !PANE_BANNERS.lock().unwrap_or_else(|poison| poison.into_inner()).accepts(
+            pane_id,
+            kind,
+            &text,
+            Instant::now(),
+        )
+    {
+        return;
+    }
+    log::info!("pane banner [{kind:?}] pane={pane_id}: {text}");
+    let notification = note(kind, text).on_click(move |_, _, cx| {
+        cx.defer(move |cx| super::workspace::windowing::focus_notification(Some(pane_id), cx));
+    });
+    push_banner(window, cx, notification);
+}
+
+pub(crate) fn confirmation_for_pane(
+    window: &mut Window,
+    cx: &mut App,
+    text: String,
+    pane_id: u64,
+    confirmation: crate::gpui_shell::terminal::confirmation::BinaryConfirmation,
+) {
+    struct ConfirmationNotice;
+
+    let language =
+        crate::display::LanguagePreference::from(nebula_settings::RuntimeSettings::load().language)
+            .resolved();
+    let allow_label = language.text(crate::i18n::Message::CommonYes).to_owned();
+    let deny_label = language.text(crate::i18n::Message::CommonNo).to_owned();
+    let request_id = confirmation.id;
+    let notification = note(ToastKind::Warning, text)
+        .id1::<ConfirmationNotice>(format!("pane-{pane_id}-request-{request_id}"))
+        .on_click(move |_, _, cx| {
+            cx.defer(move |cx| super::workspace::windowing::focus_notification(Some(pane_id), cx));
+        })
+        .content(move |_, _, cx| {
+            v_flex()
+                .gap_2()
+                .child(div().text_sm().child(confirmation.question.clone()))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .justify_end()
+                        .child(
+                            Button::new(("confirmation-deny", request_id))
+                                .icon(IconName::Close)
+                                .label(deny_label.clone())
+                                .ghost()
+                                .small()
+                                .on_click(cx.listener(move |note, _, window, cx| {
+                                    cx.stop_propagation();
+                                    let feedback = window.window_handle();
+                                    note.dismiss(window, cx);
+                                    cx.defer(move |cx| {
+                                        reply_to_confirmation(
+                                            pane_id, request_id, false, feedback, cx,
+                                        )
+                                    });
+                                })),
+                        )
+                        .child(
+                            Button::new(("confirmation-allow", request_id))
+                                .icon(IconName::Check)
+                                .label(allow_label.clone())
+                                .primary()
+                                .small()
+                                .on_click(cx.listener(move |note, _, window, cx| {
+                                    cx.stop_propagation();
+                                    let feedback = window.window_handle();
+                                    note.dismiss(window, cx);
+                                    cx.defer(move |cx| {
+                                        reply_to_confirmation(
+                                            pane_id, request_id, true, feedback, cx,
+                                        )
+                                    });
+                                })),
+                        ),
+                )
+                .into_any_element()
+        });
+    push_banner(window, cx, notification);
+}
+
+fn reply_to_confirmation(
+    pane_id: u64,
+    request_id: u64,
+    allow: bool,
+    feedback: gpui::AnyWindowHandle,
+    cx: &mut App,
+) {
+    super::workspace::windowing::focus_notification(Some(pane_id), cx);
+    let applied = super::workspace::windowing::notification_view(pane_id, cx).is_some_and(|view| {
+        view.update(cx, |view, cx| view.answer_confirmation(request_id, allow, cx))
+    });
+    if !applied {
+        let _ = feedback.update(cx, |_, window, cx| {
+            let language = crate::display::LanguagePreference::from(
+                nebula_settings::RuntimeSettings::load().language,
+            )
+            .resolved();
+            toast(
+                window,
+                cx,
+                ToastKind::Warning,
+                language.text(crate::i18n::Message::CommonConfirmationExpired),
+            );
+        });
+    }
+}
+
+fn push_banner(window: &mut Window, cx: &mut App, notification: Notification) {
+    let note = notification.autohide(false);
     if window.root::<Root>().flatten().is_some() {
         window.push_notification(note, cx);
         schedule_banner_dismiss(window, cx);
@@ -186,5 +330,19 @@ mod tests {
         assert!(!is_duplicate("toast-dup-gate-a"));
         assert!(is_duplicate("toast-dup-gate-a"));
         assert!(!is_duplicate("toast-dup-gate-b"), "不同文本不受冷却影响");
+    }
+
+    #[test]
+    fn pane_banners_keep_distinct_sources_and_attention() {
+        let now = Instant::now();
+        let mut gate = PaneBannerGate::default();
+        assert!(gate.accepts(1, ToastKind::Info, "done", now));
+        assert!(gate.accepts(2, ToastKind::Info, "done", now));
+        assert!(!gate.accepts(1, ToastKind::Info, "done", now));
+        assert!(gate.accepts(1, ToastKind::Warning, "done", now));
+        assert!(gate.accepts(1, ToastKind::Warning, "permission", now));
+        assert!(!gate.accepts(1, ToastKind::Warning, "permission", now));
+        assert!(gate.accepts(1, ToastKind::Info, "done", now + DUPLICATE_COOLDOWN));
+        assert_eq!(gate.recent.len(), 1);
     }
 }

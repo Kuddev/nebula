@@ -1,4 +1,3 @@
-use std::env;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::Write;
@@ -40,7 +39,7 @@ impl Display for TemplateError {
             ),
             Self::InvalidLanguage(language) => write!(
                 formatter,
-                "unsupported language {language:?}; expected system, zh-CN, or en-US"
+                "unsupported language {language:?}; expected system or a supported UI locale"
             ),
             Self::Io(error) => Display::fmt(error, formatter),
         }
@@ -68,51 +67,17 @@ pub fn resolve_template_language(
     locale: Option<&str>,
 ) -> Result<TemplateLanguage, TemplateError> {
     let requested = explicit.or(saved).unwrap_or("system");
-    match requested {
-        "zh-CN" => Ok(TemplateLanguage::ZhCn),
-        "en-US" => Ok(TemplateLanguage::EnUs),
-        "system" => Ok(if locale.is_some_and(is_chinese_locale) {
-            TemplateLanguage::ZhCn
-        } else {
-            TemplateLanguage::EnUs
-        }),
-        other => Err(TemplateError::InvalidLanguage(other.to_owned())),
-    }
+    let preference = crate::i18n::LanguagePreference::parse(requested)
+        .ok_or_else(|| TemplateError::InvalidLanguage(requested.to_owned()))?;
+    let language =
+        preference.explicit().unwrap_or_else(|| crate::i18n::UiLanguage::for_locale(locale));
+    Ok(match language {
+        crate::i18n::UiLanguage::ZhCn | crate::i18n::UiLanguage::ZhTw => TemplateLanguage::ZhCn,
+        _ => TemplateLanguage::EnUs,
+    })
 }
 
-pub fn system_locale() -> Option<String> {
-    system_locale_impl().or_else(environment_locale)
-}
-
-#[cfg(windows)]
-fn system_locale_impl() -> Option<String> {
-    use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
-
-    let mut buffer = [0_u16; 85];
-    let length = unsafe { GetUserDefaultLocaleName(buffer.as_mut_ptr(), buffer.len() as i32) };
-    if length <= 1 {
-        return None;
-    }
-    String::from_utf16(&buffer[..length as usize - 1]).ok()
-}
-
-#[cfg(not(windows))]
-fn system_locale_impl() -> Option<String> {
-    None
-}
-
-fn environment_locale() -> Option<String> {
-    ["LC_ALL", "LC_MESSAGES", "LANG"]
-        .into_iter()
-        .find_map(|name| env::var(name).ok().filter(|value| !value.is_empty()))
-}
-
-fn is_chinese_locale(locale: &str) -> bool {
-    locale
-        .split(['-', '_', '.', '@'])
-        .next()
-        .is_some_and(|language| language.eq_ignore_ascii_case("zh"))
-}
+pub use crate::i18n::system_locale;
 
 pub fn write_template(
     path: &Path,
@@ -212,6 +177,23 @@ mod tests {
             resolve_template_language(Some("system"), None, Some("zh-Hans-CN")).unwrap(),
             TemplateLanguage::ZhCn
         );
+    }
+
+    #[test]
+    fn additional_ui_languages_use_existing_templates_without_errors() {
+        assert_eq!(
+            resolve_template_language(None, Some("fr-FR"), None).unwrap(),
+            TemplateLanguage::EnUs
+        );
+        assert_eq!(
+            resolve_template_language(Some("zh-TW"), None, None).unwrap(),
+            TemplateLanguage::ZhCn
+        );
+        for preference in crate::i18n::LanguagePreference::ALL {
+            assert!(
+                resolve_template_language(Some(preference.as_str()), None, Some("de-DE")).is_ok()
+            );
+        }
     }
 
     #[test]

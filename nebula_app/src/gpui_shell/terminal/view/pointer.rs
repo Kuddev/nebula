@@ -197,21 +197,28 @@ impl TerminalView {
     }
 
     /// 像素命中与绘制共用同一份候选几何，截短列表或上翻时也不会点错行。
-    pub(super) fn completion_popup_hit(&self, position: Point<Pixels>) -> Option<usize> {
+    pub(super) fn completion_popup_geometry(
+        &self,
+    ) -> Option<super::super::element::CompletionPopupLayout> {
         if !suggest::popup_active(&self.suggest) {
             return None;
         }
         let (cursor_row, cursor_col) = self.suggest_anchor?;
-        let popup = completion_popup_layout(
+        completion_popup_layout(
             &self.suggest.completion_items,
             self.suggest.completion_selected,
+            self.completion_viewport.offset,
             cursor_row,
             cursor_col,
             self.rows,
             self.cols,
             self.cell_width,
             self.line_height,
-        )?;
+        )
+    }
+
+    pub(super) fn completion_popup_hit(&self, position: Point<Pixels>) -> Option<usize> {
+        let popup = self.completion_popup_geometry()?;
         let content = popup.content_bounds(self.origin);
         if !content.contains(&position) {
             return None;
@@ -221,47 +228,85 @@ impl TerminalView {
         (index < self.suggest.completion_items.len()).then_some(index)
     }
 
-    /// 右侧窄条不覆盖候选字符列；点击轨道按指针比例跳到完整候选集中的位置。
-    pub(super) fn completion_popup_scrollbar_target(
-        &self,
-        position: Point<Pixels>,
-    ) -> Option<usize> {
-        if !suggest::popup_active(&self.suggest) {
-            return None;
-        }
-        let (cursor_row, cursor_col) = self.suggest_anchor?;
-        let popup = completion_popup_layout(
-            &self.suggest.completion_items,
-            self.suggest.completion_selected,
-            cursor_row,
-            cursor_col,
-            self.rows,
-            self.cols,
-            self.cell_width,
-            self.line_height,
-        )?;
-        let len = self.suggest.completion_items.len();
-        if len <= popup.rows {
-            return None;
-        }
+    fn completion_popup_contains(&self, position: Point<Pixels>) -> bool {
+        self.completion_popup_geometry()
+            .is_some_and(|popup| popup.panel_bounds(self.origin).contains(&position))
+    }
+
+    fn completion_popup_scrollbar_grab(&self, position: Point<Pixels>) -> Option<f32> {
+        let popup = self.completion_popup_geometry()?;
+        let (track, thumb) =
+            popup.scrollbar_bounds(self.origin, self.suggest.completion_items.len())?;
         let content = popup.content_bounds(self.origin);
-        let top = content.origin.y;
-        let height = content.size.height;
         if position.x < content.right()
             || position.x >= content.right() + px(5.0)
-            || position.y < top
-            || position.y >= top + height
+            || position.y < track.origin.y
+            || position.y >= track.bottom()
         {
             return None;
         }
-        let progress = ((position.y - top).as_f32() / height.as_f32().max(1.0)).clamp(0.0, 1.0);
-        Some((progress * (len - 1) as f32).round() as usize)
+        Some(if position.y >= thumb.origin.y && position.y < thumb.bottom() {
+            (position.y - thumb.origin.y).as_f32()
+        } else {
+            thumb.size.height.as_f32() * 0.5
+        })
+    }
+
+    fn scroll_completion_popup_to(&mut self, position: Point<Pixels>, released: bool) -> bool {
+        if self.completion_viewport.scrollbar_grab.is_none() {
+            return false;
+        }
+        let Some(popup) = self.completion_popup_geometry() else {
+            self.completion_viewport.scrollbar_grab = None;
+            return true;
+        };
+        let count = self.suggest.completion_items.len();
+        let Some((track, thumb)) = popup.scrollbar_bounds(self.origin, count) else {
+            self.completion_viewport.scrollbar_grab = None;
+            return true;
+        };
+        self.completion_viewport.drag_scrollbar(
+            (position.y - track.origin.y).as_f32(),
+            (track.size.height - thumb.size.height).as_f32(),
+            count,
+            popup.rows,
+            released,
+        )
+    }
+
+    pub(in crate::gpui_shell::terminal) fn move_completion_popup_scrollbar(
+        &mut self,
+        event: &MouseMoveEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let handled = if event.pressed_button == Some(MouseButton::Left) {
+            self.scroll_completion_popup_to(event.position, false)
+        } else {
+            self.completion_viewport.scrollbar_grab.take().is_some()
+        };
+        if handled {
+            cx.notify();
+        }
+        handled
+    }
+
+    pub(in crate::gpui_shell::terminal) fn finish_completion_popup_scrollbar(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let handled = self.scroll_completion_popup_to(position, true);
+        if handled {
+            cx.notify();
+        }
+        handled
     }
 
     /// 接受当前候选时只写入补全余量。即使余量为空也算已处理，Enter 不能
     /// 继续透传成一次命令执行。
     pub(super) fn accept_completion_popup(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(insert) = suggest::popup_take(&mut self.suggest) else { return false };
+        self.completion_viewport.clear();
         let before = if self.suggest.screen_line.is_empty() {
             self.suggest.line_buf.clone()
         } else {
@@ -289,9 +334,10 @@ impl TerminalView {
             return;
         }
         if event.button == MouseButton::Left
-            && let Some(index) = self.completion_popup_scrollbar_target(event.position)
+            && let Some(grab) = self.completion_popup_scrollbar_grab(event.position)
         {
-            self.suggest.completion_selected = Some(index);
+            self.completion_viewport.scrollbar_grab = Some(grab);
+            self.scroll_completion_popup_to(event.position, false);
             cx.notify();
             cx.stop_propagation();
             return;
@@ -306,9 +352,14 @@ impl TerminalView {
                 return;
             }
         }
+        if self.completion_popup_contains(event.position) {
+            cx.stop_propagation();
+            return;
+        }
         // 面板外第一次点击只负责关闭浮层，避免同一击又在终端里开选区或触发
         // TUI 鼠标协议；缓存当前行，行不变时浮层不会下一帧原地复活。
         if suggest::popup_dismiss(&mut self.suggest) {
+            self.completion_viewport.clear();
             cx.notify();
             cx.stop_propagation();
             return;
@@ -388,16 +439,23 @@ impl TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // 候选行 hover 与键盘高亮共用选中索引；这样鼠标所见即 Enter 所收。
-        // 移出面板时保留最后选择，继续按 Tab 不会突然跳回第一项。
-        if event.pressed_button.is_none()
-            && let Some(index) = self.completion_popup_hit(event.position)
-        {
-            if self.suggest.completion_selected != Some(index) {
-                self.suggest.completion_selected = Some(index);
+        if self.move_completion_popup_scrollbar(event, cx) {
+            cx.stop_propagation();
+            return;
+        }
+        if event.pressed_button.is_none() {
+            let index = self.completion_popup_hit(event.position);
+            if self
+                .completion_viewport
+                .hover((event.position.x.as_f32(), event.position.y.as_f32()), index)
+            {
                 cx.notify();
             }
-            return;
+            if self.completion_popup_contains(event.position) {
+                self.clear_link_hover(cx);
+                cx.stop_propagation();
+                return;
+            }
         }
         // 拖条中：指针的整段轨迹都归滚动条，不进选区也不上报。
         if let Some(grab) = self.scrollbar_drag {
@@ -468,6 +526,10 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_completion_popup_scrollbar(event.position, cx) {
+            cx.stop_propagation();
+            return;
+        }
         self.stop_selection_scroll();
         if self.scrollbar_drag.take().is_some() {
             cx.notify();
@@ -501,10 +563,14 @@ impl TerminalView {
     /// 自动回滚停不下来，下一次移动还会继续改选区。
     pub(super) fn on_mouse_up_out(
         &mut self,
-        _event: &MouseUpEvent,
+        event: &MouseUpEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.finish_completion_popup_scrollbar(event.position, cx) {
+            cx.stop_propagation();
+            return;
+        }
         self.stop_selection_scroll();
         let dragging_scrollbar = self.scrollbar_drag.take().is_some();
         if !self.selecting {
@@ -742,15 +808,16 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
-        if suggest::popup_active(&self.suggest)
-            && (self.completion_popup_hit(event.position).is_some()
-                || self.completion_popup_scrollbar_target(event.position).is_some())
+        if self.completion_popup_contains(event.position)
+            && let Some(popup) = self.completion_popup_geometry()
         {
-            if delta_y != 0.0 {
-                // 系统会把一格滚轮编码成“滚动 N 行”（Windows 常见为 3），
-                // 终端回滚区需要尊重这个倍率，候选选择器则不应该：一次滚轮
-                // 手势只跨一个 item，否则 8 行视口会瞬间跳过半屏。
-                suggest::popup_move(&mut self.suggest, if delta_y > 0.0 { -1 } else { 1 });
+            let delta = event.delta.pixel_delta(popup.row_height).y.as_f32();
+            if self.completion_viewport.scroll(
+                delta,
+                popup.row_height.as_f32(),
+                self.suggest.completion_items.len(),
+                popup.rows,
+            ) {
                 cx.notify();
             }
             cx.stop_propagation();

@@ -240,7 +240,7 @@ fn summary_text(state: MessageQueueEntry, language: UiLanguage) -> String {
     let regular = state.pending.saturating_sub(state.high_risk);
     match language {
         UiLanguage::ZhCn => format!("{} 个高风险 · {} 个待处理", state.high_risk, regular),
-        UiLanguage::EnUs => format!("{} high risk · {} pending", state.high_risk, regular),
+        _ => format!("{} high risk · {} pending", state.high_risk, regular),
     }
 }
 

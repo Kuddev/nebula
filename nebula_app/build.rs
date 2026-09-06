@@ -1,7 +1,9 @@
-use std::collections::BTreeSet;
 use std::env;
 use std::path::Path;
 use std::process::Command;
+
+#[path = "build/i18n.rs"]
+mod i18n;
 
 #[cfg(feature = "legacy-shell")]
 use gl_generator::{Api, Fallbacks, GlobalGenerator, Profile, Registry};
@@ -9,7 +11,11 @@ use gl_generator::{Api, Fallbacks, GlobalGenerator, Profile, Registry};
 use std::fs::File;
 
 fn main() {
-    validate_i18n_catalogs();
+    i18n::generate(
+        &Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("i18n"),
+        &Path::new(&env::var("OUT_DIR").unwrap()).join("translations.rs"),
+    )
+    .unwrap_or_else(|error| panic!("translation catalog validation failed: {error}"));
 
     let mut version = String::from(env!("CARGO_PKG_VERSION"));
     if let Some(commit_hash) = commit_hash() {
@@ -54,57 +60,6 @@ fn generate_legacy_gl_bindings() {
     )
     .write_bindings(GlobalGenerator, &mut file)
     .unwrap();
-}
-
-fn validate_i18n_catalogs() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let i18n_dir = Path::new(&manifest_dir).join("i18n");
-    let en_path = i18n_dir.join("en-US.json");
-    let zh_path = i18n_dir.join("zh-CN.json");
-    println!("cargo:rerun-if-changed={}", en_path.display());
-    println!("cargo:rerun-if-changed={}", zh_path.display());
-
-    let en = catalog_keys(&en_path, "en-US");
-    let zh = catalog_keys(&zh_path, "zh-CN");
-    if en != zh {
-        let missing_zh = en.difference(&zh).cloned().collect::<Vec<_>>();
-        let missing_en = zh.difference(&en).cloned().collect::<Vec<_>>();
-        panic!(
-            "translation catalogs must have identical message ids; missing from zh-CN: \
-             {missing_zh:?}; missing from en-US: {missing_en:?}"
-        );
-    }
-}
-
-fn catalog_keys(path: &Path, locale: &str) -> BTreeSet<String> {
-    let source = std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("failed to read {locale} translation catalog: {error}"));
-    let root: serde_json::Value = serde_json::from_str(&source)
-        .unwrap_or_else(|error| panic!("invalid {locale} translation catalog: {error}"));
-    let mut keys = BTreeSet::new();
-    collect_catalog_keys(&root, "", &mut keys, locale);
-    keys
-}
-
-fn collect_catalog_keys(
-    value: &serde_json::Value,
-    prefix: &str,
-    keys: &mut BTreeSet<String>,
-    locale: &str,
-) {
-    match value {
-        serde_json::Value::Object(object) => {
-            for (key, value) in object {
-                let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
-                collect_catalog_keys(value, &path, keys, locale);
-            }
-        },
-        serde_json::Value::String(_) => {
-            assert!(!prefix.is_empty(), "{locale} translation catalog contains an empty id");
-            assert!(keys.insert(prefix.to_owned()), "duplicate {locale} message id: {prefix}");
-        },
-        _ => panic!("{locale} translation catalog leaf {prefix} must be a string"),
-    }
 }
 
 /// Copy the side-by-side new-ConPTY (`conpty.dll` + `OpenConsole.exe`) next to

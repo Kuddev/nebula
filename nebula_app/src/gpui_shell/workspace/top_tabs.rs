@@ -146,8 +146,8 @@ impl NebulaWorkspace {
         let label_px = settings.map(|settings| settings.base_font_size_px).unwrap_or(15.0);
         let tab_capacity_w =
             (f32::from(window.viewport_size().width) - TOP_TAB_RESERVED_W).max(TOP_TAB_MIN_W);
-        let tab_w = tab_width(tab_capacity_w, self.tabs.len());
-        let strip_w = tab_strip_width(tab_w, self.tabs.len());
+        let tab_w = tab_width(tab_capacity_w, self.top_tab_count());
+        let strip_w = tab_strip_width(tab_w, self.top_tab_count());
         // 溢出时两端各让出一枚翻页按钮。这个反馈是单调的：`tab_w` 已被
         // `TOP_TAB_MIN_W` 钳死，扣掉按钮宽只会让溢出更成立，不会在"画了按钮
         // → 不溢出了 → 撤掉按钮"之间抖。
@@ -165,9 +165,10 @@ impl NebulaWorkspace {
             .filter(|drag| drag.active && drag.axis == TabDragAxis::Horizontal)
             .map(|drag| (drag.source, Self::drag_slot(drag, self.tabs.len()), drag.offset));
         let items_running = std::cell::Cell::new(false);
-        let items = (0..self.tabs.len())
+        let items = (0..self.top_tab_count())
             .map(|ix| {
-                let active = ix == self.active;
+                let settings_navigation = self.settings_open && ix == self.tabs.len();
+                let active = settings_navigation || (!self.settings_open && ix == self.active);
                 let TabPresentation {
                     title,
                     is_settings,
@@ -178,7 +179,7 @@ impl NebulaWorkspace {
                     color,
                     renaming,
                     pane_count,
-                } = self.tab_presentation(ix, cx, dark);
+                } = self.top_tab_presentation(ix, cx, dark);
                 let hover_group: SharedString = format!("top-tab-hover-{ix}").into();
                 let cross_window_drag = self.cross_window_drag_payload(ix, cx);
                 let status_color = if active { active_fg } else { muted };
@@ -280,12 +281,15 @@ impl NebulaWorkspace {
                     .when(!active && dragged, |item| item.text_color(muted).bg(hover_bg))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.activate_tab(ix, window, cx);
+                        this.activate_top_tab(ix, window, cx);
                     }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
+                            if settings_navigation {
+                                return;
+                            }
                             this.tab_drag = Some(TabDrag {
                                 source: ix,
                                 cross_window: this.cross_window_drag_payload(ix, cx),
@@ -304,18 +308,22 @@ impl NebulaWorkspace {
                         MouseButton::Middle,
                         cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.request_close_tab(ix, window, cx);
+                            this.close_top_tab(ix, window, cx);
                         }),
                     )
                     .on_double_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.begin_rename(ix, window, cx);
+                        if !settings_navigation {
+                            this.begin_rename(ix, window, cx);
+                        }
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            this.open_tab_context_menu(ix, event.position, window, cx);
+                            if !settings_navigation {
+                                this.open_tab_context_menu(ix, event.position, window, cx);
+                            }
                         }),
                     )
                     .when_some(strip, |row, color| {
@@ -462,7 +470,7 @@ impl NebulaWorkspace {
                                     .items_center()
                                     .invisible()
                                     .group_hover(hover_group, |slot| slot.visible())
-                                    .when(tab_close_visible, |slot| {
+                                    .when(tab_close_visible || settings_navigation, |slot| {
                                             slot.child(
                                                 Button::new(("top-close-tab", ix))
                                                     .icon(IconName::Close)
@@ -471,7 +479,7 @@ impl NebulaWorkspace {
                                                     .on_click(cx.listener(
                                                         move |this, _, window, cx| {
                                                             cx.stop_propagation();
-                                                            this.request_close_tab(ix, window, cx);
+                                                            this.close_top_tab(ix, window, cx);
                                                         },
                                                     )),
                                             )
@@ -755,8 +763,8 @@ impl NebulaWorkspace {
         }
         let capacity_w =
             (f32::from(window.viewport_size().width) - TOP_TAB_RESERVED_W).max(TOP_TAB_MIN_W);
-        let tab_w = tab_width(capacity_w, self.tabs.len());
-        let strip_w = tab_strip_width(tab_w, self.tabs.len());
+        let tab_w = tab_width(capacity_w, self.top_tab_count());
+        let strip_w = tab_strip_width(tab_w, self.top_tab_count());
         if !strip_overflows(strip_w, capacity_w) {
             return;
         }

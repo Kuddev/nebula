@@ -8,14 +8,12 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use log::{error, info, warn};
+use log::{info, warn};
 use nebula_terminal::event::{Event as TerminalEvent, WindowSize};
-use nebula_terminal::event_loop::{EventLoopSender, Msg, StreamProcessor};
+use nebula_terminal::event_loop::{EventLoopSender, StreamProcessor};
 use nebula_terminal::sync::FairMutex;
 use nebula_terminal::term::Term;
 use russh::ChannelMsg;
@@ -28,12 +26,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::event::EventProxy;
 use crate::proxy_test::{ProxyTestFailure, ProxyTestOutcome, ProxyTestResult, ProxyTestRoute};
 
+mod lifecycle;
 mod route;
 use route::{ResolvedRoute, RouteTransport};
 
 type SessionError = Box<dyn std::error::Error + Send + Sync>;
 type ClientSession = client::Handle<ClientHandler>;
-type SharedSession = Arc<tokio::sync::Mutex<ClientSession>>;
+type SharedSession = Arc<ClientSession>;
 
 struct AcquiredSession {
     key: String,
@@ -391,6 +390,7 @@ struct ClientHandler {
     host: String,
     port: u16,
     allow_prompt: bool,
+    handshake: lifecycle::Handshake,
     #[cfg(test)]
     known_hosts_path: Option<PathBuf>,
 }
@@ -418,7 +418,10 @@ impl client::Handler for ClientHandler {
             Ok(true) => Ok(true),
             Ok(false) => {
                 if self.allow_prompt
-                    && confirm_new_host(&self.host, self.port, server_public_key).await
+                    && self
+                        .handshake
+                        .confirm(confirm_new_host(&self.host, self.port, server_public_key))
+                        .await
                 {
                     if let Err(err) = russh::keys::known_hosts::learn_known_hosts(
                         &self.host,
@@ -486,201 +489,15 @@ pub fn spawn_session_at<H: SshEventHost>(
     event_proxy: H,
 ) -> io::Result<EventLoopSender> {
     let (sender, receiver) = EventLoopSender::standalone()?;
-    let profiles_path = crate::display::nebula_data_dir().join("ssh_profiles.json");
-    runtime()?.spawn(async move {
-        // 地址解析是第一个真实阶段：`ssh -G` 要读 ~/.ssh/config，慢链路上
-        // 这一步本身就可能耗时。
-        report_stage(Some(&event_proxy), SshStage::Resolve);
-        let raw = destination.clone();
-        let resolved = tokio::task::spawn_blocking(move || {
-            let resolved = SshDestination::resolve(&raw)?;
-            let profiles = crate::ssh_profiles::SshProfiles::load(&profiles_path)?;
-            Ok::<_, io::Error>((resolved, profiles.for_destination(&raw)))
-        })
-        .await;
-        // 会话是否曾经就绪。它把两种 `Err` 分开：连接建立**之前**失败要把
-        // 卡片留在屏幕上让用户读原因；建立**之后**断开则是普通的会话结束，
-        // 必须照常退出 pane，否则会留下一个连不上也关不掉的空壳。
-        let ready = Arc::new(AtomicBool::new(false));
-        let result = match resolved {
-            Ok(Ok((destination, profile))) => {
-                run_session_async(
-                    destination,
-                    profile,
-                    initial_size,
-                    terminal.clone(),
-                    event_proxy.clone(),
-                    receiver,
-                    ready.clone(),
-                    initial_remote_cwd,
-                )
-                .await
-            },
-            Ok(Err(err)) => Err(err.into()),
-            Err(err) => Err(format!("SSH 地址解析任务失败: {err}").into()),
-        };
-        match result {
-            Err(err) if !ready.load(Ordering::Relaxed) => {
-                // 这里刻意**不用** `error!`：它会额外推一条红色 message bar，
-                // 而连接卡片已经把同一条原因连同阶段和日志一起呈现了。同一个
-                // 错误报两次，其中一次还被卡片的遮罩切成半残的红条。
-                info!("直连 SSH 会话失败 {destination}: {err}");
-                report_stage(Some(&event_proxy), SshStage::Failed(err.to_string()));
-                // 错误也写进 grid：卡片关掉之后它仍然留在回滚里。
-                render_error(&terminal, &event_proxy, &format!("SSH 连接失败: {err}"));
-                // 这里**不** exit：pane 一退出 tab 就关了，卡片和它携带的
-                // 失败原因会一起消失。收尾交给卡片上的「关闭」。
-            },
-            Err(err) => {
-                // 会话中途断开时没有卡片在场，message bar 是唯一的提示渠道。
-                error!("直连 SSH 会话中断 {destination}: {err}");
-                render_error(&terminal, &event_proxy, &format!("SSH 连接失败: {err}"));
-                terminal.lock().exit();
-            },
-            Ok(()) => terminal.lock().exit(),
-        }
-        event_proxy.send_event(TerminalEvent::Wakeup);
-    });
+    runtime()?.spawn(lifecycle::run(
+        destination,
+        initial_remote_cwd,
+        initial_size,
+        terminal,
+        event_proxy,
+        receiver,
+    ));
     Ok(sender)
-}
-
-async fn run_session_async<H: SshEventHost>(
-    destination: SshDestination,
-    profile: crate::ssh_profiles::SshProfileAuth,
-    initial_size: WindowSize,
-    terminal: Arc<FairMutex<Term<H>>>,
-    event_proxy: H,
-    receiver: Receiver<Msg>,
-    ready: Arc<AtomicBool>,
-    initial_remote_cwd: Option<String>,
-) -> Result<(), SessionError> {
-    let mut acquired =
-        authenticated_session_at(&destination, &profile, Some(&event_proxy), 0).await?;
-    report_stage(Some(&event_proxy), SshStage::OpenShell);
-    let shell =
-        open_shell_channel(&acquired.session, initial_size, initial_remote_cwd.as_deref()).await;
-    let (mut channel, hook_token) = match shell {
-        Ok(shell) => shell,
-        Err(first_error) if acquired.reused => {
-            // `Handle::is_closed` 只反映已完成的关闭；TCP reset 与 channel-open
-            // 失败之间存在窗口。复用对象打不开首个 channel 时精确淘汰并只重试
-            // 一次，新连接失败则把真实错误交给连接卡片。
-            evict_pooled_session(&acquired.key, &acquired.session).await;
-            info!("复用 SSH transport 打开 channel 失败，重建连接: {first_error}");
-            acquired =
-                authenticated_session_at(&destination, &profile, Some(&event_proxy), 0).await?;
-            report_stage(Some(&event_proxy), SshStage::OpenShell);
-            match open_shell_channel(&acquired.session, initial_size, initial_remote_cwd.as_deref())
-                .await
-            {
-                Ok(shell) => shell,
-                Err(retry_error) => {
-                    evict_pooled_session(&acquired.key, &acquired.session).await;
-                    return Err(format!(
-                        "SSH channel 打开失败（复用连接错误: {first_error}；重建后错误: {retry_error}）"
-                    )
-                    .into());
-                },
-            }
-        },
-        Err(error) => {
-            evict_pooled_session(&acquired.key, &acquired.session).await;
-            return Err(error);
-        },
-    };
-    // Shell 已就绪：连接卡片到此让位给真实终端，持续重绘随之停止。此后再
-    // 出错就是会话中途断开，不该复活卡片。
-    ready.store(true, Ordering::Relaxed);
-    report_stage(Some(&event_proxy), SshStage::Ready);
-
-    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
-    tokio::task::spawn_blocking(move || {
-        while let Ok(message) = receiver.recv() {
-            if input_tx.send(message).is_err() {
-                break;
-            }
-        }
-    });
-
-    let mut stream = StreamProcessor::default();
-    stream.resize(initial_size);
-    stream.set_remote_hook_token(hook_token);
-    let result: Result<(), SessionError> = async {
-        loop {
-            let sync_deadline = stream.next_sync_timeout();
-            tokio::select! {
-                message = input_rx.recv() => match message {
-                    Some(Msg::Input(bytes)) => channel.data(bytes.as_ref()).await?,
-                    Some(Msg::Resize(size)) => {
-                        stream.resize(size);
-                        channel.window_change(
-                            u32::from(size.num_cols),
-                            u32::from(size.num_lines),
-                            u32::from(size.cell_width) * u32::from(size.num_cols),
-                            u32::from(size.cell_height) * u32::from(size.num_lines),
-                        ).await?;
-                    },
-                    // 只改本地几何：远端保持旧尺寸，等去抖后的 `Resize` 才发
-                    // `window_change`。交互式拖拽每帧都会来一条。
-                    Some(Msg::ResizeGrid(size)) => stream.resize(size),
-                    Some(Msg::Shutdown) | None => {
-                        let _ = channel.eof().await;
-                        break;
-                    },
-                },
-                message = channel.wait() => match message {
-                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        stream.feed(&mut *terminal.lock(), &event_proxy, data.as_ref());
-                        event_proxy.send_event(TerminalEvent::Wakeup);
-                    },
-                    Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::Eof) | None => break,
-                    _ => {},
-                },
-                _ = wait_for_sync(sync_deadline), if sync_deadline.is_some() => {
-                    stream.stop_sync(&mut *terminal.lock());
-                    event_proxy.send_event(TerminalEvent::Wakeup);
-                },
-            }
-        }
-        Ok(())
-    }
-    .await;
-    let transport_closed = acquired.session.lock().await.is_closed();
-    if result.is_err() || transport_closed {
-        evict_pooled_session(&acquired.key, &acquired.session).await;
-    }
-    result
-}
-
-async fn open_shell_channel(
-    session: &SharedSession,
-    initial_size: WindowSize,
-    initial_remote_cwd: Option<&str>,
-) -> Result<(russh::Channel<client::Msg>, String), SessionError> {
-    let channel = {
-        let session = session.lock().await;
-        session.channel_open_session().await?
-    };
-    channel
-        .request_pty(
-            true,
-            "xterm-256color",
-            u32::from(initial_size.num_cols),
-            u32::from(initial_size.num_lines),
-            u32::from(initial_size.cell_width) * u32::from(initial_size.num_cols),
-            u32::from(initial_size.cell_height) * u32::from(initial_size.num_lines),
-            &[],
-        )
-        .await?;
-    let hook_token = remote_hook_token()?;
-    channel.set_env(false, "NEBULA_REMOTE_HOOK_TOKEN", hook_token.clone()).await?;
-    // 远端 pane 的自声明是安全护栏而非连接前提；AcceptEnv 未放行时忽略。
-    let _ = channel.set_env(false, "NEBULA_PANE_REMOTE", "1").await;
-    channel.request_shell(true).await?;
-    if let Some(command) = initial_remote_cd_command(initial_remote_cwd) {
-        channel.data_bytes(command).await?;
-    }
-    Ok((channel, hook_token))
 }
 
 /// Build one shell-safe `cd` command for a path learned from OSC 7 or SFTP.
@@ -702,12 +519,6 @@ async fn evict_pooled_session(key: &str, session: &SharedSession) -> bool {
         pool.remove(key);
     }
     matches
-}
-
-async fn wait_for_sync(deadline: Option<std::time::Instant>) {
-    if let Some(deadline) = deadline {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-    }
 }
 
 async fn authenticated_session<H: SshEventHost>(
@@ -769,13 +580,10 @@ async fn authenticated_route<H: SshEventHost>(
     unattended: bool,
 ) -> Result<AcquiredSession, SessionError> {
     let key = route.pool_key();
-    let existing = if unattended {
-        None
-    } else {
-        connection_pool().lock().await.get(&key).cloned()
-    };
+    let existing =
+        if unattended { None } else { connection_pool().lock().await.get(&key).cloned() };
     if let Some(existing) = existing {
-        if !existing.lock().await.is_closed() {
+        if !existing.is_closed() {
             info!("复用已认证 SSH 连接: {key}");
             return Ok(AcquiredSession {
                 key,
@@ -784,7 +592,7 @@ async fn authenticated_route<H: SshEventHost>(
                 jump_sessions: Vec::new(),
             });
         }
-        connection_pool().lock().await.remove(&key);
+        evict_pooled_session(&key, &existing).await;
     }
 
     let config = Arc::new(client::Config {
@@ -811,7 +619,7 @@ async fn authenticated_route<H: SshEventHost>(
         authenticate(&mut transport.session, &route.destination, &route.profile).await?;
     }
 
-    let session = Arc::new(tokio::sync::Mutex::new(transport.session));
+    let session = Arc::new(transport.session);
     if unattended {
         return Ok(AcquiredSession {
             key,
@@ -822,7 +630,7 @@ async fn authenticated_route<H: SshEventHost>(
     }
     let mut pool = connection_pool().lock().await;
     if let Some(existing) = pool.get(&key).cloned() {
-        if !existing.lock().await.is_closed() {
+        if !existing.is_closed() {
             return Ok(AcquiredSession {
                 key,
                 session: existing,
@@ -849,10 +657,12 @@ async fn open_transport(
     unattended: bool,
 ) -> Result<OpenedTransport, SessionError> {
     let destination = &route.destination;
+    let handshake = lifecycle::Handshake::default();
     let handler = ClientHandler {
         host: destination.host.clone(),
         port: destination.port,
         allow_prompt: !unattended,
+        handshake: handshake.clone(),
         #[cfg(test)]
         known_hosts_path: route.known_hosts_path.clone(),
     };
@@ -860,53 +670,61 @@ async fn open_transport(
     let session = match &route.transport {
         RouteTransport::Server(server) => {
             info!("经代理 {} 连接 {}:{}", server.display(), destination.host, destination.port);
-            let stream = crate::ssh_proxy::connect(server, &destination.host, destination.port)
-                .await
-                .map_err(|err| format!("经代理 {} 连接失败: {err}", server.display()))?;
-            client::connect_stream(config, stream, handler).await?
+            let stream = lifecycle::network(
+                "proxy connection",
+                crate::ssh_proxy::connect(server, &destination.host, destination.port),
+            )
+            .await
+            .map_err(|err| format!("经代理 {} 连接失败: {err}", server.display()))?;
+            handshake.connect(client::connect_stream(config, stream, handler)).await?
         },
         RouteTransport::Jump(jump) => {
             let spec = &jump.destination.original;
             info!("经跳板 {spec} 连接 {}:{}", destination.host, destination.port);
-            let acquired = Box::pin(authenticated_route(
-                jump,
-                None::<&NoopSshEventHost>,
-                unattended,
-            ))
-            .await
-            .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
-            let channel = {
-                let session = acquired.session.lock().await;
-                session
-                    .channel_open_direct_tcpip(
-                        destination.host.clone(),
-                        u32::from(destination.port),
-                        "127.0.0.1",
-                        0,
-                    )
+            let acquired =
+                Box::pin(authenticated_route(jump, None::<&NoopSshEventHost>, unattended))
                     .await
-                    .map_err(|err| {
-                        format!(
-                            "经跳板 {spec} 转发到 {}:{} 失败: {err}",
-                            destination.host, destination.port
-                        )
-                    })?
-            };
+                    .map_err(|err| format!("连接跳板 {spec} 失败: {err}"))?;
+            let channel = lifecycle::network(
+                "jump channel",
+                acquired.session.channel_open_direct_tcpip(
+                    destination.host.clone(),
+                    u32::from(destination.port),
+                    "127.0.0.1",
+                    0,
+                ),
+            )
+            .await
+            .map_err(|err| {
+                format!(
+                    "经跳板 {spec} 转发到 {}:{} 失败: {err}",
+                    destination.host, destination.port
+                )
+            })?;
             jump_sessions = acquired.jump_sessions;
             jump_sessions.push(acquired.session);
-            client::connect_stream(config, channel.into_stream(), handler).await?
+            handshake
+                .connect(client::connect_stream(config, channel.into_stream(), handler))
+                .await?
         },
         RouteTransport::Command(command) => {
             info!("经自定义命令连接 {}:{}", destination.host, destination.port);
-            let stream =
-                crate::ssh_proxy::connect_command(command, &destination.host, destination.port)
-                    .await
-                    .map_err(|err| format!("自定义代理命令启动失败: {err}"))?;
-            client::connect_stream(config, stream, handler).await?
+            let stream = lifecycle::network(
+                "proxy command",
+                crate::ssh_proxy::connect_command(command, &destination.host, destination.port),
+            )
+            .await
+            .map_err(|err| format!("自定义代理命令启动失败: {err}"))?;
+            handshake.connect(client::connect_stream(config, stream, handler)).await?
         },
         RouteTransport::Direct => {
-            client::connect(config, (destination.host.as_str(), destination.port), handler)
-                .await?
+            let stream = lifecycle::network(
+                "TCP connection",
+                tokio::net::TcpStream::connect((destination.host.as_str(), destination.port)),
+            )
+            .await?;
+            stream.set_nodelay(true)?;
+            handshake.connect(client::connect_stream(config, stream, handler)).await?
         },
     };
     Ok(OpenedTransport { session, jump_sessions })
@@ -917,7 +735,13 @@ async fn authenticate(
     destination: &SshDestination,
     profile: &crate::ssh_profiles::SshProfileAuth,
 ) -> Result<(), SessionError> {
-    if session.authenticate_none(&destination.user).await?.success() {
+    if lifecycle::authentication(
+        "authentication response",
+        session.authenticate_none(&destination.user),
+    )
+    .await?
+    .success()
+    {
         return Ok(());
     }
 
@@ -950,7 +774,9 @@ async fn authenticate(
                     reusable_password =
                         crate::ssh_credentials::load_stored_password(&destination.original)
                             .unwrap_or_else(|error| {
-                                warn!("Could not read saved SSH password; prompting instead: {error}");
+                                warn!(
+                                    "Could not read saved SSH password; prompting instead: {error}"
+                                );
                                 None
                             });
                     loaded_stored_password = true;
@@ -1044,10 +870,7 @@ pub(crate) async fn exec_capture(
     .map_err(|err| format!("SSH 地址解析任务失败: {err}"))??;
 
     let session = authenticated_session(&destination, &profile, None::<&NoopSshEventHost>).await?;
-    let mut channel = {
-        let session = session.lock().await;
-        session.channel_open_session().await?
-    };
+    let mut channel = lifecycle::network("exec channel", session.channel_open_session()).await?;
     channel.exec(true, command).await?;
     if !script.is_empty() {
         channel.data_bytes(script.to_vec()).await?;
@@ -1105,10 +928,7 @@ pub(crate) async fn open_sftp(
 
     // SFTP 面板自己有加载态，不参与终端 pane 的连接卡片。
     let session = authenticated_session(&destination, &profile, None::<&NoopSshEventHost>).await?;
-    let channel = {
-        let session = session.lock().await;
-        session.channel_open_session().await?
-    };
+    let channel = lifecycle::network("SFTP channel", session.channel_open_session()).await?;
     channel.request_subsystem(true, "sftp").await?;
     // 显式给参数而不是用上游默认值：默认单包 256 KiB 会让每个 READ/WRITE 都
     // 顶满一个巨型请求（部分服务端在这个尺寸上会静默出错），而默认在途写
@@ -1177,9 +997,7 @@ async fn run_test(request: SshTestRequest) -> SshTestResult {
     let outcome = tokio::time::timeout(TEST_TIMEOUT, async {
         let resolved = tokio::task::spawn_blocking({
             let raw = raw.clone();
-            move || {
-                SshDestination::resolve(&raw)
-            }
+            move || SshDestination::resolve(&raw)
         })
         .await
         .map_err(|err| -> SessionError {
@@ -1193,13 +1011,9 @@ async fn run_test(request: SshTestRequest) -> SshTestResult {
             icon: None,
             connection: request.connection.clone(),
         };
-        let route = resolve_connection_route(
-            &resolved,
-            &profile,
-            0,
-            request.proxy_password.clone(),
-        )
-        .await?;
+        let route =
+            resolve_connection_route(&resolved, &profile, 0, request.proxy_password.clone())
+                .await?;
         test_connect(&route, &request).await
     })
     .await;
@@ -1452,30 +1266,28 @@ async fn proxy_test_stream(
             let route = resolve_connection_route(&jump_destination, &jump_profile, 1, None)
                 .await
                 .map_err(|error| ProxyTestFailure::JumpConnect {
+                target: spec.clone(),
+                error: error.to_string(),
+            })?;
+            let jump = authenticated_route(&route, None::<&NoopSshEventHost>, true).await.map_err(
+                |error| ProxyTestFailure::JumpConnect {
                     target: spec.clone(),
                     error: error.to_string(),
-                })?;
-            let jump = authenticated_route(&route, None::<&NoopSshEventHost>, true)
+                },
+            )?;
+            let channel = jump
+                .session
+                .channel_open_direct_tcpip(
+                    NETWORK_TEST_HOST,
+                    u32::from(NETWORK_TEST_PORT),
+                    "127.0.0.1",
+                    0,
+                )
                 .await
-                .map_err(|error| ProxyTestFailure::JumpConnect {
+                .map_err(|error| ProxyTestFailure::JumpChannel {
                     target: spec.clone(),
                     error: error.to_string(),
                 })?;
-            let channel = {
-                let session = jump.session.lock().await;
-                session
-                    .channel_open_direct_tcpip(
-                        NETWORK_TEST_HOST,
-                        u32::from(NETWORK_TEST_PORT),
-                        "127.0.0.1",
-                        0,
-                    )
-                    .await
-                    .map_err(|error| ProxyTestFailure::JumpChannel {
-                        target: spec.clone(),
-                        error: error.to_string(),
-                    })?
-            };
             let mut sessions = jump.jump_sessions;
             sessions.push(jump.session);
             Ok(Box::new(RetainedNetworkStream {
@@ -1490,10 +1302,7 @@ async fn proxy_test_stream(
     }
 }
 
-async fn test_connect(
-    route: &ResolvedRoute,
-    request: &SshTestRequest,
-) -> Result<(), SessionError> {
+async fn test_connect(route: &ResolvedRoute, request: &SshTestRequest) -> Result<(), SessionError> {
     let config = Arc::new(client::Config {
         inactivity_timeout: None,
         keepalive_interval: None,
@@ -1685,7 +1494,8 @@ async fn try_private_key(
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(|passphrase| russh::keys::load_secret_key(path, Some(passphrase)).ok());
         if key.is_none() && stored.is_some() {
-            if let Err(error) = crate::ssh_credentials::forget_private_key_passphrase(&private_key) {
+            if let Err(error) = crate::ssh_credentials::forget_private_key_passphrase(&private_key)
+            {
                 warn!("Could not remove rejected SSH key passphrase: {error}");
             }
         }
@@ -1716,10 +1526,12 @@ async fn try_private_key(
     let cert_path = PathBuf::from(format!("{}-cert.pub", path.display()));
     if cert_path.is_file() {
         if let Ok(certificate) = russh::keys::load_openssh_certificate(&cert_path) {
-            if session
-                .authenticate_openssh_cert(&destination.user, key.clone(), certificate)
-                .await?
-                .success()
+            if lifecycle::authentication(
+                "certificate authentication",
+                session.authenticate_openssh_cert(&destination.user, key.clone(), certificate),
+            )
+            .await?
+            .success()
             {
                 return Ok(true);
             }
@@ -1728,14 +1540,20 @@ async fn try_private_key(
 
     let hash = rsa_hash_for(session, key.algorithm().is_rsa()).await;
     let key = PrivateKeyWithHashAlg::new(key, hash);
-    Ok(session.authenticate_publickey(&destination.user, key).await?.success())
+    Ok(lifecycle::authentication(
+        "public-key authentication",
+        session.authenticate_publickey(&destination.user, key),
+    )
+    .await?
+    .success())
 }
 
 async fn rsa_hash_for(session: &ClientSession, rsa: bool) -> Option<HashAlg> {
     if !rsa {
         return None;
     }
-    match session.best_supported_rsa_hash().await {
+    match lifecycle::network("server signature algorithms", session.best_supported_rsa_hash()).await
+    {
         Ok(Some(hash)) => hash,
         _ => Some(HashAlg::Sha512),
     }
@@ -1747,7 +1565,12 @@ async fn authenticate_password(
     password: &[u8],
 ) -> Result<bool, SessionError> {
     let password = String::from_utf8(password.to_vec())?;
-    Ok(session.authenticate_password(user, password).await?.success())
+    Ok(lifecycle::authentication(
+        "password authentication",
+        session.authenticate_password(user, password),
+    )
+    .await?
+    .success())
 }
 
 async fn try_keyboard_interactive(
@@ -1757,8 +1580,11 @@ async fn try_keyboard_interactive(
     allow_prompt: bool,
 ) -> Result<KeyboardInteractiveAttempt, SessionError> {
     let mut attempt = KeyboardInteractiveAttempt::default();
-    let mut state =
-        session.authenticate_keyboard_interactive_start(&destination.user, None::<String>).await?;
+    let mut state = lifecycle::authentication(
+        "keyboard-interactive authentication",
+        session.authenticate_keyboard_interactive_start(&destination.user, None::<String>),
+    )
+    .await?;
     for _ in 0..8 {
         match state {
             KeyboardInteractiveAuthResponse::Success => {
@@ -1789,7 +1615,11 @@ async fn try_keyboard_interactive(
                     responses.push(String::from_utf8_lossy(&response).into_owned());
                     response.fill(0);
                 }
-                state = session.authenticate_keyboard_interactive_respond(responses).await?;
+                state = lifecycle::authentication(
+                    "keyboard-interactive response",
+                    session.authenticate_keyboard_interactive_respond(responses),
+                )
+                .await?;
             },
         }
     }
@@ -1809,8 +1639,10 @@ async fn prompt_secret(
     if crate::ssh_prompt::available() {
         let _initial = zeroize::Zeroizing::new(initial.unwrap_or_default());
         return crate::ssh_prompt::secret(
-            destination, allow_save && crate::platform::credentials::can_store(),
-        ).await;
+            destination,
+            allow_save && crate::platform::credentials::can_store(),
+        )
+        .await;
     }
     tokio::task::spawn_blocking(move || {
         let initial = zeroize::Zeroizing::new(initial.unwrap_or_default());
@@ -1854,8 +1686,12 @@ fn render_error<H: SshEventHost>(
 async fn confirm_new_host(host: &str, port: u16, key: &ssh_key::PublicKey) -> bool {
     if crate::ssh_prompt::available() {
         return crate::ssh_prompt::confirm_host(
-            host, port, key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
-        ).await.unwrap_or_else(|error| {
+            host,
+            port,
+            key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
+        )
+        .await
+        .unwrap_or_else(|error| {
             warn!("SSH host confirmation failed: {error}");
             false
         });

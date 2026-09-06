@@ -15,6 +15,8 @@ pub mod dirs;
 pub mod file_manager;
 #[cfg(feature = "gpui-shell")]
 pub mod fonts;
+#[cfg(all(windows, feature = "gpui-shell"))]
+pub(crate) mod keyboard;
 pub mod notifications;
 pub mod shell;
 pub mod shell_integration;

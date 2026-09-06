@@ -6,6 +6,24 @@ use super::*;
 mod tests {
     use super::*;
 
+    fn remove_test_directory(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::remove_dir_all(path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error)
+                    if cfg!(windows)
+                        && matches!(error.raw_os_error(), Some(32 | 33))
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                },
+                Err(error) => panic!("could not remove test directory {}: {error}", path.display()),
+            }
+        }
+    }
+
     #[test]
     fn toggle_switches_views_without_closing() {
         let mut p = SidePanel::new();
@@ -104,7 +122,7 @@ mod tests {
 
         panel.wait_snapshot();
         panel.file_index.release_for_test();
-        std::fs::remove_dir_all(&base).unwrap();
+        remove_test_directory(&base);
     }
 
     #[test]
@@ -129,7 +147,7 @@ mod tests {
 
         panel.wait_snapshot();
         panel.file_index.release_for_test();
-        std::fs::remove_dir_all(&base).unwrap();
+        remove_test_directory(&base);
     }
 
     #[test]
@@ -398,7 +416,7 @@ mod tests {
         assert_eq!(rows[2].depth, 1);
 
         p.file_index.release_for_test();
-        std::fs::remove_dir_all(&base).unwrap();
+        remove_test_directory(&base);
     }
 
     #[test]
@@ -455,7 +473,7 @@ mod tests {
         assert!(panel.custom_root_active(), "upward navigation is window-local");
 
         panel.file_index.release_for_test();
-        std::fs::remove_dir_all(&base).unwrap();
+        remove_test_directory(&base);
     }
 
     #[test]
@@ -485,7 +503,7 @@ mod tests {
         assert!(!panel.click_drag_source(&stale), "a changed source row must be ignored");
 
         panel.file_index.release_for_test();
-        std::fs::remove_dir_all(&base).unwrap();
+        remove_test_directory(&base);
     }
 
     #[test]

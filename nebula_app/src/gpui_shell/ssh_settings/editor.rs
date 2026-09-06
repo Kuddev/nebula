@@ -1,15 +1,35 @@
 use super::*;
+use gpui::Focusable as _;
 
 const EDITOR_WIDTH: f32 = 512.0;
-const EDITOR_HEIGHT: f32 = 660.0;
+const EDITOR_HEIGHT: f32 = 720.0;
 const EDITOR_PADDING: f32 = 28.0;
 
 pub(super) fn editor_input(
     state: &Entity<InputState>,
     label: &'static str,
+    window: &Window,
     cx: &gpui::App,
 ) -> Input {
-    Input::new(state).h(px(SSH_EDITOR_CTL_H)).text_sm().bg(cx.theme().popover).aria_label(label)
+    let theme = cx.theme();
+    let focused = state.read(cx).focus_handle(cx).is_focused(window);
+    gpui::Styled::h(Input::new(state), px(SSH_EDITOR_CTL_H))
+        .text_size(px(13.0))
+        .px(px(12.0))
+        .rounded(px(7.0))
+        .bg(theme.popover)
+        .focus_bordered(false)
+        .border_color(if focused { theme.ring.opacity(0.8) } else { theme.input })
+        .when(focused, |input| {
+            input.shadow(vec![gpui::BoxShadow {
+                inset: false,
+                color: theme.ring.opacity(0.13),
+                offset: gpui::point(px(0.0), px(0.0)),
+                blur_radius: px(0.0),
+                spread_radius: px(3.0),
+            }])
+        })
+        .aria_label(label)
 }
 
 pub(super) fn editor_field(label: &'static str, control: impl IntoElement) -> gpui::Div {
@@ -32,6 +52,7 @@ pub(super) fn editor_hint(text: impl Into<SharedString>, cx: &gpui::App) -> gpui
 impl SettingsPane {
     pub(in crate::gpui_shell) fn ssh_editor_modal(
         &mut self,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let language = crate::gpui_shell::config::ui_language(cx);
@@ -40,8 +61,11 @@ impl SettingsPane {
         let avatar = self.ssh_avatar(icon, cx);
         let icon_popup = self.ssh_icon_popup(cx);
         let username_popup = self.ssh_username_popup(cx);
-        let content =
-            if editor.advanced { self.ssh_editor_advanced(cx) } else { self.ssh_editor_basic(cx) };
+        let content = if editor.advanced {
+            self.ssh_editor_advanced(window, cx)
+        } else {
+            self.ssh_editor_basic(window, cx)
+        };
         let theme = cx.theme();
         let title = if editor.original_destination.is_some() {
             language.pick("编辑 SSH 主机", "Edit SSH host")
@@ -136,7 +160,7 @@ impl SettingsPane {
                                 .max_w(gpui::relative(1.0))
                                 .max_h(gpui::relative(1.0))
                                 .flex_none()
-                                .rounded(px(12.0))
+                                .rounded(px(13.0))
                                 .border_1()
                                 .border_color(theme.border.opacity(0.7))
                                 .bg(theme.popover)
@@ -145,7 +169,7 @@ impl SettingsPane {
                                 .overflow_hidden()
                                 .child(
                                     h_flex()
-                                        .h(px(84.0))
+                                        .h(px(94.0))
                                         .flex_shrink_0()
                                         .px(px(EDITOR_PADDING))
                                         .gap_3()
@@ -156,7 +180,12 @@ impl SettingsPane {
                                                 .flex_1()
                                                 .min_w_0()
                                                 .gap_1()
-                                                .child(div().text_lg().font_semibold().child(title))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(19.0))
+                                                        .font_semibold()
+                                                        .child(title),
+                                                )
                                                 .child(editor_hint(
                                                     language.pick(
                                                         "配置连接信息，随时快速访问。",
@@ -243,14 +272,15 @@ impl SettingsPane {
                                 )
                                 .child(
                                     h_flex()
-                                        .h(px(64.0))
+                                        .h(px(71.0))
                                         .flex_shrink_0()
                                         .px(px(EDITOR_PADDING))
                                         .items_center()
                                         .justify_between()
                                         .border_t_1()
                                         .border_color(theme.border)
-                                        .bg(theme.group_box)
+                                        .bg(theme.muted)
+                                        .rounded_b(px(13.0))
                                         .child(
                                             Button::new("ssh-editor-test")
                                                 .debug_selector(|| "ssh-editor-test".to_owned())
@@ -274,7 +304,7 @@ impl SettingsPane {
                                                         .label(language.pick("取消", "Cancel"))
                                                         .ghost()
                                                         .small()
-                                                        .h(px(SSH_EDITOR_CTL_H))
+                                                        .h(px(35.0))
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
                                                                 this.close_ssh_editor(window, cx)
@@ -289,7 +319,7 @@ impl SettingsPane {
                                                         .label(language.pick("保存", "Save"))
                                                         .primary()
                                                         .small()
-                                                        .h(px(SSH_EDITOR_CTL_H))
+                                                        .h(px(35.0))
                                                         .min_w(px(74.0))
                                                         .on_click(cx.listener(
                                                             |this, _, window, cx| {
@@ -307,10 +337,10 @@ impl SettingsPane {
         )
     }
 
-    fn ssh_editor_basic(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn ssh_editor_basic(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let language = crate::gpui_shell::config::ui_language(cx);
-        let username = self.ssh_username_control(cx);
-        let authentication = self.ssh_editor_authentication(cx);
+        let username = self.ssh_username_control(window, cx);
+        let authentication = self.ssh_editor_authentication(window, cx);
         let theme = cx.theme();
         let validation = self.ssh_status.as_ref().and_then(|status| match status {
             SshStatus::Validation(error) => Some(*error),
@@ -338,6 +368,7 @@ impl SettingsPane {
                     .child(editor_input(
                         &self.ssh_label_input,
                         language.pick("主机名称", "Host name"),
+                        window,
                         cx,
                     )),
             )
@@ -352,6 +383,7 @@ impl SettingsPane {
                             editor_input(
                                 &self.ssh_destination_input,
                                 language.pick("主机地址", "Host address"),
+                                window,
                                 cx,
                             )
                             .when(address_error, |input| input.border_color(theme.danger)),
@@ -360,8 +392,13 @@ impl SettingsPane {
                     .child(
                         div().w(px(84.0)).flex_shrink_0().child(editor_field(
                             language.pick("端口", "Port"),
-                            editor_input(&self.ssh_port_input, language.pick("端口", "Port"), cx)
-                                .when(port_error, |input| input.border_color(theme.danger)),
+                            editor_input(
+                                &self.ssh_port_input,
+                                language.pick("端口", "Port"),
+                                window,
+                                cx,
+                            )
+                            .when(port_error, |input| input.border_color(theme.danger)),
                         )),
                     ),
             )
@@ -385,7 +422,7 @@ impl SettingsPane {
             )
     }
 
-    fn ssh_editor_authentication(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn ssh_editor_authentication(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         use crate::ssh_profiles::SshAuthMode;
 
         let language = crate::gpui_shell::config::ui_language(cx);
@@ -409,7 +446,8 @@ impl SettingsPane {
                 .small()
                 .flex_1()
                 .min_w_0()
-                .h(px(30.0))
+                .h(px(31.0))
+                .rounded(gpui_component::button::ButtonRounded::Size(px(5.0)))
                 .px_1()
                 .toggled(editor.auth == mode)
                 .when(editor.auth == mode, |button| {
@@ -431,8 +469,8 @@ impl SettingsPane {
                     .mt_2()
                     .p(px(3.0))
                     .gap(px(3.0))
-                    .rounded_lg()
-                    .bg(theme.input)
+                    .rounded(px(8.0))
+                    .bg(theme.muted)
                     .children(controls),
             )
             .when(shows_password, |body| {
@@ -442,6 +480,7 @@ impl SettingsPane {
                         editor_input(
                             &self.ssh_password_input,
                             language.pick("密码", "Password"),
+                            window,
                             cx,
                         )
                         .mask_toggle(),

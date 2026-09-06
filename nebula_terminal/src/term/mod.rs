@@ -30,6 +30,9 @@ use crate::vte::ansi::{
 pub mod cell;
 pub mod color;
 mod damage;
+mod keyboard;
+#[cfg(test)]
+mod keyboard_contract_tests;
 mod renderable;
 pub mod search;
 
@@ -100,29 +103,6 @@ bitflags! {
                                       | Self::REPORT_ALL_KEYS_AS_ESC.bits()
                                       | Self::REPORT_ASSOCIATED_TEXT.bits();
          const ANY                    = u32::MAX;
-    }
-}
-
-impl From<KeyboardModes> for TermMode {
-    fn from(value: KeyboardModes) -> Self {
-        let mut mode = Self::empty();
-
-        let disambiguate_esc_codes = value.contains(KeyboardModes::DISAMBIGUATE_ESC_CODES);
-        mode.set(TermMode::DISAMBIGUATE_ESC_CODES, disambiguate_esc_codes);
-
-        let report_event_types = value.contains(KeyboardModes::REPORT_EVENT_TYPES);
-        mode.set(TermMode::REPORT_EVENT_TYPES, report_event_types);
-
-        let report_alternate_keys = value.contains(KeyboardModes::REPORT_ALTERNATE_KEYS);
-        mode.set(TermMode::REPORT_ALTERNATE_KEYS, report_alternate_keys);
-
-        let report_all_keys_as_esc = value.contains(KeyboardModes::REPORT_ALL_KEYS_AS_ESC);
-        mode.set(TermMode::REPORT_ALL_KEYS_AS_ESC, report_all_keys_as_esc);
-
-        let report_associated_text = value.contains(KeyboardModes::REPORT_ASSOCIATED_TEXT);
-        mode.set(TermMode::REPORT_ASSOCIATED_TEXT, report_associated_text);
-
-        mode
     }
 }
 
@@ -1531,8 +1511,7 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         trace!("Reporting active keyboard mode");
-        let current_mode =
-            self.keyboard_mode_stack.last().unwrap_or(&KeyboardModes::NO_MODE).bits();
+        let current_mode = KeyboardModes::from(self.mode).bits();
         let text = format!("\x1b[?{current_mode}u");
         self.event_proxy.send_event(Event::PtyWrite(text));
     }
@@ -1546,7 +1525,7 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Pushing `{mode:?}` keyboard mode into the stack");
 
         if self.keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH {
-            let removed = self.title_stack.remove(0);
+            let removed = self.keyboard_mode_stack.remove(0);
             trace!(
                 "Removing '{removed:?}' from bottom of keyboard mode stack that exceeds its \
                  maximum depth"
@@ -1579,6 +1558,14 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         self.set_keyboard_mode(mode.into(), apply);
+        // CSI = changes the current frame, including the implicit base frame.
+        // Nested applications and screen switches must restore the changed flags.
+        let active = KeyboardModes::from(self.mode);
+        if let Some(frame) = self.keyboard_mode_stack.last_mut() {
+            *frame = active;
+        } else {
+            self.keyboard_mode_stack.push(active);
+        }
     }
 
     #[inline]

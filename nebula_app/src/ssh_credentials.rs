@@ -405,10 +405,7 @@ pub fn forget_password(destination: &str) -> std::io::Result<()> {
     crate::platform::credentials::delete(&credential_target(destination))
 }
 
-pub fn store_private_key_passphrase(
-    private_key: &[u8],
-    passphrase: &[u8],
-) -> std::io::Result<()> {
+pub fn store_private_key_passphrase(private_key: &[u8], passphrase: &[u8]) -> std::io::Result<()> {
     crate::platform::credentials::store_with_username(
         &private_key_credential_target(private_key),
         "private-key",

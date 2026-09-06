@@ -2,7 +2,7 @@
 name = "nebula"
 version = "1.5.0"
 license = "GPL-3.0-or-later"
-description = "Nebula Terminal — a premium GPU-accelerated terminal emulator"
+description = "Pebrel — a GPU-accelerated terminal emulator"
 readme = "README.md"
 homepage = "https://github.com/Kuddev/nebula"
 repository = "https://github.com/Kuddev/nebula"
@@ -138,7 +138,9 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha1 = "0.11.0"
 
 [build-dependencies]
+nebula-settings = { path = "../nebula_settings", version = "1.5.0" }
 gl_generator = { version = "0.14.0", optional = true }
+serde = "1"
 serde_json = "1"
 
 [dev-dependencies]

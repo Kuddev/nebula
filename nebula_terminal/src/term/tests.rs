@@ -41,6 +41,34 @@ impl EventListener for WriteRecorder {
     }
 }
 
+#[test]
+fn keyboard_queries_follow_live_flags_after_replace_union_and_difference() {
+    let size = TermSize::new(5, 5);
+    let events = WriteRecorder::default();
+    let mut term =
+        Term::new(Config { kitty_keyboard: true, ..Config::default() }, &size, events.clone());
+    let mut parser: ansi::Processor = ansi::Processor::new();
+
+    for (sequence, expected) in [
+        ("\x1b[=31u", 31),
+        ("\x1b[=0u", 0),
+        ("\x1b[>7u", 7),
+        ("\x1b[=0u", 0),
+        ("\x1b[=3;2u", 3),
+        ("\x1b[=1;3u", 2),
+        ("\x1b[<u", 0),
+    ] {
+        parser.advance(&mut term, sequence.as_bytes());
+        parser.advance(&mut term, b"\x1b[?u");
+        assert_eq!(events.take(), vec![format!("\x1b[?{expected}u")], "{sequence:?}");
+        assert_eq!(
+            *term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL,
+            TermMode::from(KeyboardModes::from_bits(expected).unwrap()),
+            "{sequence:?}"
+        );
+    }
+}
+
 /// DECSET 2031 订阅的同一刻就要收到当前亮暗：规范里取初值靠
 /// `CSI ? 996 n`，但 vte 0.15 不把私有 DSR 路由给 handler，我们答不了那条
 /// 查询。订阅即回报是这个洞的替代品，掉了它 app 在下次换主题前无从得知。
