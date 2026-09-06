@@ -729,6 +729,48 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_startup_queries_applied_flags_and_preserves_newline_chords() {
+        use nebula_terminal::term::Config;
+        use nebula_terminal::vte::ansi::Processor;
+
+        let size = super::super::session::GridSize { columns: 80, screen_lines: 24 };
+        let recorder = KeyboardReplyRecorder::default();
+        let mut term = nebula_terminal::Term::new(
+            Config { kitty_keyboard: true, ..Config::default() },
+            &size,
+            recorder.clone(),
+        );
+        let mut parser: Processor = Processor::new();
+        // Captured from AGY 1.1.7's outer ConPTY stream before authentication.
+        // The host's 9001 mode must not override the later Kitty negotiation.
+        parser.advance(&mut term, b"\x1b[?9001h\x1b[=0;1u\x1b[=1;1u\x1b[?u");
+        assert!(term.mode().contains(TermMode::WIN32_INPUT_MODE));
+        assert_eq!(
+            *term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL,
+            TermMode::DISAMBIGUATE_ESC_CODES
+        );
+        for (name, shift, control, expected) in [
+            ("enter", false, false, "\r"),
+            ("enter", true, false, "\x1b[13;2u"),
+            ("enter", false, true, "\x1b[13;5u"),
+            ("j", false, true, "\x1b[106;5u"),
+        ] {
+            let mut key = keystroke(name);
+            key.modifiers.shift = shift;
+            key.modifiers.control = control;
+            assert_eq!(encode(&key, term.mode()), Some(expected.as_bytes().to_vec()));
+        }
+
+        // A later reset must restore the legacy path without a stale reply.
+        parser.advance(&mut term, b"\x1b[=0;1u\x1b[?u\x1b[?9001l");
+        assert_eq!(recorder.0.borrow().as_slice(), ["\x1b[?1u", "\x1b[?0u"]);
+        assert_eq!(encode(&keystroke("enter"), term.mode()), Some(b"\r".to_vec()));
+        let mut ctrl_j = keystroke("j");
+        ctrl_j.modifiers.control = true;
+        assert_eq!(encode(&ctrl_j, term.mode()), Some(b"\n".to_vec()));
+    }
+
+    #[test]
     fn codex_keyboard_negotiation_preserves_enter_chords_until_reset() {
         use nebula_terminal::term::Config;
         use nebula_terminal::vte::ansi::Processor;
