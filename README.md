@@ -144,6 +144,9 @@ through the explicit `legacy-shell` feature.
 
 Email: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
 
+## link
+linuxdo [linux.do](https://linux.do),
+
 ## Acknowledgements
 
 Pebrel builds on [Alacritty](https://github.com/alacritty/alacritty),
