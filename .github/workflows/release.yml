@@ -17,6 +17,18 @@ on:
         required: true
         default: false
         type: boolean
+      windows_only:
+        description: Build only the missing Windows package, retaining other platform artifacts
+        type: boolean
+        default: false
+      source_commit:
+        description: Exact previously tested source commit for Windows-only packaging
+        type: string
+        default: ""
+      validated_run:
+        description: Existing stable run whose Windows native tests passed for source_commit
+        type: string
+        default: ""
       macos_signing:
         description: macOS signing mode; Developer ID also requires notarization secrets
         required: true
@@ -25,7 +37,7 @@ on:
         default: adhoc
 
 concurrency:
-  group: stable-release-${{ github.ref }}
+  group: stable-release-${{ github.ref }}-${{ inputs.windows_only || false }}
   cancel-in-progress: false
 
 permissions:
@@ -108,6 +120,7 @@ jobs:
 
   linux:
     name: Linux x86_64 stable package
+    if: ${{ !inputs.windows_only }}
     needs: prepare
     runs-on: ubuntu-22.04
     timeout-minutes: 120
@@ -232,6 +245,7 @@ jobs:
 
   macos:
     name: macOS ${{ matrix.architecture }} stable package
+    if: ${{ !inputs.windows_only }}
     needs: prepare
     timeout-minutes: 120
     strategy:
@@ -373,10 +387,42 @@ jobs:
     needs: prepare
     runs-on: windows-2022
     timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
     env:
       PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - name: Retain runtime preparation tool for the selected source
+        shell: pwsh
+        run: |
+          Copy-Item scripts/prepare-windows-runtime.ps1 "$env:RUNNER_TEMP/prepare-windows-runtime.ps1"
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/runtime-tests" -Force | Out-Null
+          Copy-Item scripts/tests/windows-runtime.tests.ps1 "$env:RUNNER_TEMP/runtime-tests/windows-runtime.tests.ps1"
+      - name: Verify the previous Windows test result
+        if: ${{ inputs.source_commit != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_COMMIT: ${{ inputs.source_commit }}
+          VALIDATED_RUN: ${{ inputs.validated_run }}
+          WINDOWS_ONLY: ${{ inputs.windows_only }}
+        run: |
+          if ($env:WINDOWS_ONLY -ne 'true' -or $env:SELECTED_COMMIT -notmatch '^[0-9a-f]{40}$' -or $env:VALIDATED_RUN -notmatch '^[0-9]+$') {
+            throw 'Selecting old source requires Windows-only mode, an exact commit, and a validated run.'
+          }
+          $run = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:VALIDATED_RUN" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $env:SELECTED_COMMIT) { throw 'Validated run source differs.' }
+          $jobs = gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:VALIDATED_RUN/jobs?per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot verify prior native tests.' }
+          $windows = @($jobs.jobs | Where-Object name -eq 'Windows x64 stable package')
+          $tests = @($windows.steps | Where-Object { $_.name -eq 'Test workspace and native harness' -and $_.conclusion -eq 'success' })
+          if ($windows.Count -ne 1 -or $tests.Count -ne 1) { throw 'Prior Windows native tests did not pass.' }
+      - uses: actions/checkout@v4
+        if: ${{ inputs.source_commit != '' }}
+        with:
+          ref: ${{ inputs.source_commit }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -386,14 +432,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: Prepare pinned Windows console runtime
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP/prepare-windows-runtime.ps1" -Destination assets/windows/conhost
+          & "$env:RUNNER_TEMP/runtime-tests/windows-runtime.tests.ps1" -ArchivePath (Join-Path ([IO.Path]::GetTempPath()) 'pebrel-conpty-source-v1.5.0.zip')
       - name: Test workspace and native harness
+        if: ${{ inputs.source_commit == '' }}
         run: |
           python -m unittest scripts.conformance.tests.test_lifecycle scripts.conformance.tests.test_scrollback
           cargo test --locked --workspace
           cargo test --locked -p nebula --bin pebrel --features gpui-shell
           cargo test --locked -p nebula --features gpui-test-support dialog
       - name: Build GPUI release binary
-        run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p nebula_hook --bin pebrel-hook
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+          exit $LASTEXITCODE
+      - name: Retain built Windows runtime before packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-runtime-windows-x64
+          path: |
+            target/release/pebrel.exe
+            target/release/pebrel-hook.exe
+            target/release/conpty.dll
+            target/release/OpenConsole.exe
+          if-no-files-found: error
+          retention-days: 30
       - name: Test Windows packaging scripts
         shell: pwsh
         run: |
@@ -412,9 +480,16 @@ jobs:
           $legacyHash = (Get-FileHash -LiteralPath $legacy -Algorithm SHA256).Hash
           if ($canonicalHash -ne $legacyHash) { throw 'legacy installer alias differs from canonical installer' }
       - name: Run Windows conformance
+        shell: pwsh
         env:
           NEBULA_RESIZE_TRACE: "1"
-        run: python scripts/conformance/run.py --app target/release/pebrel.exe --platform windows-x86_64 --output dist/conformance/windows-report.json
+          SELECTED_COMMIT: ${{ inputs.source_commit || github.sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($actual -ne $env:SELECTED_COMMIT) { throw 'Checked-out source differs from the requested build.' }
+          $env:GITHUB_SHA = $actual
+          python scripts/conformance/run.py --app target/release/pebrel.exe --platform windows-x86_64 --output dist/conformance/windows-report.json
+          exit $LASTEXITCODE
       - name: Upload Windows stable assets
         if: always()
         uses: actions/upload-artifact@v4
@@ -437,6 +512,7 @@ jobs:
 
   aggregate:
     name: Verify stable assets and upload complete set
+    if: ${{ !inputs.windows_only }}
     needs: [prepare, linux, macos, windows]
     runs-on: ubuntu-22.04
     env:
@@ -482,7 +558,7 @@ jobs:
 
   publish:
     name: Publish verified GitHub Release
-    if: ${{ github.event_name == 'push' || inputs.publish == true }}
+    if: ${{ !inputs.windows_only && (github.event_name == 'push' || inputs.publish == true) }}
     needs: [prepare, aggregate]
     runs-on: ubuntu-22.04
     permissions:
