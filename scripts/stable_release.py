@@ -196,7 +196,8 @@ def verify_release(metadata: dict, directory: Path, version: str, commit: str, t
     ):
         raise StableReleaseError("remote stable title, tag, commit, or publication state differs")
     notes = (directory / "RELEASE_NOTES.md").read_text(encoding="utf-8")
-    if (metadata.get("body") or "").strip() != notes.strip():
+    remote_notes = (metadata.get("body") or "").replace("\r\n", "\n").replace("\r", "\n")
+    if remote_notes.strip() != notes.strip():
         raise StableReleaseError("remote stable Release notes differ from the verified local notes")
     assets = metadata.get("assets") or []
     if len(assets) != len(expected_names) or {asset.get("name") for asset in assets} != expected_names:

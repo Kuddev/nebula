@@ -1,6 +1,6 @@
 # Pebrel 持久化发布记忆
 
-最后核验：2026-09-07，GitHub 仓库更名、旧链接跳转与历史发布资产一致性。1.6.0 仍为本地候选，本次没有创建正式 Release、推送发布提交或移动版本标签。
+最后核验：2026-09-07，Pebrel 1.6.0 已公开发布，Release ID 为 `384071347`。标签 `v1.6.0` 指向实际构建源码 `5b8285388d5f63b9962c135825aff039aaa3ce56`；后续说明和打包流程修订跟随 `main`，不移动此标签。Windows 为正式版，Linux 与 macOS 标注 Preview。
 
 本文记录已经实际遇到并核实的发布陷阱，以及后续版本可直接执行的 Release Note 与 GitHub Release 规则。它不保存密钥、令牌、临时构建路径或未经验证的猜测。
 
@@ -20,21 +20,35 @@
 
 官方说明：[Renaming a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/renaming-a-repository)。历史版本说明、标签与资产文件名保持原样；仓库更名不会替已改名的 Release 资产创建文件名别名。
 
-1.6.0 候选的源码与打包脚本已采用以下新名称，但**这不代表 1.6.0 已经公开发布**：
+1.6.0 已发布并核验以下名称（2026-09-07）：
 
-| 对象 | 1.6.0 候选名称 |
+| 对象 | 1.6.0 发布名称 |
 | --- | --- |
 | 主程序与 CLI | `pebrel.exe` / `pebrel` |
 | AI hook 辅助程序 | `runtime/pebrel-hook.exe` |
 | Portable ZIP | `Pebrel-v1.6.0-windows-x64.zip` |
-| Windows 安装器 | `Pebrel-1.6.0-windows-x64-setup.exe` |
+| Windows 安装器 | `Pebrel-v1.6.0-windows-x64-setup.exe` |
+| 旧版更新兼容安装器 | `NebulaTerminal-1.6.0-windows-x64-setup.exe`，与新名安装器字节一致 |
+| Linux Preview | `Pebrel-v1.6.0-linux-x64-preview.AppImage` / `.deb` / `.tar.gz` |
+| macOS Preview | `Pebrel-v1.6.0-macos-arm64-preview.dmg` / `Pebrel-v1.6.0-macos-x64-preview.dmg` |
 | Release Note | `docs/release-notes/v1.6.0.md`，标题 `Pebrel 1.6.0` |
 
 旧客户端按精确的 `NebulaTerminal-<version>-windows-x64-setup.exe` 名称查找更新。
-未来公开发布 Pebrel 安装资产时，还需要提供相同安装器字节的旧命名兼容资产，或先完成明确的客户端迁移方案；不能把仓库重定向当成资产改名兼容。
-目前下载入口应指向真实的 `https://github.com/Kuddev/pebrel/releases/latest` 页面，不能生成指向尚未发布 Pebrel 资产的 `latest/download/...` 链接。
+本次保留了相同安装器字节的旧命名兼容资产；两份安装器 SHA256 均为 `369d5f93f34d7f90bde91b51a4f66259d1f277619f7e2b618fb6e03d449f605f`。自动迁移发生在安装器启动之后，不能替代旧客户端按精确文件名发现安装包的步骤。
+Pebrel 1.6 已识别新安装器名称。未来停止支持旧 Nebula 客户端直接自动升级后，新版本可不再提供旧名；已发布的兼容资产应继续保留，避免破坏历史升级入口和下载链接。
+下载入口可使用真实的 `https://github.com/Kuddev/pebrel/releases/latest` 页面；直接资产链接必须逐一对应实际文件名。
 
-下文保留 1.3.0 / 1.3.1 的已发布核验先例与通用发布步骤。其历史名称用于识别旧版本，新的候选名称以上表和当前打包脚本为准；最终 SHA256 仍必须在新文件生成后重新计算。
+### 1.6.0 发布核验与增量原则（2026-09-07）
+
+- [Release](https://github.com/Kuddev/pebrel/releases/tag/v1.6.0) 为非 draft、非 prerelease；后者表示 Windows 正式版，Linux/macOS 的 Preview 状态由文件名、README 与发布说明明确标注。
+- 共有八个安装资产及 `SHA256SUMS`。GitHub 返回的真实名称、空 label、uploaded 状态、大小和 digest 已逐项与下载到本地的最终文件核对。说明采用 1.4.1 的双语分类和贡献者头像结构，包含经原帖核实的 Issue 引用。
+- Linux、Apple Silicon、Intel macOS 产物来自运行 `34112627486` 的成功平台任务。Windows 在该轮已通过程序编译和原生测试，但打包自测缺少 hook 与 ConPTY 文件；运行 `34118913759` 仅补 Windows，并固定检出同一源码 `5b82853`，未重跑已通过的其他平台。
+- 六份终端验收报告和两份 macOS LaunchServices 报告均通过，并记录同一个构建源码提交。早先 Preview 运行 `34112511937` 的 Intel 镜像创建遇到 `Resource busy`；发布使用的是随后已完成并通过验收的上述正式构建产物，未用失败产物替代。
+- Windows CI 必须先准备 `pebrel-hook.exe`、`conpty.dll` 和 `OpenConsole.exe`，再运行打包自测。`scripts/prepare-windows-runtime.ps1` 从固定 SHA256 的 1.5.0 已发布归档中仅取出既有 Microsoft 1.22 运行文件，并逐文件校验；主程序和 hook 仍从本次源码构建。
+- 已成功的安装包须保留并复用。README、Release Note 和渠道标注变动不要求重编译程序；本次给非 Windows 文件添加 `-preview` 只改文件名，未改变内容或 SHA256。不得因此重跑全部平台。
+- 发布动作会触发标签上的旧工作流；已验证并上传资产后，应取消重复构建，而不是再次生成或覆盖同一发布资产。
+
+下文保留 1.3.0 / 1.3.1 的已发布核验先例与通用发布步骤。其历史名称用于识别旧版本，1.6 起的新名称以上表为准；文件内容实际改变后必须重新计算 SHA256，不能套用旧值。
 
 ## 1. 命名规范是接口，不是装饰
 
@@ -48,7 +62,7 @@
 | Windows 安装器 | `NebulaTerminal-X.Y.Z-windows-x64-setup.exe` | `NebulaTerminal-1.3.1-windows-x64-setup.exe` |
 | Release Note 文件 | `docs/release-notes/vX.Y.Z.md` | `docs/release-notes/v1.3.1.md` |
 
-- ZIP 带 `v`，安装器不带 `v`。不要为了“看起来统一”擅自改成同一种格式。
+- 历史版本的 ZIP 带 `v`、安装器不带 `v`，历史资产不改名。维护者在 1.6 发布中明确要求统一新名称，因此新的 Pebrel ZIP 与安装器均带 `v`；旧名兼容安装器保留原有格式。
 - 应用内更新会按精确安装器文件名选择资产。发布资产改名不仅影响展示，还可能直接破坏自动更新。
 - GitHub CLI 上传资产时，`<path>#<label>` 中的 `#...` 会设置自定义资产标签。GitHub Assets 区域随后优先显示这个 label，造成文件名看起来被改乱。正式上传只传文件路径，不加 `#label`。
 - 资产 `label` 的正确值是空字符串。若文件本身、大小和 digest 都正确，只是 label 错了，应通过 GitHub API 清空 label；不要重新上传并损失下载计数或引入重复资产。

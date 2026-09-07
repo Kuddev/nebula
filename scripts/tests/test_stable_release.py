@@ -177,6 +177,8 @@ class StableReleaseTests(unittest.TestCase):
                 ],
             }
             verify_release(metadata, root, VERSION, "a" * 40, "a" * 40)
+            metadata["body"] = release_notes.replace("\n", "\r\n")
+            verify_release(metadata, root, VERSION, "a" * 40, "a" * 40)
             metadata["assets"][0]["label"] = "wrong"
             with self.assertRaisesRegex(StableReleaseError, "label"):
                 verify_release(metadata, root, VERSION, "a" * 40, "a" * 40)

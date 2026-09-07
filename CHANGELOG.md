@@ -86,8 +86,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 ### Contributors
 
-<a href="https://github.com/Sakyvo"><img src="https://github.com/Sakyvo.png?size=96" width="64" height="64" alt="@Sakyvo avatar"></a>
-<a href="https://github.com/821869798"><img src="https://github.com/821869798.png?size=96" width="64" height="64" alt="@821869798 avatar"></a>
+<a href="https://github.com/Sakyvo"><img src="https://github.com/Sakyvo.png?size=96" width="64" height="64" alt="@Sakyvo avatar"></a><a href="https://github.com/821869798"><img src="https://github.com/821869798.png?size=96" width="64" height="64" alt="@821869798 avatar"></a>
 
 **[@Sakyvo](https://github.com/Sakyvo)** - Added the optional Windows terminal proxy, selection-aware `Ctrl+C`, and word deletion with `Ctrl+Backspace`. / 新增可选的 Windows 终端代理、按选区处理的 `Ctrl+C`，以及 `Ctrl+Backspace` 按词删除。（[#94](https://github.com/Kuddev/pebrel/pull/94)、[#93](https://github.com/Kuddev/pebrel/pull/93)、[#92](https://github.com/Kuddev/pebrel/pull/92)）
 
