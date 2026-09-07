@@ -140,6 +140,10 @@ The internal Cargo package is still named `nebula`; the application and command
 are `pebrel`. GPUI is the product interface. The older renderer is available only
 through the explicit `legacy-shell` feature.
 
+## Contact
+
+Email: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
+
 ## Acknowledgements
 
 Pebrel builds on [Alacritty](https://github.com/alacritty/alacritty),
