@@ -60,7 +60,7 @@ const PATH_ENV: &str = "PATH";
 /// [`crate::shell_detect::wsl_cwd_report_env`] 也会往里追加条目，本函数以
 /// 环境表里的现值为基准合并，从而与调用顺序无关地保住两边的条目。
 pub fn apply(env: &mut HashMap<String, String>, pane_id: impl Display) {
-    let aliases = crate::brand::environment_aliases(
+    let aliases = crate::platform::environment::environment_aliases(
         env.iter().map(|(name, value)| (name.into(), value.into())).collect(),
     );
     for (name, value) in aliases {
