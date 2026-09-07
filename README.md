@@ -21,6 +21,7 @@
 
 <p align="center">
   <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20release-35a854?style=for-the-badge&logo=github&logoColor=white" alt="Download the latest release" /></a>
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/%E5%8F%8B%E9%93%BE-linux.do-ffb003?style=for-the-badge&logo=discourse&logoColor=white" alt="linux.do" /></a>
 </p>
 
 <p align="center">
@@ -144,9 +145,6 @@ through the explicit `legacy-shell` feature.
 
 Email: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
 
-## link
-linuxdo [linux.do](https://linux.do),
-
 ## Acknowledgements
 
 Pebrel builds on [Alacritty](https://github.com/alacritty/alacritty),
@@ -154,3 +152,7 @@ Pebrel builds on [Alacritty](https://github.com/alacritty/alacritty),
 [gpui-component](https://github.com/longbridge/gpui-component). Terminal text uses
 Maple Mono, and native formulas use Latin Modern Math. Upstream copyright and
 license notices are preserved in `THIRD-PARTY-NOTICES` and `licenses/`.
+
+## Community
+
+- **[linux.do](https://linux.do)** - A thriving developer community.

@@ -21,6 +21,7 @@
 
 <p align="center">
   <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20release-35a854?style=for-the-badge&logo=github&logoColor=white" alt="下载最新版本" /></a>
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/%E5%8F%8B%E9%93%BE-linux.do-ffb003?style=for-the-badge&logo=discourse&logoColor=white" alt="linux.do" /></a>
 </p>
 
 <p align="center">
@@ -136,3 +137,7 @@ Pebrel 基于 [Alacritty](https://github.com/alacritty/alacritty)、
 [gpui-component](https://github.com/longbridge/gpui-component) 构建。
 终端使用 Maple Mono 字体，原生公式使用 Latin Modern Math。
 上游版权与许可证声明保留在 `THIRD-PARTY-NOTICES` 和 `licenses/` 中。
+
+## 友情链接
+
+- **[linux.do](https://linux.do)** - 新的理想型社区。
