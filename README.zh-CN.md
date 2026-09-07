@@ -14,14 +14,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/github/v/release/Kuddev/pebrel?style=for-the-badge&label=release&color=007ec6" alt="最新版本" /></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-007ec6?style=for-the-badge" alt="Windows、macOS 与 Linux" />
-  <img src="https://img.shields.io/github/license/Kuddev/pebrel?style=for-the-badge&color=79a900" alt="GPL-3.0 许可证" />
+  <img src="https://img.shields.io/badge/Rust-2024_edition-CE412B?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/OpenGL-ES_2.0%2B-5586A4?style=for-the-badge&logo=opengl&logoColor=white" alt="OpenGL ES 2.0+" />
+  <img src="https://img.shields.io/badge/Windows-10_%2F_11-0078D6?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows 10 和 11" />
+  <img src="https://img.shields.io/badge/macOS-14%2B-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 14+" />
+  <img src="https://img.shields.io/badge/Linux-glibc_2.35%2B-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux glibc 2.35+" />
+  <img src="https://img.shields.io/badge/PowerShell-Pebrel_prompt-5391FE?style=for-the-badge&logo=powershell&logoColor=white" alt="PowerShell" />
+  <img src="https://img.shields.io/badge/License-GPL--3.0-1f6feb?style=for-the-badge" alt="GPL-3.0 许可证" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20release-35a854?style=for-the-badge&logo=github&logoColor=white" alt="下载最新版本" /></a>
-  <a href="https://linux.do"><img src="https://img.shields.io/badge/%E5%8F%8B%E9%93%BE-linux.do-ffb003?style=for-the-badge&logo=discourse&logoColor=white" alt="linux.do" /></a>
+  <img src="https://img.shields.io/github/stars/Kuddev/pebrel?style=flat-square&color=ffd33d&logo=github" alt="Stars" />
+  <img src="https://img.shields.io/github/forks/Kuddev/pebrel?style=flat-square&color=8957e5&logo=github" alt="Forks" />
+  <img src="https://img.shields.io/github/last-commit/Kuddev/pebrel?style=flat-square&color=3fb950" alt="最近提交" />
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/%E5%8F%8B%E9%93%BE-linux.do-ffb003?style=flat-square&logo=discourse&logoColor=white" alt="linux.do" /></a>
 </p>
 
 <p align="center">
@@ -32,6 +38,14 @@
 
 <p align="center">
   <img src="docs/screenshots/nebula-top-tabs.png" alt="Pebrel 终端标签" width="1040" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/nebula-claude-session.png" alt="Pebrel 中运行的 Claude Code" width="1040" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/split-ai-workflows.png" alt="OpenCode、Claude Code 与 Codex 分屏工作流" width="1040" />
 </p>
 
 ## 一个工作区
@@ -55,6 +69,10 @@ Pebrel（原名 Nebula）把本地 Shell、远程主机、文件和 AI 命令行
 - 在终端旁浏览本地文件并执行 Git 操作。
 - 复制 WSL 与 SSH 标签时保留已知工作目录。
 
+<p align="center">
+  <img src="docs/screenshots/ssh.gif" alt="原生 SSH 会话" width="1040" />
+</p>
+
 ### AI CLI 工作流
 
 - Claude Code、Codex 等可识别的 CLI 显示各自图标与活动状态；受支持的 hook 事件提供更准确的进度和待处理信号。
@@ -63,6 +81,10 @@ Pebrel（原名 Nebula）把本地 Shell、远程主机、文件和 AI 命令行
 - 剪贴板图片会保存为 PNG，并把路径插入本地、WSL 或 SSH 会话。终端内直接显示图片需要 CLI
   输出受支持的 OSC 1337 协议；附件缩略图取决于 CLI 自身。
 
+<p align="center">
+  <img src="docs/screenshots/ai-sidebar.png" alt="AI 活动侧栏" width="300" />
+</p>
+
 ### 原生、可配置的界面
 
 - GPU 加速的 GPUI 界面、浅色与深色主题、背景及不透明度设置。
@@ -70,17 +92,13 @@ Pebrel（原名 Nebula）把本地 Shell、远程主机、文件和 AI 命令行
 - 可搜索的设置、命令面板，以及支持检查和热重载的 Lua 配置；已有 TOML 配置仍可使用。
 - Markdown 文档标签与原生数学公式排版，不依赖 WebView。
 
-<details>
-<summary>更多截图</summary>
+<p align="center">
+  <img src="docs/screenshots/native-math-rendering.png" alt="原生公式排版" width="1040" />
+</p>
 
-<p align="center"><img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code 会话" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/split-ai-workflows.png" alt="AI CLI 分屏" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/ai-sidebar.png" alt="AI 活动侧栏" width="300" /></p>
-<p align="center"><img src="docs/screenshots/ssh.gif" alt="原生 SSH 会话" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/native-math-rendering.png" alt="原生公式排版" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/themes.png" alt="应用主题" width="1040" /></p>
-
-</details>
+<p align="center">
+  <img src="docs/screenshots/themes.png" alt="应用主题" width="1040" />
+</p>
 
 ## 下载
 
@@ -141,3 +159,13 @@ Pebrel 基于 [Alacritty](https://github.com/alacritty/alacritty)、
 ## 友情链接
 
 - **[linux.do](https://linux.do)** - 新的理想型社区。
+
+## ⭐ Star History
+
+<a href="https://star-history.dera.page/#Kuddev/pebrel&type=date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
+    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
+  </picture>
+</a>

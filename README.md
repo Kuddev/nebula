@@ -14,14 +14,20 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/github/v/release/Kuddev/pebrel?style=for-the-badge&label=release&color=007ec6" alt="Latest release" /></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-007ec6?style=for-the-badge" alt="Windows, macOS, and Linux" />
-  <img src="https://img.shields.io/github/license/Kuddev/pebrel?style=for-the-badge&color=79a900" alt="GPL-3.0 license" />
+  <img src="https://img.shields.io/badge/Rust-2024_edition-CE412B?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/OpenGL-ES_2.0%2B-5586A4?style=for-the-badge&logo=opengl&logoColor=white" alt="OpenGL ES 2.0+" />
+  <img src="https://img.shields.io/badge/Windows-10_%2F_11-0078D6?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows 10 and 11" />
+  <img src="https://img.shields.io/badge/macOS-14%2B-000000?style=for-the-badge&logo=apple&logoColor=white" alt="macOS 14+" />
+  <img src="https://img.shields.io/badge/Linux-glibc_2.35%2B-FCC624?style=for-the-badge&logo=linux&logoColor=black" alt="Linux glibc 2.35+" />
+  <img src="https://img.shields.io/badge/PowerShell-Pebrel_prompt-5391FE?style=for-the-badge&logo=powershell&logoColor=white" alt="PowerShell" />
+  <img src="https://img.shields.io/badge/License-GPL--3.0-1f6feb?style=for-the-badge" alt="GPL-3.0 license" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20release-35a854?style=for-the-badge&logo=github&logoColor=white" alt="Download the latest release" /></a>
-  <a href="https://linux.do"><img src="https://img.shields.io/badge/%E5%8F%8B%E9%93%BE-linux.do-ffb003?style=for-the-badge&logo=discourse&logoColor=white" alt="linux.do" /></a>
+  <img src="https://img.shields.io/github/stars/Kuddev/pebrel?style=flat-square&color=ffd33d&logo=github" alt="Stars" />
+  <img src="https://img.shields.io/github/forks/Kuddev/pebrel?style=flat-square&color=8957e5&logo=github" alt="Forks" />
+  <img src="https://img.shields.io/github/last-commit/Kuddev/pebrel?style=flat-square&color=3fb950" alt="Last commit" />
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/%E5%8F%8B%E9%93%BE-linux.do-ffb003?style=flat-square&logo=discourse&logoColor=white" alt="linux.do" /></a>
 </p>
 
 <p align="center">
@@ -32,6 +38,14 @@
 
 <p align="center">
   <img src="docs/screenshots/nebula-top-tabs.png" alt="Terminal tabs in Pebrel" width="1040" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code running in Pebrel" width="1040" />
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/split-ai-workflows.png" alt="OpenCode, Claude Code, and Codex in split panes" width="1040" />
 </p>
 
 ## One Workspace
@@ -58,6 +72,10 @@ each agent's activity, and read its output without leaving the application.
 - Local file browsing and Git actions alongside your terminals.
 - Duplicated WSL and SSH tabs retain their known working directory.
 
+<p align="center">
+  <img src="docs/screenshots/ssh.gif" alt="Native SSH session" width="1040" />
+</p>
+
 ### AI CLI Workflows
 
 - Claude Code, Codex, and other recognized CLIs have their own icons and activity
@@ -69,6 +87,10 @@ each agent's activity, and read its output without leaving the application.
   WSL, or SSH sessions. Inline terminal images require the CLI to emit the supported
   OSC 1337 protocol; image attachment previews depend on the CLI itself.
 
+<p align="center">
+  <img src="docs/screenshots/ai-sidebar.png" alt="AI activity sidebar" width="300" />
+</p>
+
 ### A Native, Configurable Interface
 
 - GPU-accelerated GPUI interface, light and dark themes, backgrounds, and opacity controls.
@@ -78,17 +100,13 @@ each agent's activity, and read its output without leaving the application.
   live reload. Existing TOML configuration remains supported.
 - Markdown document tabs and native mathematical typesetting without a WebView.
 
-<details>
-<summary>More screenshots</summary>
+<p align="center">
+  <img src="docs/screenshots/native-math-rendering.png" alt="Native formula rendering" width="1040" />
+</p>
 
-<p align="center"><img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code session" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/split-ai-workflows.png" alt="AI CLI split panes" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/ai-sidebar.png" alt="AI activity sidebar" width="300" /></p>
-<p align="center"><img src="docs/screenshots/ssh.gif" alt="Native SSH session" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/native-math-rendering.png" alt="Native formula rendering" width="1040" /></p>
-<p align="center"><img src="docs/screenshots/themes.png" alt="Application themes" width="1040" /></p>
-
-</details>
+<p align="center">
+  <img src="docs/screenshots/themes.png" alt="Application themes" width="1040" />
+</p>
 
 ## Download
 
@@ -156,3 +174,13 @@ license notices are preserved in `THIRD-PARTY-NOTICES` and `licenses/`.
 ## Community
 
 - **[linux.do](https://linux.do)** - A thriving developer community.
+
+## ⭐ Star History
+
+<a href="https://star-history.dera.page/#Kuddev/pebrel&type=date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
+    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
+  </picture>
+</a>
