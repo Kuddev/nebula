@@ -206,12 +206,17 @@ jobs:
         env:
           NEBULA_RESIZE_TRACE: "1"
         run: |
+          # Weston headless has no wl_seat. A private X11 backend provides
+          # input devices while DISPLAY is cleared for the Wayland client.
+          xvfb-run -a -s "-screen 0 1600x1000x24" bash -euo pipefail <<'WAYLAND_SESSION'
           runtime_directory="$RUNNER_TEMP/nebula-wayland-runtime"
           mkdir -p "$runtime_directory" dist/conformance
           chmod 0700 "$runtime_directory"
           XDG_RUNTIME_DIR="$runtime_directory" \
             weston \
-              --backend=headless-backend.so \
+              --backend=x11-backend.so \
+              --use-pixman \
+              --no-config \
               --socket=wayland-nebula \
               --width=1600 \
               --height=1000 \
@@ -243,6 +248,7 @@ jobs:
               --app "dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.AppImage" \
               --platform linux-x86_64-appimage-wayland \
               --output dist/conformance/linux-appimage-wayland-report.json
+          WAYLAND_SESSION
 
       - name: Install and run Debian package conformance under X11
         env:
