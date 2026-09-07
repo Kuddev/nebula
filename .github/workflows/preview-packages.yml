@@ -103,6 +103,7 @@ jobs:
           scripts.tests.test_pebrel_branding
           scripts.tests.test_app_icons
           scripts.tests.test_git_attributes
+          scripts.tests.test_xplat
           scripts.conformance.tests.test_harness
           scripts.conformance.tests.test_resize
           scripts.conformance.tests.test_scrollback
