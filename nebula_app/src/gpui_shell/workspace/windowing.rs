@@ -251,10 +251,24 @@ pub(crate) fn open_initial_window(
 fn workspace_window_options(cx: &mut App, focus: bool, role: WindowRole) -> WindowOptions {
     match role {
         WindowRole::Regular => {
-            let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
+            let preferred = size(px(1080.0), px(720.0));
+            let bounds = cx.primary_display().map_or_else(
+                || Bounds::centered(None, preferred, cx),
+                |display| {
+                    let visible = display.visible_bounds();
+                    let fitted = preferred.min(&visible.size);
+                    Bounds::new(
+                        point(
+                            visible.origin.x + (visible.size.width - fitted.width) / 2.0,
+                            visible.origin.y + (visible.size.height - fitted.height) / 2.0,
+                        ),
+                        fitted,
+                    )
+                },
+            );
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(760.0), px(540.0))),
+                window_min_size: Some(size(px(760.0), px(540.0)).min(&bounds.size)),
                 titlebar: Some(TitleBar::title_bar_options()),
                 app_id: Some("pebrel".to_owned()),
                 window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),

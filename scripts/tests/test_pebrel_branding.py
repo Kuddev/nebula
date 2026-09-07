@@ -87,7 +87,7 @@ class PebrelBrandingTests(unittest.TestCase):
         self.assertIn("windows_x64_installer_names(&asset.version).contains(&asset.name)", download)
 
     def test_notification_identity_uses_pebrel(self):
-        source = self.source("nebula_app/src/notify.rs")
+        source = self.source("nebula_app/src/platform/notifications.rs")
         self.assertIn('AUMID: &str = "com.pebrel.terminal";', source)
         self.assertIn('set_reg_sz(&subkey, "DisplayName", crate::brand::NAME)', source)
 

@@ -23,6 +23,25 @@ if str(SCRIPTS) not in sys.path:
 from conformance.harness import ConformanceContext, ResolvedApp, RuntimeClient, require
 
 
+def verify_rendered_text(ctx: ConformanceContext, probe: Path, log: BinaryIO) -> None:
+    marker = "PEBREL TEXT READY"
+    # Clear the echoed command before printing the marker; only rendered output
+    # can satisfy the screenshot observation.
+    ctx.prompt("printf '\\033[2J\\033[H%s%s\\n' 'PEBREL TEXT ' 'READY'")
+    ctx.wait_for_line(re.compile(r"^" + re.escape(marker) + r"$"))
+    screenshot = ctx.artifact_dir / "installed-app.png"
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        require(capture_screenshot(screenshot, log) == "captured", "installed app screenshot is unavailable")
+        result = subprocess.run([str(probe), str(screenshot), marker],
+                                stdout=log, stderr=subprocess.STDOUT, timeout=15, check=False)
+        require(result.returncode in (0, 1), "screenshot text recognition failed")
+        if result.returncode == 0:
+            return
+        time.sleep(0.1)
+    raise RuntimeError("installed app did not render the terminal text marker")
+
+
 def capture_screenshot(destination: Path, log: BinaryIO) -> str:
     try:
         capture = subprocess.run(["/usr/sbin/screencapture", "-x", str(destination)],
@@ -72,6 +91,11 @@ def main() -> int:
             launcher = None
             with (logs / "launchservices.log").open("wb") as log:
                 try:
+                    text_probe = root / "macos-text"
+                    subprocess.run([
+                        "/usr/bin/xcrun", "swiftc", str(SCRIPTS / "conformance/macos_text.swift"),
+                        "-module-cache-path", str(root / "swift-cache"), "-o", str(text_probe),
+                    ], stdout=log, stderr=subprocess.STDOUT, timeout=90, check=True)
                     launcher = subprocess.Popen(
                         ["/usr/bin/open", "-n", "-W", "-a", str(installed),
                          "--env", f"PEBREL_CONFIG_DIR={ctx.config_dir}",
@@ -103,7 +127,8 @@ def main() -> int:
                     ctx.wait_for_line(re.compile(r"NEBULA_GUI_LOCALE=[^\r\n]*UTF-?8_END", re.IGNORECASE))
                     ctx.prompt('printf "NEBULA_GUI_CWD=%s_END\\n" "$PWD"')
                     ctx.wait_for_line(re.compile(r"NEBULA_GUI_CWD=" + re.escape(str(Path.home())) + r"_END"))
-                    report["screenshot"] = capture_screenshot(logs / "installed-app.png", log)
+                    verify_rendered_text(ctx, text_probe, log)
+                    report.update(screenshot="captured", rendered_text=True)
                     for window in ctx.snapshot().get("windows", []):
                         ctx.api("window.close", {"window_id": window["id"]})
                     deadline = time.monotonic() + 5
