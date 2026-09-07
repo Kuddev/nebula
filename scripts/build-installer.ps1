@@ -65,6 +65,7 @@ $requiredFiles = @(
     (Join-Path $targetRoot 'conpty.dll'),
     (Join-Path $targetRoot 'OpenConsole.exe'),
     (Join-Path $repo 'README.md'),
+    (Join-Path $repo 'README.zh-CN.md'),
     (Join-Path $repo 'CHANGELOG.md'),
     (Join-Path $repo 'INSTALL.md'),
     (Join-Path $repo 'docs\lua-configuration.md'),

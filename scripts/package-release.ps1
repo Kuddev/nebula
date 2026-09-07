@@ -51,6 +51,7 @@ $temporaryZip = Join-Path $outputRoot ".$PackageBrand-v$Version-windows-x64-$PID
 $manifest = [ordered]@{
     'pebrel.exe'                                     = Join-Path $targetRoot 'pebrel.exe'
     'README.md'                                      = Join-Path $repo 'README.md'
+    'README.zh-CN.md'                                = Join-Path $repo 'README.zh-CN.md'
     'runtime/pebrel-hook.exe'                        = Join-Path $targetRoot 'pebrel-hook.exe'
     'runtime/conpty.dll'                             = Join-Path $targetRoot 'conpty.dll'
     'runtime/OpenConsole.exe'                        = Join-Path $targetRoot 'OpenConsole.exe'

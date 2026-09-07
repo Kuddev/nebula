@@ -141,7 +141,7 @@ else
 fi
 icon_source="$repo/extra/logo/nebula.png"
 for required in "$desktop_source" "$metainfo_source" "$icon_source" \
-  "$repo/README.md" "$repo/CHANGELOG.md" "$repo/INSTALL.md" \
+  "$repo/README.md" "$repo/README.zh-CN.md" "$repo/CHANGELOG.md" "$repo/INSTALL.md" \
   "$repo/LICENSE" "$repo/THIRD-PARTY-NOTICES" \
   "$repo/licenses/LICENSE-LUA" "$repo/licenses/LICENSE-MLUA" \
   "$repo/licenses/LICENSE-LATIN-MODERN-MATH" \
@@ -233,6 +233,7 @@ install -m 0644 "$metainfo_source" \
 convert "$icon_source" -resize 256x256 \
   "$common_root/usr/share/icons/hicolor/256x256/apps/$desktop_id.png"
 install -m 0644 "$repo/README.md" "$common_root/usr/share/doc/$package_name/README.md"
+install -m 0644 "$repo/README.zh-CN.md" "$common_root/usr/share/doc/$package_name/README.zh-CN.md"
 install -m 0644 "$repo/CHANGELOG.md" "$common_root/usr/share/doc/$package_name/CHANGELOG.md"
 install -m 0644 "$repo/INSTALL.md" "$common_root/usr/share/doc/$package_name/INSTALL.md"
 install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/$package_name/licenses/LICENSE"

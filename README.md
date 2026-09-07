@@ -1,513 +1,148 @@
 <p align="center">
-  <img src="extra/logo/nebula.png" alt="Pebrel — 钛银 / Titanium" width="148" height="148" />
+  <img src="extra/logo/nebula.png" alt="Pebrel Titanium icon" width="148" height="148" />
 </p>
 
 <h1 align="center">Pebrel</h1>
 
-Repository / 仓库：[Kuddev/pebrel](https://github.com/Kuddev/pebrel)。
-Existing `Kuddev/nebula` repository and Git links redirect here.
-旧 `Kuddev/nebula` 仓库与 Git 链接会自动跳转到新地址。
-
-Contributing / 参与贡献：[Guide / 指南](CONTRIBUTING.md) · [Architecture / 架构](docs/architecture.md) · [Engineering contracts / 工程规范](docs/project-constraints.md)
-
 <p align="center">
-  <b>A GPU-accelerated terminal for Windows that keeps your sessions alive — close the window, your <code>claude</code> conversation survives.</b><br/>
-  <b>一款 GPU 加速的 Windows 终端：关闭窗口不杀会话，重新打开，你的 <code>claude</code> 对话原样回来。</b>
+  <strong>A GPU-accelerated terminal, SSH workspace, and home for your AI CLI sessions.</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-2024_edition-CE412B?style=for-the-badge&logo=rust&logoColor=white" alt="Rust"/>
-  <img src="https://img.shields.io/badge/OpenGL-ES_2.0+-5586A4?style=for-the-badge&logo=opengl&logoColor=white" alt="OpenGL"/>
-  <img src="https://img.shields.io/badge/Windows-10_/_11-0078D6?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows"/>
-  <img src="https://img.shields.io/badge/PowerShell-Pebrel_prompt-5391FE?style=for-the-badge&logo=powershell&logoColor=white" alt="PowerShell"/>
-  <img src="https://img.shields.io/badge/License-GPL--3.0-1f6feb?style=for-the-badge" alt="License"/>
+  Built with Rust and GPUI for Windows, macOS, and Linux.<br />
+  Split terminals · SSH &amp; SFTP · Claude Code &amp; Codex workflows · Native document reader
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/Kuddev/pebrel?style=flat-square&color=ffd33d&logo=github" alt="Stars"/>
-  <img src="https://img.shields.io/github/forks/Kuddev/pebrel?style=flat-square&color=8957e5&logo=github" alt="Forks"/>
-  <img src="https://img.shields.io/github/last-commit/Kuddev/pebrel?style=flat-square&color=3fb950" alt="Last commit"/>
-  <a href="https://linux.do"><img src="https://img.shields.io/badge/友链-linux.do-ffb003?style=flat-square&logo=discourse&logoColor=white" alt="linux.do"/></a>
+  <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/github/v/release/Kuddev/pebrel?style=for-the-badge&label=release&color=007ec6" alt="Latest release" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-007ec6?style=for-the-badge" alt="Windows, macOS, and Linux" />
+  <img src="https://img.shields.io/github/license/Kuddev/pebrel?style=for-the-badge&color=79a900" alt="GPL-3.0 license" />
 </p>
 
 <p align="center">
-  <a href="#english">English</a> · <a href="#简体中文">简体中文</a>
+  <a href="https://github.com/Kuddev/pebrel/releases/latest"><img src="https://img.shields.io/badge/Download-latest%20release-35a854?style=for-the-badge&logo=github&logoColor=white" alt="Download the latest release" /></a>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/nebula-top-tabs.png" alt="Pebrel horizontal title-bar tabs and translucent background" width="920" />
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code running in Pebrel" width="920" />
-</p>
-
-<p align="center">
-  <!-- v0.5 主视觉：同一窗口中的 OpenCode、Claude Code 与 Codex 分屏工作流。 -->
-  <img src="docs/screenshots/split-ai-workflows.png" alt="Pebrel with OpenCode, Claude Code, and Codex in split panes" width="920" />
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 ---
 
-## English
-
-### ✨ About
-
-Pebrel (formerly Nebula) is a terminal emulator for Windows, built in Rust on a
-GPU-accelerated rendering core and designed around one idea: **your terminal
-sessions are too valuable to die with a window**. It pairs a tmux-style
-resident session model with a glass UI, an AI-CLI-aware sidebar, and a shell
-experience that works without extra setup.
-
-### 🚀 Features
-
-**Sessions that survive**
-
-- **Session residency** — closing the window *detaches* instead of killing:
-  every PTY (your running `claude`, builds, SSH sessions) keeps running in a
-  resident process. Launch Pebrel again and the window re-attaches — same
-  processes, same scrollback, mid-conversation.
-- **Cold session restore** — if the resident process is gone (reboot, crash),
-  the next launch still restores your tab layout and per-tab working
-  directories from a continuously autosaved snapshot, with a crash-loop
-  breaker.
-- **Single instance** — a second launch hands over to the running instance
-  instead of piling up windows.
-
-**Built for AI-CLI workflows**
-
 <p align="center">
-  <!-- 📸 SHOT #3 侧栏特写：claude 星芒 + codex 花结 + 转圈 + 圆点 -->
-  <img src="docs/screenshots/ai-sidebar.png" alt="AI-aware sidebar" width="300" />
+  <img src="docs/screenshots/nebula-top-tabs.png" alt="Terminal tabs in Pebrel" width="1040" />
 </p>
 
-- **Real brand marks in the sidebar** — a tab running `claude` shows the
-  actual Anthropic starburst; `codex` shows the OpenAI blossom, tinted to the
-  theme. Other programs get Nerd Font icons (`gemini`, `copilot`, `git`,
-  `vim`, `cargo`, …).
-- **Live turn state, wired to the source** — Pebrel installs Claude Code
-  hooks (and Codex notify) pointing at a bundled bridge
-  (`pebrel-hook.exe`, dependency-free): prompt submitted → spinner; turn
-  finished → dot + toast; Claude needs your input → toast carrying the actual
-  message text. Delivered over a local named pipe, with no shell integration
-  required.
-- **Click-to-focus notifications** — every toast knows which pane raised it:
-  click one and Pebrel comes to the foreground, switches to that tab and
-  focuses that split.
-- **Zero setup, self-healing** — the hook entries install on first boot and
-  re-install themselves if a config switcher rewrites the file (a watcher on
-  the config directory re-applies them). Scoped by environment: claude
-  running in any other terminal is untouched. `pebrel setup-ai --remove`
-  undoes everything.
-- **Plays nice with existing notifiers** — codex has a single notify slot;
-  Pebrel wraps it (`--chain`) instead of stealing it, so a pre-existing
-  notifier keeps firing.
-- **Fallback signals** — OSC 133 command tracking + BEL still cover every
-  other CLI: long builds toast on completion, with their duration.
-- **Native SSH sessions** — saved hosts open directly through Pebrel's Rust SSH
-  transport: no wrapper shell and no external console window. Host aliases,
-  usernames, ports and identity files are resolved from `~/.ssh/config`;
-  authentication supports standard private keys and certificates, encrypted-key
-  passphrases, Windows Credential Manager passwords, and keyboard-interactive/MFA.
-  Accepted host keys use the standard `known_hosts` store, and additional tabs
-  reuse an already authenticated
-  connection to the same `user@host:port` for a faster second shell.
-- **Built-in SFTP transfers** — open a remote file drawer from any saved SSH
-  host and reuse its authenticated connection. Browse or type remote paths,
-  filter entries, upload and download files or folders, create and rename
-  folders, recursively delete, follow symlink targets, and cancel transfers
-  with visible progress and errors.
-- **AI-aware over SSH** — remote Hook envelopes can return through a
-  per-channel, randomly authenticated private OSC bridge. Pebrel validates the
-  channel token, replaces any remote pane identifier with the local pane, and
-  routes the event through the existing sidebar and Windows notification path.
-  The `pebrel ssh` compatibility command remains available for forwarding,
-  query and explicit-command forms that need the system SSH client.
+## One Workspace
 
-<p align="center">
-  <img src="docs/screenshots/ssh.gif" alt="Pebrel native SSH session" width="920" />
-</p>
+Pebrel (formerly Nebula) brings local shells, remote hosts, files, and AI command-line
+tools into a native desktop workspace. Arrange terminals in tabs and splits, follow
+each agent's activity, and read its output without leaving the application.
 
-**Performance & correctness**
+### Terminals and Sessions
 
-- **Instrumented startup** — the boot path is fully traceable
-  (`PEBREL_BOOT_TRACE=1`); no shell profile is loaded and history loads
-  lazily.
-- **Modern ConPTY host** — ships the side-by-side ConPTY host for correct
-  resize behavior, with its startup handshake (DA1) pre-primed so a new tab
-  doesn't stall on that round-trip.
-- **Coalesced resizing** — interactive drags resize the grid only; the PTY
-  learns its final size once, so full-screen TUIs don't smear redraws into
-  scrollback.
+- Sidebar or top tabs, draggable split panes, and per-pane working directories.
+- Saved workspace layouts and optional AI conversation restoration. On WSL and
+  Linux, Codex session metadata can supply an ID when its hook has not reported one.
+- On Windows, optional background residency keeps running sessions alive when you
+  close the window. Restoring a conversation after the process exits is a separate
+  feature and requires a supported CLI and a usable session identity.
+- History and path completions, configurable keybindings, and integrated shell prompts.
 
-**Shell experience**
+### SSH and Files
 
-- **Inline ghost-text completions** — fish-style dim suggestions from command
-  history and filesystem paths; accept with `→` or `Tab`.
-- **Persistent indexed history** — commands stored as JSONL under
-  `%APPDATA%\Pebrel`, shared across sessions, with prefix hints.
-- **Powerline prompt built in** — themed gradient prompt with git branch and
-  clock, for PowerShell and Git Bash, no plugins to install.
-- **Quality-of-life fixes** — unquoted `cd D:/Program Files` just works, bare
-  `$env:KEY=value` assignments are auto-quoted, `ls` gets colors and
-  clickable OSC 8 hyperlinks.
+- Saved hosts, SSH config aliases, proxy and jump-host options, private-key and
+  keyboard-interactive authentication, and host-key verification.
+- SFTP browsing, uploads and downloads, folder transfers, progress, and cancellation.
+- Local file browsing and Git actions alongside your terminals.
+- Duplicated WSL and SSH tabs retain their known working directory.
 
-**Markdown that renders like GitHub**
+### AI CLI Workflows
 
-<p align="center">
-  <img src="docs/screenshots/markdown-document.png" alt="Pebrel rendering its own README: centred logo, badge row, and an embedded screenshot" width="920" />
-</p>
+- Claude Code, Codex, and other recognized CLIs have their own icons and activity
+  states. Supported hook events provide more precise progress and attention signals.
+- Notifications follow their source pane; clicking one returns you to that terminal.
+- Captured Claude Code and Codex answers open in a reader with Markdown, formulas,
+  source text, and local image previews.
+- Clipboard images are saved as PNG files and their paths inserted into local,
+  WSL, or SSH sessions. Inline terminal images require the CLI to emit the supported
+  OSC 1337 protocol; image attachment previews depend on the CLI itself.
 
-- **Markdown/GFM document tabs** — open Markdown, JSON, and plain-text files
-  directly from the file drawer with headings, lists, tables, code blocks,
-  links, quotes, word wrapping, and virtualized scrolling.
-- **Images from anywhere** — remote `http(s)` URLs, `data:` URIs, absolute
-  paths, and paths relative to the document all resolve, so badge rows, logos,
-  and embedded screenshots land exactly where the file puts them. The
-  screenshot above is Pebrel rendering its own README.
-- **The HTML that real READMEs use** — `<p align="center">` centres its
-  content, several `<img>` badges in one paragraph stay on a single row instead
-  of breaking into separate blocks, `<br/>` breaks in document order, and
-  `<a><img/></a>` link badges survive as clickable images.
-- **CJK-correct soft wraps** — CommonMark soft line breaks join as spaces, but
-  adjacent CJK characters join directly, so Chinese paragraphs don't pick up
-  the stray gaps other viewers insert.
+### A Native, Configurable Interface
 
-**Documents & native mathematics**
+- GPU-accelerated GPUI interface, light and dark themes, backgrounds, and opacity controls.
+- Application icon palettes and eleven UI language choices with English fallback
+  for untranslated text.
+- Searchable settings, a command palette, and Lua configuration with validation and
+  live reload. Existing TOML configuration remains supported.
+- Markdown document tabs and native mathematical typesetting without a WebView.
 
-<p align="center">
-  <img src="docs/screenshots/native-math-rendering.png" alt="Native mathematics rendered in a Pebrel Markdown document" width="920" />
-</p>
+<details>
+<summary>More screenshots</summary>
 
-- **Native TeX mathematics** — inline `$...$` and display `$$...$$` formulas
-  are parsed and laid out entirely in Rust, then drawn through cached Latin
-  Modern Math glyphs and GPU rule quads. Fractions, radicals, scripts, limits,
-  integrals, matrices, scalable delimiters, Greek letters, and common symbols
-  render without a WebView, JavaScript runtime, or external TeX process.
-- **Bounded document rendering** — oversized formulas fit the reading column,
-  long prose and failed formulas wrap, and parser, layout, cache, atlas, and
-  per-frame work all have explicit limits. See the
-  [math rendering fixture](docs/math-rendering-test.md) for the screenshot and
-  regression set.
+<p align="center"><img src="docs/screenshots/nebula-claude-session.png" alt="Claude Code session" width="1040" /></p>
+<p align="center"><img src="docs/screenshots/split-ai-workflows.png" alt="AI CLI split panes" width="1040" /></p>
+<p align="center"><img src="docs/screenshots/ai-sidebar.png" alt="AI activity sidebar" width="300" /></p>
+<p align="center"><img src="docs/screenshots/ssh.gif" alt="Native SSH session" width="1040" /></p>
+<p align="center"><img src="docs/screenshots/native-math-rendering.png" alt="Native formula rendering" width="1040" /></p>
+<p align="center"><img src="docs/screenshots/themes.png" alt="Application themes" width="1040" /></p>
 
-**Interface**
+</details>
 
-<p align="center">
-  <!-- 📸 SHOT #5 主题拼图：设置面板主题卡或三窗拼图（一深一浅一 Pebrel） -->
-  <img src="docs/screenshots/themes.png" alt="Themes" width="720" />
-</p>
+## Download
 
-- **Glass chrome & seven themes** — Pebrel plus three matched light/dark
-  pairs: Silver Light / Steel Dark, Limestone / Coal Dark, Linen Light /
-  Moss Dark. One skin system drives chrome, prompt and dialogs; every theme
-  persists across restarts.
-- **Tabs & splits** — sidebar tabs with drag-to-reorder and drag-to-dock into
-  splits; unfocused panes dim instead of growing borders.
-- **Files, Git and SFTP drawers** — browse local or remote files without
-  leaving the terminal. The Git drawer can stage, commit, pull fast-forward
-  updates, and push.
-- **Quick terminal** — global <kbd>Ctrl</kbd>+<kbd>`</kbd> drops a Quake-style
-  terminal from the top edge.
-- **Settings tab & command palette** — settings opens as a normal reusable tab,
-  with themes, language, background image/opacity, shell choice and completion
-  behavior; all persisted.
-- **Inline images** — OSC 1337 image protocol support, lazily anchored to
-  scrollback rows.
+Choose a package from the **[latest release](https://github.com/Kuddev/pebrel/releases/latest)**.
 
-### 📥 Install
+| System | Architecture | Packages |
+| --- | --- | --- |
+| Windows 10 1809+ / 11 | x64 | Installer `.exe`, portable `.zip` |
+| Linux, glibc 2.35+ | x64 | `.AppImage`, `.deb`, portable `.tar.gz` |
+| macOS, deployment target 14+ | Apple Silicon / arm64 | `.dmg` |
+| macOS, deployment target 14+ | Intel / x64 | `.dmg` |
 
-Pebrel embeds **Maple Mono Normal NF CN** for terminal text, powerline symbols,
-and icons. The Windows installer also offers system font installation.
-The font is licensed under SIL OFL 1.1.
+Package names follow `Pebrel-v<version>-<system>-<architecture>`. Windows installers
+end in `-setup.exe`. A legacy-named installer is also supplied for older automatic
+update clients.
 
-**Windows packages** are listed on
-[Releases](https://github.com/Kuddev/pebrel/releases/latest). Pebrel 1.6 uses
-`Pebrel-<version>-windows-x64-setup.exe` for installation and
-`Pebrel-v<version>-windows-x64.zip` for portable use. Extract the ZIP and run
-`pebrel.exe`; keep `runtime/`, `docs/`, `skills/`, and `licenses/` in place.
-Older releases retain their original asset names. See the
-[installation guide](INSTALL.md) for upgrade and configuration migration details.
+On Windows, run the installer or extract the ZIP and launch `pebrel.exe`, keeping
+the bundled directories together. On Linux, install the DEB or make the AppImage
+executable. On macOS, open the matching DMG and drag Pebrel into Applications.
+Ad-hoc-signed macOS builds may require **Open Anyway** in **System Settings >
+Privacy & Security** on first launch. Native macOS CI runs on macOS 15; the
+deployment target alone does not establish validation on every older OS version.
 
-**From source**
+Windows currently also provides tray residency, the global quick-terminal hotkey,
+automatic local AI-hook setup, and automatic update installation. These integrations
+are not yet available on Linux or macOS. See [installation details](INSTALL.md) for
+platform requirements and upgrading an existing Nebula installation.
 
-```powershell
+## Configure
+
+```sh
+pebrel config init --language en-US
+pebrel config check
+```
+
+The generated Lua configuration uses `require 'pebrel'` and
+`pebrel.config_builder()`. Invalid reloads retain the last valid configuration.
+See the [Lua configuration guide](docs/lua-configuration.md) for settings and examples.
+
+## Build
+
+With the pinned Rust toolchain and the platform dependencies installed:
+
+```sh
 cargo build --release --locked -p nebula --bin pebrel --features gpui-shell
 ```
 
-### Lua Configuration
+The internal Cargo package is still named `nebula`; the application and command
+are `pebrel`. GPUI is the product interface. The older renderer is available only
+through the explicit `legacy-shell` feature.
 
-Pebrel ships a vendored Lua 5.4 runtime with `require 'pebrel'` and
-`pebrel.config_builder()`. Generate an annotated template with
-`pebrel config init --language system|zh-CN|en-US`, then validate it without
-opening the GUI using `pebrel config check`. Module `require` paths participate
-in live reload; invalid edits keep the last-known-good configuration active.
-Existing TOML files remain supported. See the
-[Lua configuration guide](docs/lua-configuration.md) for APIs, discovery order,
-Windows/Linux paths, arrays, modules, and reload behavior.
+## Acknowledgements
 
-### 🧩 Tech Stack
-
-| Layer | Tech |
-| --- | --- |
-| Language | Rust (2024 edition) |
-| Rendering | OpenGL / OpenGL ES 2.0+, custom glyph & UI quad renderers |
-| Terminal core | GPU-resident grid + VTE escape-sequence parsing, on an Alacritty-derived foundation |
-| Session model | Resident mux process, loopback attach protocol |
-| Shell integration | PowerShell + PSReadLine, Git Bash; OSC 7/8/9/133/1337 |
-| Document math | pulldown-cmark + pulldown-latex + OpenType MATH (Latin Modern Math) |
-| Fonts | Maple Mono Normal NF CN (Nerd Font glyphs, CJK-aware) |
-
-### 📦 Requirements
-
-- At least OpenGL ES 2.0
-- Windows 10 (1809+) / 11 with ConPTY support
-
-### Contact
-
-Questions and feedback: [fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
-
-### 🙏 Acknowledgements
-
-Pebrel's terminal core — the grid, the VTE escape-sequence parsing, and the PTY
-plumbing — is derived from
-**[Alacritty](https://github.com/alacritty/alacritty)**, a masterpiece of
-terminal engineering. Sincere thanks to its maintainers and contributors;
-Pebrel would not exist without their work.
-
-Pebrel's shell is built on **[GPUI](https://github.com/zed-industries/zed)** — the
-GPU-accelerated UI framework developed by the [Zed](https://zed.dev) team — together with
-**[gpui-component](https://github.com/longbridge/gpui-component)** from
-[Longbridge](https://github.com/longbridge), which supplies the widget library. Both are
-Apache-2.0 licensed and are used through lightly patched forks pinned in the workspace
-manifest. Thank you for releasing this work as open source — Pebrel's interface would not
-look the way it does without it.
-
-### 📜 License
-
-Released under the [GNU General Public License v3.0](LICENSE).
-
-Parts of Pebrel are derived from upstream open-source projects; their original
-license and copyright notices are preserved in
-[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES). The work as a whole is distributed
-under GPL-3.0.
-
----
-
-## 简体中文
-
-### ✨ 简介
-
-Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编写，构建在 GPU 加速渲染
-内核之上，并围绕一个理念设计：**终端会话太宝贵，不该随窗口一起消失**。它
-把 tmux 式的常驻会话模型、玻璃质感界面、AI CLI 感知侧边栏和无需额外配置
-的 shell 体验组合在一起。
-
-### 🚀 功能特性
-
-**会话永生**
-
-- **会话驻留** — 关闭窗口是*分离*而不是杀死：所有 PTY（正在跑的
-  `claude`、构建、SSH）继续在常驻进程里运行。再次启动 Pebrel，窗口原样接回
-  —— 同样的进程、同样的回滚缓冲、对话进行到一半也不丢。
-- **冷恢复** — 常驻进程不在了（重启、崩溃）也没关系：下次启动从持续自动保
-  存的快照恢复标签布局和每个标签的工作目录，并带崩溃循环保护。
-- **单实例** — 重复启动会交棒给运行中的实例，不会堆一堆窗口。
-
-**为 AI CLI 工作流而生**
-
-<p align="center">
-  <!-- 📸 SHOT #3（同上）侧栏特写 -->
-  <img src="docs/screenshots/ai-sidebar.png" alt="AI 感知侧边栏" width="300" />
-</p>
-
-- **侧栏显示真品牌标识** — 跑 `claude` 的标签显示 Anthropic 珊瑚星芒，
-  `codex` 显示 OpenAI 花结（贴图渲染、跟随主题染色）；其余程序用
-  Nerd Font 图标（`gemini`、`copilot`、`git`、`vim`、`cargo`……）。
-- **回合状态实时直连** — Pebrel 自动安装 Claude Code hooks（及 Codex
-  notify），指向随包的桥接器 `pebrel-hook.exe`（无第三方依赖）：
-  提交 prompt → 转圈；回合完成 → 圆点 + 通知；claude 要你确认 → 通知里
-  带消息原文。经本地命名管道传递，无需任何 shell 集成。
-- **通知点击直达** — 每条 toast 都知道自己来自哪个 pane：点一下，Pebrel
-  前置、切到那个标签、聚焦那个分屏。
-- **零配置、自愈合** — hook 条目首次启动自动写入；被配置切换工具覆盖后
-  会自动补回（配置目录上有监视器重新写入）。作用域由环境变量限定：其他
-  终端里的 claude 完全不受影响。`pebrel setup-ai --remove` 一键撤销。
-- **不抢占已有 notifier** — codex 只有一个 notify 槽位，Pebrel 用
-  `--chain` 包装而非顶掉：原有通知程序照常触发。
-- **兜底信号** — OSC 133 命令跟踪 + BEL 覆盖其余所有 CLI：长构建完成也
-  弹通知，并带耗时。
-- **原生 SSH 会话** — 保存的主机现在直接通过 Pebrel 的 Rust SSH 传输连接，
-  不再经过包装 Shell，也不会弹出外部控制台窗口。主机别名、用户名、端口和
-  IdentityFile 会从 `~/.ssh/config` 解析；认证覆盖标准私钥与证书、加密密钥
-  口令、Windows 凭据管理器密码以及 keyboard-interactive/MFA。主机密钥写入
-  标准 `known_hosts`；同一 `user@host:port` 再开标签页会复用已认证连接，让第二个
-  Shell 更快出现。
-- **内置 SFTP 传输** — 从已保存 SSH 主机即可打开远端文件抽屉，并复用已认证
-  连接。支持浏览或手动输入远端路径、筛选、上传/下载文件与文件夹、新建与重命名
-  文件夹、递归删除、跟随符号链接目标，以及带进度、取消和错误提示的后台传输。
-- **SSH 里也 AI 感知** — 远端 Hook 信封可通过每通道随机认证的私有 OSC 桥
-  返回。Pebrel 会校验通道令牌，用本地 Pane 身份覆盖远端字段，再复用现有侧栏
-  状态和 Windows 通知链路。需要端口转发、配置查询或显式远程命令时，仍可使用
-  `pebrel ssh` 兼容命令交给系统 SSH 客户端处理。
-
-<p align="center">
-  <img src="docs/screenshots/ssh.gif" alt="Pebrel 原生 SSH 会话" width="920" />
-</p>
-
-**性能与正确性**
-
-- **启动全程可观测** — 启动路径全程打点（`PEBREL_BOOT_TRACE=1`），不加载
-  shell profile，历史惰性加载。
-- **现代 ConPTY 宿主** — 内置 side-by-side ConPTY 宿主保证 resize 行为正确，
-  并预热其启动握手（DA1），让新标签不必卡在这一次往返上。
-- **合并式 resize** — 拖动窗口时只调整网格，PTY 在拖动结束后一次性获知最终
-  尺寸，全屏 TUI 不会把重绘刷进历史。
-
-**Shell 体验**
-
-- **行内幽灵补全** — fish 风格暗色建议，来自命令历史与文件路径，
-  `→` 或 `Tab` 接受。
-- **持久化索引历史** — 命令以 JSONL 存于 `%APPDATA%\Pebrel`，跨会话共享，
-  提供前缀提示。
-- **内置 powerline 提示符** — 主题化渐变提示符，含 git 分支与时钟，
-  PowerShell 与 Git Bash 皆可用，无需安装任何插件。
-- **顺手的小修正** — 不带引号的 `cd D:/Program Files` 直接可用，裸
-  `$env:KEY=value` 自动加引号，`ls` 带颜色和可点击的 OSC 8 超链接。
-
-**Markdown 解析：照着 GitHub 的样子显示**
-
-<p align="center">
-  <img src="docs/screenshots/markdown-document.png" alt="Pebrel 正在渲染自己的 README：居中 logo、徽章横排、内嵌截图" width="920" />
-</p>
-
-- **Markdown/GFM 文档标签页** — 可以从文件抽屉直接打开 Markdown、JSON 和
-  纯文本文件，原生显示标题、列表、表格、代码块、链接、引用、自动换行和虚拟滚动。
-- **图片来源不挑** — 远程 `http(s)` 链接、`data:` URI、绝对路径，以及相对文档
-  自身位置的路径都能解析，徽章行、logo 和内嵌截图都落在文件让它们出现的地方。
-  上面这张图就是 Pebrel 在渲染自己的 README。
-- **真实 README 会用到的那些 HTML** — `<p align="center">` 居中生效，同一段里
-  的多枚 `<img>` 徽章横排显示而不会被拆成若干块，`<br/>` 按文档顺序断行，
-  `<a><img/></a>` 形式的链接徽章不会整个丢失。
-- **中文软换行不留空隙** — CommonMark 的软换行按规范并作空格，但相邻中日韩
-  字符直接相连，中文段落不会出现别的阅读器常见的那些多余空格。
-
-**文档与原生数学公式**
-
-<p align="center">
-  <img src="docs/screenshots/native-math-rendering.png" alt="Pebrel Markdown 文档中的原生数学公式" width="920" />
-</p>
-
-- **原生 TeX 数学排版** — 行内 `$...$` 与块级 `$$...$$` 公式全部由 Rust
-  解析和布局，再使用缓存的 Latin Modern Math 字形与 GPU 规则线 quad 绘制。
-  分式、根式、上下标、极限、积分、矩阵、伸缩括号、希腊字母和常用符号均不经过
-  WebView、JavaScript 运行时或外部 TeX 进程。
-- **有界文档渲染** — 超宽公式会收敛到阅读列，长文本和失败公式会继续换行；
-  解析、布局、缓存、字形图集和每帧工作量均有明确上限。截图与回归内容见
-  [数学渲染测试文档](docs/math-rendering-test.md)。
-
-**界面**
-
-<p align="center">
-  <!-- 📸 SHOT #5（同上）主题拼图 -->
-  <img src="docs/screenshots/themes.png" alt="七套主题" width="720" />
-</p>
-
-- **玻璃质感与七套主题** — Pebrel + 三对明暗成组主题：Silver Light /
-  Steel Dark、Limestone / Coal Dark、Linen Light / Moss Dark。一套皮肤
-  系统驱动 chrome、提示符与弹窗，主题选择跨重启持久化。
-- **标签与分屏** — 侧边栏标签支持拖拽排序、拖入终端区四方位分屏；非焦点
-  面板压暗而非描边。
-- **文件、Git 与 SFTP 抽屉** — 不离开终端即可浏览本地或远端文件；Git 抽屉
-  支持暂存、提交、仅快进拉取和推送。
-- **快速终端** — 全局 <kbd>Ctrl</kbd>+<kbd>`</kbd> 从屏幕顶部滑出
-  Quake 式终端。
-- **设置标签页与命令面板** — 设置像普通标签页一样打开和复用，支持主题、
-  跟随系统/简体中文/English、背景图/透明度、Shell 与补全行为，并跨重启持久化。
-- **行内图片** — 支持 OSC 1337 图片协议，惰性锚定到回滚行。
-
-### 📥 安装
-
-Pebrel 内嵌 **Maple Mono Normal NF CN**，用于终端文字、powerline 符号与图标。
-Windows 安装器同时提供可选的系统字体安装。字体使用 SIL OFL 1.1 许可。
-
-**Windows 安装包**见
-[Releases](https://github.com/Kuddev/pebrel/releases/latest)。Pebrel 1.6 的安装器命名为
-`Pebrel-<version>-windows-x64-setup.exe`，便携包命名为
-`Pebrel-v<version>-windows-x64.zip`。解压 ZIP 后运行 `pebrel.exe`，保留
-`runtime/`、`docs/`、`skills/` 与 `licenses/` 目录。旧版本资产保留原文件名。
-升级与配置迁移详见[安装指南](INSTALL.md)。
-
-**从源码构建**
-
-```powershell
-cargo build --release --locked -p nebula --bin pebrel --features gpui-shell
-```
-
-### Lua 配置
-
-Pebrel 内置 Lua 5.4，使用 `require 'pebrel'` 与
-`pebrel.config_builder()`。运行
-`pebrel config init --language system|zh-CN|en-US` 可生成带完整注释的模板，
-`pebrel config check` 可在不启动 GUI 的情况下检查语法与字段。通过 `require`
-载入的模块会参与热重载；配置错误时继续使用上一份有效配置。已有 TOML 仍兼容。
-路径优先级、Windows/Linux 位置、数组、模块与重载说明见
-[Lua 配置指南](docs/lua-configuration.md)。
-
-### 🧩 技术栈
-
-| 层级 | 技术 |
-| --- | --- |
-| 语言 | Rust（2024 edition） |
-| 渲染 | OpenGL / OpenGL ES 2.0+，自定义字形与 UI 四边形渲染器 |
-| 终端内核 | GPU 常驻网格 + VTE 转义序列解析，基于 Alacritty 衍生的地基 |
-| 会话模型 | 常驻 mux 进程，环回 attach 协议 |
-| Shell 集成 | PowerShell + PSReadLine、Git Bash；OSC 7/8/9/133/1337 |
-| 文档数学 | pulldown-cmark + pulldown-latex + OpenType MATH（Latin Modern Math） |
-| 字体 | Maple Mono Normal NF CN（Nerd Font 图标，支持 CJK） |
-
-### 📦 环境要求
-
-- 至少 OpenGL ES 2.0
-- Windows 10（1809+）/ 11，需 ConPTY 支持
-
-### 联系方式
-
-问题与反馈：[fickleheartedkeys@163.com](mailto:fickleheartedkeys@163.com)
-
-### 🙏 致谢
-
-Pebrel 的终端内核——网格、VTE 转义序列解析与 PTY 管路——衍生自
-**[Alacritty](https://github.com/alacritty/alacritty)**，终端工程的杰作。
-衷心感谢它的维护者与贡献者们；没有他们的工作就没有 Pebrel。
-
-Pebrel 的界面层构建在 **[GPUI](https://github.com/zed-industries/zed)** 之上——由
-[Zed](https://zed.dev) 团队开发的 GPU 加速 UI 框架——并使用
-[Longbridge](https://github.com/longbridge) 的
-**[gpui-component](https://github.com/longbridge/gpui-component)** 作为组件库。两者均以
-Apache-2.0 许可发布，Pebrel 通过带少量补丁的 fork 使用，版本在 workspace 清单中精确锁定。
-感谢把这些工作开源——没有它，Pebrel 现在的界面不会是这个样子。
-
-### 📜 许可证
-
-基于 [GNU 通用公共许可证 v3.0（GPL-3.0）](LICENSE) 发布。
-
-Pebrel 的部分代码衍生自上游开源项目，其原始许可与版权声明保留于
-[THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES)。整体作品以 GPL-3.0 分发。
-
----
-
-## 🔗 友情链接 / Community
-
-- **[linux.do](https://linux.do)** — 新的理想型社区 / a thriving developer community.
-
----
-
-## ⭐ Star History
-
-<a href="https://star-history.dera.page/#Kuddev/pebrel&type=date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
-    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
-  </picture>
-</a>
+Pebrel builds on [Alacritty](https://github.com/alacritty/alacritty),
+[GPUI](https://github.com/zed-industries/zed), and
+[gpui-component](https://github.com/longbridge/gpui-component). Terminal text uses
+Maple Mono, and native formulas use Latin Modern Math. Upstream copyright and
+license notices are preserved in `THIRD-PARTY-NOTICES` and `licenses/`.

@@ -154,6 +154,7 @@ output_directory="$(cd "$output_directory" && pwd -P)"
 plist_source="$repo/packaging/macos/Info.plist"
 icon_source="$repo/extra/logo/nebula.png"
 for required in "$plist_source" "$icon_source" "$repo/README.md" \
+  "$repo/README.zh-CN.md" \
   "$repo/CHANGELOG.md" "$repo/INSTALL.md" "$repo/LICENSE" \
   "$repo/THIRD-PARTY-NOTICES" "$repo/licenses/LICENSE-LUA" \
   "$repo/licenses/LICENSE-MLUA" "$repo/licenses/LICENSE-LATIN-MODERN-MATH"; do
@@ -254,6 +255,7 @@ EOF
 iconutil -c icns "$iconset" -o "$resources/pebrel.icns"
 
 install -m 0644 "$repo/README.md" "$resources/docs/README.md"
+install -m 0644 "$repo/README.zh-CN.md" "$resources/docs/README.zh-CN.md"
 install -m 0644 "$repo/CHANGELOG.md" "$resources/docs/CHANGELOG.md"
 install -m 0644 "$repo/INSTALL.md" "$resources/docs/INSTALL.md"
 install -m 0644 "$repo/LICENSE" "$resources/licenses/LICENSE"
