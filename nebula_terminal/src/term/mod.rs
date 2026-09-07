@@ -1250,19 +1250,6 @@ impl<T> Term<T> {
             Point::new(self.grid.cursor.point.line.0 as usize, self.grid.cursor.point.column);
         self.damage.damage_point(point);
     }
-
-    #[inline]
-    fn set_keyboard_mode(&mut self, mode: TermMode, apply: KeyboardModesApplyBehavior) {
-        let active_mode = self.mode & TermMode::KITTY_KEYBOARD_PROTOCOL;
-        self.mode &= !TermMode::KITTY_KEYBOARD_PROTOCOL;
-        let new_mode = match apply {
-            KeyboardModesApplyBehavior::Replace => mode,
-            KeyboardModesApplyBehavior::Union => active_mode.union(mode),
-            KeyboardModesApplyBehavior::Difference => active_mode.difference(mode),
-        };
-        trace!("Setting keyboard mode to {new_mode:?}");
-        self.mode |= new_mode;
-    }
 }
 
 impl<T> Dimensions for Term<T> {
