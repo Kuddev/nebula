@@ -108,6 +108,7 @@ jobs:
           scripts.conformance.tests.test_resize
           scripts.conformance.tests.test_scrollback
           scripts.conformance.tests.test_lifecycle
+          scripts.conformance.tests.test_posix_lifecycle
 
       - name: Compile Python helpers
         run: python3 -m compileall -q scripts/preview_release.py scripts/conformance
@@ -322,8 +323,10 @@ jobs:
       - name: Test workspace natively
         run: cargo test --locked --workspace
 
-      - name: Test native shell startup contracts
-        run: python3 -m unittest scripts.tests.test_shell_integration -v
+      - name: Test native shell startup and harness process ownership
+        run: >-
+          python3 -m unittest scripts.tests.test_shell_integration
+          scripts.conformance.tests.test_posix_lifecycle -v
 
       - name: Test SSH confirmation and password dialogs
         run: cargo test --locked -p nebula --features gpui-test-support dialog

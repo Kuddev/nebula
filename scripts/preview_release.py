@@ -76,7 +76,8 @@ def validate_evidence(directory: Path, commit: str) -> None:
         if (report.get("status") != "passed" or report.get("commit") != commit
                 or report.get("architecture") != architecture
                 or report.get("launch_method") != "launchservices"
-                or report.get("utf8_locale") is not True or report.get("home_cwd") is not True):
+                or report.get("utf8_locale") is not True or report.get("home_cwd") is not True
+                or report.get("screenshot") != "captured" or report.get("rendered_text") is not True):
             raise ManifestError(f"installed macOS application did not pass LaunchServices smoke test: {name}")
 
 

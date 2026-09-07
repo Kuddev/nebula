@@ -69,7 +69,8 @@ toml = "0.9.11"
 toml_edit = "0.24.0"
 # GPUI v1.16.1 把平台启动入口拆到独立 crate。它必须与 `gpui` 使用完全相同
 # 的 Git URL 和 rev，否则 Cargo 会把同名类型解析成两套互不兼容的 crate。
-gpui_platform = { git = "https://github.com/Kuddev/zed", rev = "8a1a62727bcb2ead7352e32e7e0d2e919a943535", version = "=0.1.0" }
+# Without font-kit, the macOS platform uses NoopTextSystem and renders no text.
+gpui_platform = { git = "https://github.com/Kuddev/zed", rev = "8a1a62727bcb2ead7352e32e7e0d2e919a943535", version = "=0.1.0", features = ["font-kit"] }
 
 # TODO: Drop this pin and return to the crates.io release once the fix ships there.
 [patch.crates-io]

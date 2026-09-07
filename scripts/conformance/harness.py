@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -521,6 +522,13 @@ class ConformanceContext:
                     )
                     snapshot = snapshot_response.get("result")
                     require(isinstance(snapshot, dict), "runtime snapshot is not an object")
+                    if os.name == "posix":
+                        runtime_pid = snapshot.get("process_id")
+                        require(
+                            type(runtime_pid) is int and runtime_pid > 0
+                            and os.getpgid(runtime_pid) == self.process.pid,
+                            "runtime process does not belong to this launch",
+                        )
                     windows = snapshot.get("windows") or []
                     ready = any(
                         any(
@@ -548,7 +556,9 @@ class ConformanceContext:
             "stderr": subprocess.STDOUT,
         }
         if os.name != "nt":
-            return subprocess.Popen(command, stdin=subprocess.DEVNULL, **options)
+            return subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, start_new_session=True, **options,
+            )
         job = _WindowsJob()
         process = None
         try:
@@ -586,15 +596,20 @@ class ConformanceContext:
                 if process is not None:
                     process.wait(timeout=max(0, deadline - time.monotonic()))
                 self._windows_job.close()
-            elif process is not None and process.poll() is None:
-                if force:
-                    process.kill()
-                else:
-                    process.terminate()
+            elif process is not None:
+                # An AppImage launcher forks the application. Its private
+                # group remains ours even after the launcher itself exits.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     process.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
-                    process.kill()
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     process.wait(timeout=timeout)
         finally:
             self._close_log()
