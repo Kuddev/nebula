@@ -35,15 +35,27 @@ def validate_version(version: str) -> None:
 def expected_asset_names(version: str) -> tuple[str, ...]:
     validate_version(version)
     return (
-        f"Pebrel-v{version}-linux-x64.AppImage",
-        f"Pebrel-v{version}-linux-x64.deb",
-        f"Pebrel-v{version}-linux-x64.tar.gz",
-        f"Pebrel-v{version}-macos-arm64.dmg",
-        f"Pebrel-v{version}-macos-x64.dmg",
+        f"Pebrel-v{version}-linux-x64-preview.AppImage",
+        f"Pebrel-v{version}-linux-x64-preview.deb",
+        f"Pebrel-v{version}-linux-x64-preview.tar.gz",
+        f"Pebrel-v{version}-macos-arm64-preview.dmg",
+        f"Pebrel-v{version}-macos-x64-preview.dmg",
         f"Pebrel-v{version}-windows-x64.zip",
         f"Pebrel-v{version}-windows-x64-setup.exe",
         f"NebulaTerminal-{version}-windows-x64-setup.exe",
     )
+
+
+def mark_platform_previews(directory: Path, version: str) -> None:
+    for name in expected_asset_names(version):
+        if "-preview." not in name:
+            continue
+        original = directory / name.replace("-preview.", ".", 1)
+        target = directory / name
+        if original.exists():
+            if target.exists() or original.is_symlink() or not original.is_file():
+                raise StableReleaseError(f"cannot mark platform preview without replacing a file: {name}")
+            original.rename(target)
 
 
 def _check_magic(path: Path) -> None:
@@ -229,6 +241,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--version", required=True)
+    parser.add_argument("--mark-platform-previews", action="store_true")
     parser.add_argument("--notes", type=Path)
     parser.add_argument("--changelog", type=Path)
     parser.add_argument("--write-checksums", type=Path)
@@ -242,6 +255,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if args.mark_platform_previews:
+            mark_platform_previews(args.directory.resolve(), args.version)
         assets = validate_assets(args.directory.resolve(), args.version)
         notes = None
         if args.notes:

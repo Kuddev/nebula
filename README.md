@@ -96,13 +96,14 @@ Choose a package from the **[latest release](https://github.com/Kuddev/pebrel/re
 | System | Architecture | Packages |
 | --- | --- | --- |
 | Windows 10 1809+ / 11 | x64 | Installer `.exe`, portable `.zip` |
-| Linux, glibc 2.35+ | x64 | `.AppImage`, `.deb`, portable `.tar.gz` |
-| macOS, deployment target 14+ | Apple Silicon / arm64 | `.dmg` |
-| macOS, deployment target 14+ | Intel / x64 | `.dmg` |
+| Linux Preview, glibc 2.35+ | x64 | `.AppImage`, `.deb`, portable `.tar.gz` |
+| macOS Preview, deployment target 14+ | Apple Silicon / arm64 | `.dmg` |
+| macOS Preview, deployment target 14+ | Intel / x64 | `.dmg` |
 
-Package names follow `Pebrel-v<version>-<system>-<architecture>`. Windows installers
-end in `-setup.exe`. A legacy-named installer is also supplied for older automatic
-update clients.
+Package names follow `Pebrel-v<version>-<system>-<architecture>`. Windows offers
+stable installers ending in `-setup.exe` and portable ZIPs. Linux and macOS are
+Preview builds, marked `-preview` before the extension. A legacy-named Windows
+installer is also supplied for older automatic-update clients.
 
 On Windows, run the installer or extract the ZIP and launch `pebrel.exe`, keeping
 the bundled directories together. On Linux, install the DEB or make the AppImage

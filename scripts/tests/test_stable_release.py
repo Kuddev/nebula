@@ -82,9 +82,9 @@ class StableReleaseTests(unittest.TestCase):
 
     def test_expected_assets_use_stable_public_names(self) -> None:
         names = expected_asset_names(VERSION)
-        self.assertIn("Pebrel-v1.6.0-linux-x64.AppImage", names)
-        self.assertIn("Pebrel-v1.6.0-macos-arm64.dmg", names)
-        self.assertIn("Pebrel-v1.6.0-macos-x64.dmg", names)
+        self.assertIn("Pebrel-v1.6.0-linux-x64-preview.AppImage", names)
+        self.assertIn("Pebrel-v1.6.0-macos-arm64-preview.dmg", names)
+        self.assertIn("Pebrel-v1.6.0-macos-x64-preview.dmg", names)
         self.assertIn("Pebrel-v1.6.0-windows-x64-setup.exe", names)
         self.assertIn("NebulaTerminal-1.6.0-windows-x64-setup.exe", names)
         self.assertEqual(len(names), 8)
@@ -109,7 +109,7 @@ class StableReleaseTests(unittest.TestCase):
             root = Path(directory)
             for name in expected_asset_names(VERSION):
                 write_fake_asset(root / name)
-            (root / "Pebrel-v1.6.0-linux-x64.AppImage").write_bytes(b"bad" + b"\0" * MIN_ASSET_SIZE)
+            (root / "Pebrel-v1.6.0-linux-x64-preview.AppImage").write_bytes(b"bad" + b"\0" * MIN_ASSET_SIZE)
             with self.assertRaisesRegex(StableReleaseError, "ELF"):
                 validate_assets(root, VERSION)
 

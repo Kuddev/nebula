@@ -10,7 +10,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Added
 
-- Added Linux x64 packages in AppImage, DEB, and portable tar.gz formats, plus separate macOS DMGs for Apple Silicon and Intel, alongside the Windows installer and ZIP. RPM packages are not included. macOS packages use ad-hoc signing and may require Open Anyway in System Settings > Privacy & Security on first launch. Addresses [#87](https://github.com/Kuddev/nebula/issues/87).
+- Added Linux x64 Preview packages in AppImage, DEB, and portable tar.gz formats, plus separate macOS Preview DMGs for Apple Silicon and Intel, alongside the stable Windows installer and ZIP. RPM packages are not included. macOS packages use ad-hoc signing and may require Open Anyway in System Settings > Privacy & Security on first launch. Addresses [#87](https://github.com/Kuddev/nebula/issues/87).
 - Added clipboard image paste for local, WSL, and SSH terminals. Pebrel saves the image as a PNG and inserts a path that the session can access; SSH images are uploaded first. Attachment thumbnails and images in a CLI's conversation still depend on that CLI.
 - Added a reader for captured Claude Code and Codex answers, with Markdown, formulas, original text, and local image previews.
 - Added separate SOCKS5/HTTP proxy and jump-host settings for each SSH host, with saved proxy credentials and a connection-route preview. Addresses [#90](https://github.com/Kuddev/nebula/issues/90).
@@ -49,7 +49,7 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### 新增
 
-- 新增 Linux x64 的 AppImage、DEB 和 tar.gz 便携包，以及分别适用于 Apple Silicon 和 Intel 的 macOS DMG；Windows 继续提供安装器与 ZIP 便携包。本次不包含 RPM。macOS 包采用临时签名，首次启动可能需要在“系统设置 > 隐私与安全性”中选择“仍要打开”。对应 [#87](https://github.com/Kuddev/nebula/issues/87)。
+- 新增 Linux x64 Preview 的 AppImage、DEB 和 tar.gz 便携包，以及分别适用于 Apple Silicon 和 Intel 的 macOS Preview DMG；Windows 提供正式版安装器与 ZIP 便携包。本次不包含 RPM。macOS 包采用临时签名，首次启动可能需要在“系统设置 > 隐私与安全性”中选择“仍要打开”。对应 [#87](https://github.com/Kuddev/nebula/issues/87)。
 - 新增本地、WSL 和 SSH 终端的剪贴板图片粘贴：将图片保存成 PNG，再插入当前会话可以访问的路径，SSH 会先上传图片。输入框缩略图和发送后的图片显示仍取决于所用 CLI。
 - 新增 Claude Code 和 Codex 回答阅读器，支持阅读已捕获回答的 Markdown、公式、原文和本地图片。
 - 新增每台 SSH 主机独立的 SOCKS5/HTTP 代理与跳板设置，可保存代理凭据并预览连接路线。对应 [#90](https://github.com/Kuddev/nebula/issues/90)。
@@ -97,14 +97,14 @@ Every release entry is provided in English and Simplified Chinese.
 
 **SHA256**
 
-- `Pebrel-v1.6.0-windows-x64.zip`: `PENDING FINAL BUILD`
-- `Pebrel-v1.6.0-windows-x64-setup.exe`: `PENDING FINAL BUILD`
-- `NebulaTerminal-1.6.0-windows-x64-setup.exe`: `PENDING FINAL BUILD`
-- `Pebrel-v1.6.0-linux-x64.AppImage`: `PENDING FINAL BUILD`
-- `Pebrel-v1.6.0-linux-x64.deb`: `PENDING FINAL BUILD`
-- `Pebrel-v1.6.0-linux-x64.tar.gz`: `PENDING FINAL BUILD`
-- `Pebrel-v1.6.0-macos-arm64.dmg`: `PENDING FINAL BUILD`
-- `Pebrel-v1.6.0-macos-x64.dmg`: `PENDING FINAL BUILD`
+- `Pebrel-v1.6.0-windows-x64.zip`: `d57f9c61988ca950da1088415717137b85e022475e046d611f3595b48e66ce2d`
+- `Pebrel-v1.6.0-windows-x64-setup.exe`: `369d5f93f34d7f90bde91b51a4f66259d1f277619f7e2b618fb6e03d449f605f`
+- `NebulaTerminal-1.6.0-windows-x64-setup.exe`: `369d5f93f34d7f90bde91b51a4f66259d1f277619f7e2b618fb6e03d449f605f`
+- `Pebrel-v1.6.0-linux-x64-preview.AppImage`: `91e44fef5f56b3bc5f840a603cbcbf1a8186c4fa042ea012a47b11855cc305cd`
+- `Pebrel-v1.6.0-linux-x64-preview.deb`: `f3f4f6292f5460dd7ed626d9a5d8279ae89f7cce1bd21c90db7acd4164eef57a`
+- `Pebrel-v1.6.0-linux-x64-preview.tar.gz`: `0e56fb2a01d8cce71e4cda8290f8edde1868d37e588cdbf443bc42dee18dd22b`
+- `Pebrel-v1.6.0-macos-arm64-preview.dmg`: `1b747113b2d6f868f2547a365d72a0ec4a2d045900708f2f7c18315d2691cf74`
+- `Pebrel-v1.6.0-macos-x64-preview.dmg`: `1bf53ef3dc957a8e3bac89b5a516f4c1153651c48eb58e912180f3ab48a46548`
 
 ## 1.5.0 - 2026-09-01
 

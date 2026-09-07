@@ -88,11 +88,12 @@ Pebrel（原名 Nebula）把本地 Shell、远程主机、文件和 AI 命令行
 | 系统 | 架构 | 安装包 |
 | --- | --- | --- |
 | Windows 10 1809+ / 11 | x64 | `.exe` 安装器、`.zip` 便携包 |
-| Linux，glibc 2.35+ | x64 | `.AppImage`、`.deb`、`.tar.gz` 便携包 |
-| macOS，部署目标为 14+ | Apple Silicon / arm64 | `.dmg` |
-| macOS，部署目标为 14+ | Intel / x64 | `.dmg` |
+| Linux Preview，glibc 2.35+ | x64 | `.AppImage`、`.deb`、`.tar.gz` 便携包 |
+| macOS Preview，部署目标为 14+ | Apple Silicon / arm64 | `.dmg` |
+| macOS Preview，部署目标为 14+ | Intel / x64 | `.dmg` |
 
 安装包统一采用 `Pebrel-v<版本>-<系统>-<架构>` 命名，Windows 安装器以 `-setup.exe` 结尾。
+Windows 为正式版，Linux 与 macOS 文件名在扩展名前带有 `-preview` 标记。
 同时提供旧名称的兼容安装器，供旧版自动更新客户端使用。
 
 Windows 可运行安装器，或解压 ZIP 后启动 `pebrel.exe`，保留随包目录结构。

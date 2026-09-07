@@ -5,16 +5,16 @@ Older releases keep their original filenames. Use the new installer to migrate
 an existing Nebula installation; configuration migration is handled by the
 application at startup.
 
-## Linux
+## Linux Preview
 
-Stable releases provide three Linux x64 packages.
+The 1.6.0 release provides three Linux x64 Preview packages.
 
 - Debian/Ubuntu: install
-  `Pebrel-v<version>-linux-x64.deb` with
-  `sudo apt install ./Pebrel-v<version>-linux-x64.deb`.
+  `Pebrel-v<version>-linux-x64-preview.deb` with
+  `sudo apt install ./Pebrel-v<version>-linux-x64-preview.deb`.
   Remove it with `sudo apt remove pebrel`.
 - AppImage: make
-  `Pebrel-v<version>-linux-x64.AppImage` executable and
+  `Pebrel-v<version>-linux-x64-preview.AppImage` executable and
   run it directly. It does not register itself with the system package manager.
 - Portable archive: extract the `tar.gz` and run its `AppRun` launcher. Keep
   the AppDir layout intact so bundled libraries are found correctly.
@@ -30,12 +30,12 @@ passphrases requires `libsecret-tools` and an unlocked Secret Service keyring
 recommends these dependencies. If storage is unavailable, enter the secret for
 the current connection instead; Pebrel does not silently claim to save it.
 
-## macOS
+## macOS Preview
 
 Download the DMG matching the Mac architecture:
 
-- `Pebrel-v<version>-macos-arm64.dmg` for Apple Silicon Macs.
-- `Pebrel-v<version>-macos-x64.dmg` for Intel Macs.
+- `Pebrel-v<version>-macos-arm64-preview.dmg` for Apple Silicon Macs.
+- `Pebrel-v<version>-macos-x64-preview.dmg` for Intel Macs.
 
 Open the DMG and drag **Pebrel** into Applications. The 1.6.0
 packages use ad-hoc signing, without Apple notarization. For a
@@ -63,9 +63,10 @@ scaling, notification permissions, and interactive SSH/SFTP still need native
 user testing. The release procedure and acceptance checklist are in
 [`docs/preview-release-checklist.md`](docs/preview-release-checklist.md).
 
-Preview builds remain separate from stable releases. Their filenames contain
-`-preview.<id>` and use `x86_64` / `aarch64`; the Debian package is
-`pebrel-preview` and the macOS bundle is **Pebrel Preview**.
+Earlier CI Preview archives may contain `-preview.<id>` and use `x86_64` /
+`aarch64` filenames; those older builds use the Debian package name
+`pebrel-preview` and the macOS bundle name **Pebrel Preview**. The 1.6.0 platform
+Preview packages use `pebrel` and **Pebrel**, as described above.
 
 ## Windows installer (recommended)
 

@@ -544,6 +544,7 @@ jobs:
           PY
           python3 scripts/stable_release.py release-dist \
             --version "$PACKAGE_VERSION" \
+            --mark-platform-previews \
             --notes "docs/release-notes/v$PACKAGE_VERSION.md" \
             --changelog CHANGELOG.md \
             --write-checksums release-dist/SHA256SUMS \
