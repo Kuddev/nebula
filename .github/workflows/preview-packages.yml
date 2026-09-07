@@ -50,6 +50,9 @@ jobs:
       asset_version: ${{ steps.metadata.outputs.asset_version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Resolve package metadata
         id: metadata
@@ -130,6 +133,9 @@ jobs:
       LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Install build, package, and headless runtime dependencies
         run: |
@@ -309,6 +315,9 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Verify native runner architecture
         run: test "$(uname -m)" = "${{ matrix.native_architecture }}"
@@ -468,6 +477,9 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Test native harness process ownership and completion markers
         run: >-
           python -m unittest
@@ -510,6 +522,9 @@ jobs:
       ASSET_VERSION: ${{ needs.prepare.outputs.asset_version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - uses: actions/download-artifact@v4
         with:
@@ -562,6 +577,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: actions/download-artifact@v4
         with:
           name: Pebrel-v${{ needs.prepare.outputs.asset_version }}
