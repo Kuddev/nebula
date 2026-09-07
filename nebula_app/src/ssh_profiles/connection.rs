@@ -113,7 +113,7 @@ impl SshConnectionOptions {
         for byte in digest.finalize() {
             let _ = write!(fingerprint, "{byte:02x}");
         }
-        Some(format!("Nebula/SSH/Proxy/{fingerprint}"))
+        Some(format!("Pebrel/SSH/Proxy/{fingerprint}"))
     }
 }
 

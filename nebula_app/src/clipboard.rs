@@ -38,6 +38,17 @@ impl Clipboard {
     }
 }
 
+/// Keep the returned path alive until the receiving process has read the image.
+/// Exclusive creation avoids collisions between panes and application instances.
+pub(crate) fn stage_image_png(png: &[u8]) -> std::io::Result<tempfile::TempPath> {
+    use std::io::Write as _;
+
+    let mut file = tempfile::Builder::new().prefix("pebrel-paste-").suffix(".png").tempfile()?;
+    file.write_all(png)?;
+    file.flush()?;
+    Ok(file.into_temp_path())
+}
+
 impl Default for Clipboard {
     fn default() -> Self {
         #[cfg(any(target_os = "macos", windows))]

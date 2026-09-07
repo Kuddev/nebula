@@ -4,8 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const CHINESE_TEMPLATE: &str = include_str!("templates/nebula.zh-CN.lua");
-pub const ENGLISH_TEMPLATE: &str = include_str!("templates/nebula.en-US.lua");
+pub const CHINESE_TEMPLATE: &str = include_str!("templates/pebrel.zh-CN.lua");
+pub const ENGLISH_TEMPLATE: &str = include_str!("templates/pebrel.en-US.lua");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TemplateLanguage {
@@ -98,7 +98,17 @@ pub fn write_template(
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(language.contents().as_bytes())?;
     temporary.as_file_mut().sync_all()?;
-    temporary.persist(path).map_err(|error| TemplateError::Io(error.error))?;
+    if force {
+        temporary.persist(path).map_err(|error| TemplateError::Io(error.error))?;
+    } else {
+        temporary.persist_noclobber(path).map_err(|error| {
+            if error.error.kind() == std::io::ErrorKind::AlreadyExists {
+                TemplateError::AlreadyExists(path.to_owned())
+            } else {
+                TemplateError::Io(error.error)
+            }
+        })?;
+    }
 
     Ok(TemplateWrite { path: path.to_owned(), backup, created: !existed })
 }
@@ -110,7 +120,12 @@ pub fn ensure_user_lua_config(
     if path.exists() {
         return Ok(TemplateWrite { path: path.to_owned(), backup: None, created: false });
     }
-    write_template(path, language, false)
+    match write_template(path, language, false) {
+        Err(TemplateError::AlreadyExists(_)) => {
+            Ok(TemplateWrite { path: path.to_owned(), backup: None, created: false })
+        },
+        result => result,
+    }
 }
 
 fn create_backup(path: &Path) -> Result<PathBuf, std::io::Error> {
@@ -225,5 +240,36 @@ mod tests {
         let second = ensure_user_lua_config(&path, TemplateLanguage::ZhCn).unwrap();
         assert!(!second.created);
         assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn concurrent_first_run_only_publishes_one_complete_template() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pebrel.lua");
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|index| {
+                    let path = &path;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let language = if index % 2 == 0 {
+                            TemplateLanguage::EnUs
+                        } else {
+                            TemplateLanguage::ZhCn
+                        };
+                        ensure_user_lua_config(path, language).unwrap().created
+                    })
+                })
+                .collect();
+            let count = workers
+                .into_iter()
+                .map(|worker| usize::from(worker.join().unwrap()))
+                .sum::<usize>();
+            assert_eq!(count, 1);
+        });
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents == ENGLISH_TEMPLATE || contents == CHINESE_TEMPLATE);
     }
 }

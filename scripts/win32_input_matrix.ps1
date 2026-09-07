@@ -7,7 +7,7 @@
 #
 #   powershell -File scripts\win32_input_matrix.ps1           # assert vs baseline
 #   powershell -File scripts\win32_input_matrix.ps1 -Record   # (re)record baseline
-#   powershell -File scripts\win32_input_matrix.ps1 -Exe <path-to-nebula.exe>
+#   powershell -File scripts\win32_input_matrix.ps1 -Exe <path-to-pebrel.exe>
 #
 # LIMITS: PostMessage does not alter the real keyboard state, so modifier
 # CHORDS (Shift+Enter, Ctrl+Space…) cannot be tested unattended — the layout
@@ -15,7 +15,7 @@
 # foreground SendInput run on an idle machine; keep that a manual step.
 param(
     [switch]$Record,
-    [string]$Exe = 'D:\temp_build\nebula\target\release\nebula.exe'
+    [string]$Exe = 'D:\temp_build\nebula\target\release\pebrel.exe'
 )
 $ErrorActionPreference = 'Continue'
 Add-Type @'

@@ -17,7 +17,7 @@ use crate::config::ui_config::{Delta, Percentage};
 pub const DEFAULT_NAME: &str = crate::brand::NAME;
 
 /// Default window class / instance (WM_CLASS), a single identifier without spaces.
-pub const DEFAULT_CLASS: &str = "Nebula";
+pub const DEFAULT_CLASS: &str = "Pebrel";
 
 #[derive(ConfigDeserialize, Serialize, Debug, Clone, PartialEq)]
 pub struct WindowConfig {

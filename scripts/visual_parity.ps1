@@ -6,7 +6,7 @@
 # fastfetch 若在 PATH 上则追加真实 fastfetch 输出。
 #
 # 用法:
-#   .\scripts\visual_parity.ps1 -Exe <nebula.exe> -Tag winit-old -ExeArgs '--working-directory D:\temp_build\nebula'
+#   .\scripts\visual_parity.ps1 -Exe <pebrel.exe> -Tag winit-old -ExeArgs '--working-directory D:\temp_build\nebula'
 #   .\scripts\visual_parity.ps1 -Exe <nebula-gpui.exe> -Tag gpui-lab
 param(
     [Parameter(Mandatory = $true)][string]$Exe,

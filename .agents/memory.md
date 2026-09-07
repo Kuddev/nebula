@@ -1,8 +1,40 @@
-# Nebula 持久化发布记忆
+# Pebrel 持久化发布记忆
 
-最后核验：2026-08-25，Nebula Terminal 1.3.1 发布与文档修订。
+最后核验：2026-09-07，GitHub 仓库更名、旧链接跳转与历史发布资产一致性。1.6.0 仍为本地候选，本次没有创建正式 Release、推送发布提交或移动版本标签。
 
 本文记录已经实际遇到并核实的发布陷阱，以及后续版本可直接执行的 Release Note 与 GitHub Release 规则。它不保存密钥、令牌、临时构建路径或未经验证的猜测。
+
+## 0. 当前品牌与仓库迁移状态（2026-09-07 核验）
+
+用户已明确授权将现有 GitHub 项目更名。`Kuddev/nebula` 已重命名为
+[`Kuddev/pebrel`](https://github.com/Kuddev/pebrel)，repository ID 仍为 `1289958986`。
+这次操作只修改仓库名称；当时的 663 stars、44 forks、17 open issues 保持不变。
+后续仓库命令与当前文档使用新地址；旧推广链接按下列实测边界保留访问。
+
+- 旧仓库主页、PR、commit、blob、Releases、tag、latest、真实旧资产与 API 地址均已实际检查；旧 raw README 和 PNG 地址直接返回 200，内容 SHA256 与新地址一致。
+- 旧 Issue `#95`、`#60` 使用普通浏览器的 `Accept: text/html` 时，301 跳转到新仓库后返回 200。相同旧地址在 `curl` 默认 `Accept: */*` 下曾返回 404；不能把这种内容协商差异说成所有客户端都无条件重定向，也不能据此认定浏览器推广链接失效。
+- GitHub 支持旧 Git clone/fetch/push URL 重定向，旧 HTTPS Git 地址已通过只读 `ls-remote` 核验；本地 `origin` 已更新到新地址，没有为验证执行推送。
+- 更名前后 `main`、发布分支和 18 个版本标签未移动；20 个 Release 与 34 个资产的元数据保持一致。其他验证分支的并发快进另行核对，不冒充所有远端引用完全静止。
+- 通过旧 1.5.0 安装器下载地址实际下载得到 `29,945,853` 字节，SHA256 为 `416a1e127045ce81c78cc2d0990d469d8adde935931963148fb81a9d5cef2bd2`，与更名前一致。
+- 不要重新创建 `Kuddev/nebula` 仓库，否则旧名称会被新仓库占用并破坏重定向。GitHub Pages 与其他仓库通过旧名称 `uses:` 引用的 Actions 不属于通用重定向保证；本项目核验时 `has_pages=false`，完整默认分支树没有 `action.yml` 或 `action.yaml`。
+
+官方说明：[Renaming a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/renaming-a-repository)。历史版本说明、标签与资产文件名保持原样；仓库更名不会替已改名的 Release 资产创建文件名别名。
+
+1.6.0 候选的源码与打包脚本已采用以下新名称，但**这不代表 1.6.0 已经公开发布**：
+
+| 对象 | 1.6.0 候选名称 |
+| --- | --- |
+| 主程序与 CLI | `pebrel.exe` / `pebrel` |
+| AI hook 辅助程序 | `runtime/pebrel-hook.exe` |
+| Portable ZIP | `Pebrel-v1.6.0-windows-x64.zip` |
+| Windows 安装器 | `Pebrel-1.6.0-windows-x64-setup.exe` |
+| Release Note | `docs/release-notes/v1.6.0.md`，标题 `Pebrel 1.6.0` |
+
+旧客户端按精确的 `NebulaTerminal-<version>-windows-x64-setup.exe` 名称查找更新。
+未来公开发布 Pebrel 安装资产时，还需要提供相同安装器字节的旧命名兼容资产，或先完成明确的客户端迁移方案；不能把仓库重定向当成资产改名兼容。
+目前下载入口应指向真实的 `https://github.com/Kuddev/pebrel/releases/latest` 页面，不能生成指向尚未发布 Pebrel 资产的 `latest/download/...` 链接。
+
+下文保留 1.3.0 / 1.3.1 的已发布核验先例与通用发布步骤。其历史名称用于识别旧版本，新的候选名称以上表和当前打包脚本为准；最终 SHA256 仍必须在新文件生成后重新计算。
 
 ## 1. 命名规范是接口，不是装饰
 
@@ -99,11 +131,11 @@ Addresses [#60](https://github.com/Kuddev/nebula/issues/60).
 
 ## 5. 构建与打包踩坑
 
-- `cargo build --workspace` 可能把不带 `gpui-shell` 的 legacy `nebula.exe` 留在输出目录。正式脚本先构建 `--workspace --exclude nebula`，最后显式构建 `-p nebula --bin nebula --features gpui-shell`；不要在它之后再用 workspace 默认构建覆盖产品 exe。
+- `cargo build --workspace` 可能在输出目录留下非预期的产品构建。1.6 候选脚本先构建 `--workspace --exclude nebula`，最后显式构建 `-p nebula --bin pebrel --features gpui-shell`；内部 package 名仍为 `nebula`。不要在它之后再用 workspace 默认构建覆盖产品 exe；旧版脚本的 `--bin nebula` 只适用于旧源码。
 - 正式包必须全新构建。`-SkipBuild` 和 `-AllowStale` 只用于脚本自测，不能用于正式 Release。
-- Windows 正在运行的 `nebula.exe` 可能锁住输出文件，并把链接失败表现为 `os error 5`。应使用用户允许的独立 `TargetDirectory` 和 `OutputDirectory` 隔离构建，不要结束用户正在使用的实例。
+- Windows 正在运行的 `pebrel.exe`（旧版本为 `nebula.exe`）可能锁住输出文件，并把链接失败表现为 `os error 5`。应使用用户允许的独立 `TargetDirectory` 和 `OutputDirectory` 隔离构建，不要结束用户正在使用的实例。
 - 不得根据剩余空间擅自选择磁盘。本次用户明确禁止操作 `E:\`；这一约束优先于任何“空间更大”的构建建议。
-- 构建脚本会验证 `nebula.exe --help` 包含 `--gpui`、`--version` 与目标版本匹配，并检查二进制不早于源码。不要绕过这些检查。
+- 当前构建脚本会验证 `pebrel.exe --help` 包含 `--gpui`、`--version` 与目标版本匹配，并检查二进制不早于源码。不要绕过这些检查；1.3 历史产物的程序名为 `nebula.exe`。
 - Inno Setup 的简体中文翻译来自固定上游提交并校验 SHA256；下载失败或哈希不符应停止发布，不能静默使用未知版本。
 - ZIP 和安装器必须从同一个发布提交、同一套新鲜二进制生成。产物生成后核对文件清单、大小、可执行文件头、版本输出和 SHA256。
 

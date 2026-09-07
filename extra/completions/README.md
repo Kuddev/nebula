@@ -7,9 +7,10 @@ Linux packaging installs the Unix files; neither platform should reuse the other
 After changing CLI options, regenerate on both Windows and Unix with the same locked dependencies:
 
 ```sh
-cargo test --locked -p nebula --bin nebula cli::tests::regenerate_completions -- --ignored --exact
-cargo test --locked -p nebula --bin nebula cli::tests::completions -- --exact
+cargo test --locked -p nebula --bin pebrel cli::tests::regenerate_completions -- --ignored --exact
+cargo test --locked -p nebula --bin pebrel cli::tests::completions -- --exact
 ```
 
 The regeneration command selects the host's snapshot directory. Set
-`NEBULA_COMPLETION_OUTPUT` to write generated files to a separate review directory instead.
+`PEBREL_COMPLETION_OUTPUT` to write generated files to a separate review directory instead.
+`NEBULA_COMPLETION_OUTPUT` remains a fallback for existing maintenance scripts.

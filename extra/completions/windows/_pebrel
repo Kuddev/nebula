@@ -1,8 +1,8 @@
-#compdef nebula
+#compdef pebrel
 
 autoload -U is-at-least
 
-_nebula() {
+_pebrel() {
     typeset -A opt_args
     typeset -a _arguments_options
     local ret=1
@@ -22,7 +22,7 @@ _nebula() {
 '*--command=[Command and args to execute (must be last argument)]:COMMAND:_default' \
 '-T+[Defines the window title \[default\: Pebrel\]]:TITLE:_default' \
 '--title=[Defines the window title \[default\: Pebrel\]]:TITLE:_default' \
-'--class=[Defines window class/app_id on X11/Wayland \[default\: Nebula\]]:general> | <general>,<instance:_default' \
+'--class=[Defines window class/app_id on X11/Wayland \[default\: Pebrel\]]:general> | <general>,<instance:_default' \
 '*-o+[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
 '*--option=[Override configuration file options \[example\: '\''cursor.style="Beam"'\''\]]:OPTION:_default' \
 '--print-events[Print all events to STDOUT]' \
@@ -36,14 +36,14 @@ _nebula() {
 '--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
 '--version[Print version]' \
-":: :_nebula_commands" \
+":: :_pebrel_commands" \
 "*::: :->Pebrel" \
 && ret=0
     case $state in
     (Pebrel)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-command-$line[1]:"
         case $line[1] in
             (ctl)
 _arguments "${_arguments_options[@]}" : \
@@ -51,7 +51,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print one-shot JSON responses. Streaming subscriptions stay JSON Lines]' \
 '-h[Print help]' \
 '--help[Print help]' \
-":: :_nebula__ctl_commands" \
+":: :_pebrel__ctl_commands" \
 "*::: :->ctl" \
 && ret=0
 
@@ -59,7 +59,7 @@ _arguments "${_arguments_options[@]}" : \
     (ctl)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-ctl-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-ctl-command-$line[1]:"
         case $line[1] in
             (describe)
 _arguments "${_arguments_options[@]}" : \
@@ -429,7 +429,7 @@ settled\:"Any non-running terminal state"))' \
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__ctl__help_commands" \
+":: :_pebrel__ctl__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -437,7 +437,7 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-ctl-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-ctl-help-command-$line[1]:"
         case $line[1] in
             (describe)
 _arguments "${_arguments_options[@]}" : \
@@ -587,7 +587,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
-":: :_nebula__window_commands" \
+":: :_pebrel__window_commands" \
 "*::: :->window" \
 && ret=0
 
@@ -595,7 +595,7 @@ _arguments "${_arguments_options[@]}" : \
     (window)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-window-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-window-command-$line[1]:"
         case $line[1] in
             (close)
 _arguments "${_arguments_options[@]}" : \
@@ -603,12 +603,12 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':window -- Window id from `nebula pane list`:_default' \
+':window -- Window id from `pebrel pane list`:_default' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__window__help_commands" \
+":: :_pebrel__window__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -616,7 +616,7 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-window-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-window-help-command-$line[1]:"
         case $line[1] in
             (close)
 _arguments "${_arguments_options[@]}" : \
@@ -638,7 +638,7 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
-":: :_nebula__tab_commands" \
+":: :_pebrel__tab_commands" \
 "*::: :->tab" \
 && ret=0
 
@@ -646,7 +646,7 @@ _arguments "${_arguments_options[@]}" : \
     (tab)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-tab-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-tab-command-$line[1]:"
         case $line[1] in
             (close)
 _arguments "${_arguments_options[@]}" : \
@@ -682,7 +682,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__tab__help_commands" \
+":: :_pebrel__tab__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -690,7 +690,7 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-tab-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-tab-help-command-$line[1]:"
         case $line[1] in
             (close)
 _arguments "${_arguments_options[@]}" : \
@@ -720,7 +720,7 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
-":: :_nebula__pane_commands" \
+":: :_pebrel__pane_commands" \
 "*::: :->pane" \
 && ret=0
 
@@ -728,7 +728,7 @@ _arguments "${_arguments_options[@]}" : \
     (pane)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-pane-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-pane-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
@@ -747,7 +747,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':pane -- Pane id from `nebula pane list`:_default' \
+':pane -- Pane id from `pebrel pane list`:_default' \
 && ret=0
 ;;
 (send)
@@ -760,7 +760,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':pane -- Pane id from `nebula pane list`:_default' \
+':pane -- Pane id from `pebrel pane list`:_default' \
 '*::text -- The line to write. Several words are joined with single spaces, so both `send 17 "cargo test"` and `send 17 cargo test` work:_default' \
 && ret=0
 ;;
@@ -776,7 +776,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':pane -- Pane id from `nebula pane list`:_default' \
+':pane -- Pane id from `pebrel pane list`:_default' \
 '*::text -- Literal text. Multiple words are joined with single spaces:_default' \
 && ret=0
 ;;
@@ -795,7 +795,7 @@ settled\:"Any non-running terminal state"))' \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-':pane -- Pane id from `nebula pane list`:_default' \
+':pane -- Pane id from `pebrel pane list`:_default' \
 && ret=0
 ;;
 (exec)
@@ -806,8 +806,8 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':pane -- Pane id from `nebula pane list`; its current cwd and local environment are reused:_default' \
-'*::argv -- Program and arguments. `--` is required so child flags cannot be parsed by Nebula:_default' \
+':pane -- Pane id from `pebrel pane list`; its current cwd and local environment are reused:_default' \
+'*::argv -- Program and arguments. `--` is required so child flags cannot be parsed by Pebrel:_default' \
 && ret=0
 ;;
 (close)
@@ -817,7 +817,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':pane -- Pane id from `nebula pane list`:_default' \
+':pane -- Pane id from `pebrel pane list`:_default' \
 && ret=0
 ;;
 (zoom)
@@ -828,7 +828,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':pane -- Pane id from `nebula pane list`:_default' \
+':pane -- Pane id from `pebrel pane list`:_default' \
 && ret=0
 ;;
 (resize)
@@ -838,13 +838,13 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':pane -- Pane id from `nebula pane list`:_default' \
+':pane -- Pane id from `pebrel pane list`:_default' \
 ':ratio -- Desired share of the pane'\''s direct parent split, from 0.05 through 0.95:_default' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__pane__help_commands" \
+":: :_pebrel__pane__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -852,7 +852,7 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-pane-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-pane-help-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
@@ -906,7 +906,7 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
-":: :_nebula__agent_commands" \
+":: :_pebrel__agent_commands" \
 "*::: :->agent" \
 && ret=0
 
@@ -914,7 +914,7 @@ _arguments "${_arguments_options[@]}" : \
     (agent)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-agent-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-agent-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
@@ -935,7 +935,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':agent -- Agent name or stable id from `nebula agent list`:_default' \
+':agent -- Agent name or stable id from `pebrel agent list`:_default' \
 '*::text -- The task itself. Several words are joined with single spaces, so both `send codex "fix login"` and `send codex fix login` work:_default' \
 && ret=0
 ;;
@@ -946,7 +946,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':agent -- Agent name or stable id from `nebula agent list`:_default' \
+':agent -- Agent name or stable id from `pebrel agent list`:_default' \
 '*::text -- The delegated task. Several words are joined with single spaces:_default' \
 && ret=0
 ;;
@@ -962,7 +962,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':agent -- Agent name or stable id from `nebula agent list`:_default' \
+':agent -- Agent name or stable id from `pebrel agent list`:_default' \
 '*::text -- Literal text. Multiple words are joined with single spaces:_default' \
 && ret=0
 ;;
@@ -974,7 +974,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help]' \
 '--help[Print help]' \
-':agent -- Agent name or stable id from `nebula agent list`:_default' \
+':agent -- Agent name or stable id from `pebrel agent list`:_default' \
 && ret=0
 ;;
 (wait)
@@ -992,12 +992,12 @@ settled\:"Any non-running terminal state"))' \
 '--pretty[Pretty-print the JSON response. Output is JSON either way]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
-':agent -- Agent name or stable id from `nebula agent list`:_default' \
+':agent -- Agent name or stable id from `pebrel agent list`:_default' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__agent__help_commands" \
+":: :_pebrel__agent__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -1005,7 +1005,7 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-agent-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-agent-help-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
@@ -1062,7 +1062,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
-":: :_nebula__config_commands" \
+":: :_pebrel__config_commands" \
 "*::: :->config" \
 && ret=0
 
@@ -1070,7 +1070,7 @@ _arguments "${_arguments_options[@]}" : \
     (config)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-config-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-config-command-$line[1]:"
         case $line[1] in
             (check)
 _arguments "${_arguments_options[@]}" : \
@@ -1090,7 +1090,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__config__help_commands" \
+":: :_pebrel__config__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -1098,7 +1098,7 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-config-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-config-help-command-$line[1]:"
         case $line[1] in
             (check)
 _arguments "${_arguments_options[@]}" : \
@@ -1128,7 +1128,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (setup-ai)
 _arguments "${_arguments_options[@]}" : \
-'--remove[Remove Nebula'\''s hooks from claude'\''s settings.json instead of installing them]' \
+'--remove[Remove Pebrel'\''s hooks from claude'\''s settings.json instead of installing them]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -1142,7 +1142,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__help_commands" \
+":: :_pebrel__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -1150,11 +1150,11 @@ _arguments "${_arguments_options[@]}" : \
     (help)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-help-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-help-command-$line[1]:"
         case $line[1] in
             (ctl)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__help__ctl_commands" \
+":: :_pebrel__help__ctl_commands" \
 "*::: :->ctl" \
 && ret=0
 
@@ -1162,7 +1162,7 @@ _arguments "${_arguments_options[@]}" : \
     (ctl)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-help-ctl-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-help-ctl-command-$line[1]:"
         case $line[1] in
             (describe)
 _arguments "${_arguments_options[@]}" : \
@@ -1298,7 +1298,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (window)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__help__window_commands" \
+":: :_pebrel__help__window_commands" \
 "*::: :->window" \
 && ret=0
 
@@ -1306,7 +1306,7 @@ _arguments "${_arguments_options[@]}" : \
     (window)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-help-window-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-help-window-command-$line[1]:"
         case $line[1] in
             (close)
 _arguments "${_arguments_options[@]}" : \
@@ -1318,7 +1318,7 @@ esac
 ;;
 (tab)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__help__tab_commands" \
+":: :_pebrel__help__tab_commands" \
 "*::: :->tab" \
 && ret=0
 
@@ -1326,7 +1326,7 @@ _arguments "${_arguments_options[@]}" : \
     (tab)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-help-tab-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-help-tab-command-$line[1]:"
         case $line[1] in
             (close)
 _arguments "${_arguments_options[@]}" : \
@@ -1346,7 +1346,7 @@ esac
 ;;
 (pane)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__help__pane_commands" \
+":: :_pebrel__help__pane_commands" \
 "*::: :->pane" \
 && ret=0
 
@@ -1354,7 +1354,7 @@ _arguments "${_arguments_options[@]}" : \
     (pane)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-help-pane-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-help-pane-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
@@ -1398,7 +1398,7 @@ esac
 ;;
 (agent)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__help__agent_commands" \
+":: :_pebrel__help__agent_commands" \
 "*::: :->agent" \
 && ret=0
 
@@ -1406,7 +1406,7 @@ _arguments "${_arguments_options[@]}" : \
     (agent)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-help-agent-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-help-agent-command-$line[1]:"
         case $line[1] in
             (list)
 _arguments "${_arguments_options[@]}" : \
@@ -1442,7 +1442,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (config)
 _arguments "${_arguments_options[@]}" : \
-":: :_nebula__help__config_commands" \
+":: :_pebrel__help__config_commands" \
 "*::: :->config" \
 && ret=0
 
@@ -1450,7 +1450,7 @@ _arguments "${_arguments_options[@]}" : \
     (config)
         words=($line[1] "${words[@]}")
         (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:nebula-help-config-command-$line[1]:"
+        curcontext="${curcontext%:*:*}:pebrel-help-config-command-$line[1]:"
         case $line[1] in
             (check)
 _arguments "${_arguments_options[@]}" : \
@@ -1489,8 +1489,8 @@ esac
 esac
 }
 
-(( $+functions[_nebula_commands] )) ||
-_nebula_commands() {
+(( $+functions[_pebrel_commands] )) ||
+_pebrel_commands() {
     local commands; commands=(
 'ctl:Agent-oriented terminal control\: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output' \
 'env:Report this pane'\''s terminal identity, the control-plane path, and every command available to it. Answers even with no runtime reachable, so an agent can always discover what it has instead of guessing' \
@@ -1499,16 +1499,16 @@ _nebula_commands() {
 'pane:Inspect and drive terminal panes\: list, read, send, paste, wait, and change layout' \
 'agent:Inspect and drive the AI agents running in panes\: list, send, read, wait' \
 'migrate:Migrate the configuration file' \
-'config:Validate or create the Nebula configuration' \
+'config:Validate or create the Pebrel configuration' \
 'notify-test:Test system notification (toast) delivery' \
-'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
-'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
+'setup-ai:Install (or --remove) AI hooks plus the Pebrel Runtime Skill for Codex and Claude Code' \
+'ssh:SSH with Pebrel shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula commands' commands "$@"
+    _describe -t commands 'pebrel commands' commands "$@"
 }
-(( $+functions[_nebula__agent_commands] )) ||
-_nebula__agent_commands() {
+(( $+functions[_pebrel__agent_commands] )) ||
+_pebrel__agent_commands() {
     local commands; commands=(
 'list:List the panes running an AI CLI, with session identity and generation' \
 'send:Hand one task to an agent and submit it' \
@@ -1518,15 +1518,15 @@ _nebula__agent_commands() {
 'wait:Block until an agent'\''s turn ends' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula agent commands' commands "$@"
+    _describe -t commands 'pebrel agent commands' commands "$@"
 }
-(( $+functions[_nebula__agent__delegate_commands] )) ||
-_nebula__agent__delegate_commands() {
+(( $+functions[_pebrel__agent__delegate_commands] )) ||
+_pebrel__agent__delegate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent delegate commands' commands "$@"
+    _describe -t commands 'pebrel agent delegate commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help_commands] )) ||
-_nebula__agent__help_commands() {
+(( $+functions[_pebrel__agent__help_commands] )) ||
+_pebrel__agent__help_commands() {
     local commands; commands=(
 'list:List the panes running an AI CLI, with session identity and generation' \
 'send:Hand one task to an agent and submit it' \
@@ -1536,118 +1536,118 @@ _nebula__agent__help_commands() {
 'wait:Block until an agent'\''s turn ends' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula agent help commands' commands "$@"
+    _describe -t commands 'pebrel agent help commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help__delegate_commands] )) ||
-_nebula__agent__help__delegate_commands() {
+(( $+functions[_pebrel__agent__help__delegate_commands] )) ||
+_pebrel__agent__help__delegate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent help delegate commands' commands "$@"
+    _describe -t commands 'pebrel agent help delegate commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help__help_commands] )) ||
-_nebula__agent__help__help_commands() {
+(( $+functions[_pebrel__agent__help__help_commands] )) ||
+_pebrel__agent__help__help_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent help help commands' commands "$@"
+    _describe -t commands 'pebrel agent help help commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help__list_commands] )) ||
-_nebula__agent__help__list_commands() {
+(( $+functions[_pebrel__agent__help__list_commands] )) ||
+_pebrel__agent__help__list_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent help list commands' commands "$@"
+    _describe -t commands 'pebrel agent help list commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help__paste_commands] )) ||
-_nebula__agent__help__paste_commands() {
+(( $+functions[_pebrel__agent__help__paste_commands] )) ||
+_pebrel__agent__help__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent help paste commands' commands "$@"
+    _describe -t commands 'pebrel agent help paste commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help__read_commands] )) ||
-_nebula__agent__help__read_commands() {
+(( $+functions[_pebrel__agent__help__read_commands] )) ||
+_pebrel__agent__help__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent help read commands' commands "$@"
+    _describe -t commands 'pebrel agent help read commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help__send_commands] )) ||
-_nebula__agent__help__send_commands() {
+(( $+functions[_pebrel__agent__help__send_commands] )) ||
+_pebrel__agent__help__send_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent help send commands' commands "$@"
+    _describe -t commands 'pebrel agent help send commands' commands "$@"
 }
-(( $+functions[_nebula__agent__help__wait_commands] )) ||
-_nebula__agent__help__wait_commands() {
+(( $+functions[_pebrel__agent__help__wait_commands] )) ||
+_pebrel__agent__help__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent help wait commands' commands "$@"
+    _describe -t commands 'pebrel agent help wait commands' commands "$@"
 }
-(( $+functions[_nebula__agent__list_commands] )) ||
-_nebula__agent__list_commands() {
+(( $+functions[_pebrel__agent__list_commands] )) ||
+_pebrel__agent__list_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent list commands' commands "$@"
+    _describe -t commands 'pebrel agent list commands' commands "$@"
 }
-(( $+functions[_nebula__agent__paste_commands] )) ||
-_nebula__agent__paste_commands() {
+(( $+functions[_pebrel__agent__paste_commands] )) ||
+_pebrel__agent__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent paste commands' commands "$@"
+    _describe -t commands 'pebrel agent paste commands' commands "$@"
 }
-(( $+functions[_nebula__agent__read_commands] )) ||
-_nebula__agent__read_commands() {
+(( $+functions[_pebrel__agent__read_commands] )) ||
+_pebrel__agent__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent read commands' commands "$@"
+    _describe -t commands 'pebrel agent read commands' commands "$@"
 }
-(( $+functions[_nebula__agent__send_commands] )) ||
-_nebula__agent__send_commands() {
+(( $+functions[_pebrel__agent__send_commands] )) ||
+_pebrel__agent__send_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent send commands' commands "$@"
+    _describe -t commands 'pebrel agent send commands' commands "$@"
 }
-(( $+functions[_nebula__agent__wait_commands] )) ||
-_nebula__agent__wait_commands() {
+(( $+functions[_pebrel__agent__wait_commands] )) ||
+_pebrel__agent__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula agent wait commands' commands "$@"
+    _describe -t commands 'pebrel agent wait commands' commands "$@"
 }
-(( $+functions[_nebula__config_commands] )) ||
-_nebula__config_commands() {
+(( $+functions[_pebrel__config_commands] )) ||
+_pebrel__config_commands() {
     local commands; commands=(
 'check:Validate a Lua, TOML, or YAML configuration without opening the GUI' \
 'init:Create an annotated Lua configuration template' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula config commands' commands "$@"
+    _describe -t commands 'pebrel config commands' commands "$@"
 }
-(( $+functions[_nebula__config__check_commands] )) ||
-_nebula__config__check_commands() {
+(( $+functions[_pebrel__config__check_commands] )) ||
+_pebrel__config__check_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula config check commands' commands "$@"
+    _describe -t commands 'pebrel config check commands' commands "$@"
 }
-(( $+functions[_nebula__config__help_commands] )) ||
-_nebula__config__help_commands() {
+(( $+functions[_pebrel__config__help_commands] )) ||
+_pebrel__config__help_commands() {
     local commands; commands=(
 'check:Validate a Lua, TOML, or YAML configuration without opening the GUI' \
 'init:Create an annotated Lua configuration template' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula config help commands' commands "$@"
+    _describe -t commands 'pebrel config help commands' commands "$@"
 }
-(( $+functions[_nebula__config__help__check_commands] )) ||
-_nebula__config__help__check_commands() {
+(( $+functions[_pebrel__config__help__check_commands] )) ||
+_pebrel__config__help__check_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula config help check commands' commands "$@"
+    _describe -t commands 'pebrel config help check commands' commands "$@"
 }
-(( $+functions[_nebula__config__help__help_commands] )) ||
-_nebula__config__help__help_commands() {
+(( $+functions[_pebrel__config__help__help_commands] )) ||
+_pebrel__config__help__help_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula config help help commands' commands "$@"
+    _describe -t commands 'pebrel config help help commands' commands "$@"
 }
-(( $+functions[_nebula__config__help__init_commands] )) ||
-_nebula__config__help__init_commands() {
+(( $+functions[_pebrel__config__help__init_commands] )) ||
+_pebrel__config__help__init_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula config help init commands' commands "$@"
+    _describe -t commands 'pebrel config help init commands' commands "$@"
 }
-(( $+functions[_nebula__config__init_commands] )) ||
-_nebula__config__init_commands() {
+(( $+functions[_pebrel__config__init_commands] )) ||
+_pebrel__config__init_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula config init commands' commands "$@"
+    _describe -t commands 'pebrel config init commands' commands "$@"
 }
-(( $+functions[_nebula__ctl_commands] )) ||
-_nebula__ctl_commands() {
+(( $+functions[_pebrel__ctl_commands] )) ||
+_pebrel__ctl_commands() {
     local commands; commands=(
 'describe:Describe the protocol version, runtime version, and available capabilities' \
 'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
 'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
-'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
+'agents:List only panes Pebrel recognizes as AI agents, with semantic state and session identity' \
 'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
 'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
 'agent-get:Resolve one managed agent by stable id or active name' \
@@ -1677,85 +1677,85 @@ _nebula__ctl_commands() {
 'wait:Wait until a pane reaches a semantic task state' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula ctl commands' commands "$@"
+    _describe -t commands 'pebrel ctl commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agent-fork_commands] )) ||
-_nebula__ctl__agent-fork_commands() {
+(( $+functions[_pebrel__ctl__agent-fork_commands] )) ||
+_pebrel__ctl__agent-fork_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agent-fork commands' commands "$@"
+    _describe -t commands 'pebrel ctl agent-fork commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agent-get_commands] )) ||
-_nebula__ctl__agent-get_commands() {
+(( $+functions[_pebrel__ctl__agent-get_commands] )) ||
+_pebrel__ctl__agent-get_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agent-get commands' commands "$@"
+    _describe -t commands 'pebrel ctl agent-get commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agent-paste_commands] )) ||
-_nebula__ctl__agent-paste_commands() {
+(( $+functions[_pebrel__ctl__agent-paste_commands] )) ||
+_pebrel__ctl__agent-paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agent-paste commands' commands "$@"
+    _describe -t commands 'pebrel ctl agent-paste commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agent-prompt_commands] )) ||
-_nebula__ctl__agent-prompt_commands() {
+(( $+functions[_pebrel__ctl__agent-prompt_commands] )) ||
+_pebrel__ctl__agent-prompt_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agent-prompt commands' commands "$@"
+    _describe -t commands 'pebrel ctl agent-prompt commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agent-read_commands] )) ||
-_nebula__ctl__agent-read_commands() {
+(( $+functions[_pebrel__ctl__agent-read_commands] )) ||
+_pebrel__ctl__agent-read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agent-read commands' commands "$@"
+    _describe -t commands 'pebrel ctl agent-read commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agent-start_commands] )) ||
-_nebula__ctl__agent-start_commands() {
+(( $+functions[_pebrel__ctl__agent-start_commands] )) ||
+_pebrel__ctl__agent-start_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agent-start commands' commands "$@"
+    _describe -t commands 'pebrel ctl agent-start commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agent-wait_commands] )) ||
-_nebula__ctl__agent-wait_commands() {
+(( $+functions[_pebrel__ctl__agent-wait_commands] )) ||
+_pebrel__ctl__agent-wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agent-wait commands' commands "$@"
+    _describe -t commands 'pebrel ctl agent-wait commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__agents_commands] )) ||
-_nebula__ctl__agents_commands() {
+(( $+functions[_pebrel__ctl__agents_commands] )) ||
+_pebrel__ctl__agents_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl agents commands' commands "$@"
+    _describe -t commands 'pebrel ctl agents commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__close-pane_commands] )) ||
-_nebula__ctl__close-pane_commands() {
+(( $+functions[_pebrel__ctl__close-pane_commands] )) ||
+_pebrel__ctl__close-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl close-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl close-pane commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__close-tab_commands] )) ||
-_nebula__ctl__close-tab_commands() {
+(( $+functions[_pebrel__ctl__close-tab_commands] )) ||
+_pebrel__ctl__close-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl close-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl close-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__close-window_commands] )) ||
-_nebula__ctl__close-window_commands() {
+(( $+functions[_pebrel__ctl__close-window_commands] )) ||
+_pebrel__ctl__close-window_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl close-window commands' commands "$@"
+    _describe -t commands 'pebrel ctl close-window commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__describe_commands] )) ||
-_nebula__ctl__describe_commands() {
+(( $+functions[_pebrel__ctl__describe_commands] )) ||
+_pebrel__ctl__describe_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl describe commands' commands "$@"
+    _describe -t commands 'pebrel ctl describe commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__exec-pane_commands] )) ||
-_nebula__ctl__exec-pane_commands() {
+(( $+functions[_pebrel__ctl__exec-pane_commands] )) ||
+_pebrel__ctl__exec-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl exec-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl exec-pane commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__focus_commands] )) ||
-_nebula__ctl__focus_commands() {
+(( $+functions[_pebrel__ctl__focus_commands] )) ||
+_pebrel__ctl__focus_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl focus commands' commands "$@"
+    _describe -t commands 'pebrel ctl focus commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help_commands] )) ||
-_nebula__ctl__help_commands() {
+(( $+functions[_pebrel__ctl__help_commands] )) ||
+_pebrel__ctl__help_commands() {
     local commands; commands=(
 'describe:Describe the protocol version, runtime version, and available capabilities' \
 'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
 'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
-'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
+'agents:List only panes Pebrel recognizes as AI agents, with semantic state and session identity' \
 'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
 'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
 'agent-get:Resolve one managed agent by stable id or active name' \
@@ -1785,260 +1785,260 @@ _nebula__ctl__help_commands() {
 'wait:Wait until a pane reaches a semantic task state' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula ctl help commands' commands "$@"
+    _describe -t commands 'pebrel ctl help commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agent-fork_commands] )) ||
-_nebula__ctl__help__agent-fork_commands() {
+(( $+functions[_pebrel__ctl__help__agent-fork_commands] )) ||
+_pebrel__ctl__help__agent-fork_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agent-fork commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agent-fork commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agent-get_commands] )) ||
-_nebula__ctl__help__agent-get_commands() {
+(( $+functions[_pebrel__ctl__help__agent-get_commands] )) ||
+_pebrel__ctl__help__agent-get_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agent-get commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agent-get commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agent-paste_commands] )) ||
-_nebula__ctl__help__agent-paste_commands() {
+(( $+functions[_pebrel__ctl__help__agent-paste_commands] )) ||
+_pebrel__ctl__help__agent-paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agent-paste commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agent-paste commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agent-prompt_commands] )) ||
-_nebula__ctl__help__agent-prompt_commands() {
+(( $+functions[_pebrel__ctl__help__agent-prompt_commands] )) ||
+_pebrel__ctl__help__agent-prompt_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agent-prompt commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agent-prompt commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agent-read_commands] )) ||
-_nebula__ctl__help__agent-read_commands() {
+(( $+functions[_pebrel__ctl__help__agent-read_commands] )) ||
+_pebrel__ctl__help__agent-read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agent-read commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agent-read commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agent-start_commands] )) ||
-_nebula__ctl__help__agent-start_commands() {
+(( $+functions[_pebrel__ctl__help__agent-start_commands] )) ||
+_pebrel__ctl__help__agent-start_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agent-start commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agent-start commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agent-wait_commands] )) ||
-_nebula__ctl__help__agent-wait_commands() {
+(( $+functions[_pebrel__ctl__help__agent-wait_commands] )) ||
+_pebrel__ctl__help__agent-wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agent-wait commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agent-wait commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__agents_commands] )) ||
-_nebula__ctl__help__agents_commands() {
+(( $+functions[_pebrel__ctl__help__agents_commands] )) ||
+_pebrel__ctl__help__agents_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help agents commands' commands "$@"
+    _describe -t commands 'pebrel ctl help agents commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__close-pane_commands] )) ||
-_nebula__ctl__help__close-pane_commands() {
+(( $+functions[_pebrel__ctl__help__close-pane_commands] )) ||
+_pebrel__ctl__help__close-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help close-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl help close-pane commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__close-tab_commands] )) ||
-_nebula__ctl__help__close-tab_commands() {
+(( $+functions[_pebrel__ctl__help__close-tab_commands] )) ||
+_pebrel__ctl__help__close-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help close-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl help close-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__close-window_commands] )) ||
-_nebula__ctl__help__close-window_commands() {
+(( $+functions[_pebrel__ctl__help__close-window_commands] )) ||
+_pebrel__ctl__help__close-window_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help close-window commands' commands "$@"
+    _describe -t commands 'pebrel ctl help close-window commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__describe_commands] )) ||
-_nebula__ctl__help__describe_commands() {
+(( $+functions[_pebrel__ctl__help__describe_commands] )) ||
+_pebrel__ctl__help__describe_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help describe commands' commands "$@"
+    _describe -t commands 'pebrel ctl help describe commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__exec-pane_commands] )) ||
-_nebula__ctl__help__exec-pane_commands() {
+(( $+functions[_pebrel__ctl__help__exec-pane_commands] )) ||
+_pebrel__ctl__help__exec-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help exec-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl help exec-pane commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__focus_commands] )) ||
-_nebula__ctl__help__focus_commands() {
+(( $+functions[_pebrel__ctl__help__focus_commands] )) ||
+_pebrel__ctl__help__focus_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help focus commands' commands "$@"
+    _describe -t commands 'pebrel ctl help focus commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__help_commands] )) ||
-_nebula__ctl__help__help_commands() {
+(( $+functions[_pebrel__ctl__help__help_commands] )) ||
+_pebrel__ctl__help__help_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help help commands' commands "$@"
+    _describe -t commands 'pebrel ctl help help commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__move-tab_commands] )) ||
-_nebula__ctl__help__move-tab_commands() {
+(( $+functions[_pebrel__ctl__help__move-tab_commands] )) ||
+_pebrel__ctl__help__move-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help move-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl help move-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__new-tab_commands] )) ||
-_nebula__ctl__help__new-tab_commands() {
+(( $+functions[_pebrel__ctl__help__new-tab_commands] )) ||
+_pebrel__ctl__help__new-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help new-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl help new-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__new-window_commands] )) ||
-_nebula__ctl__help__new-window_commands() {
+(( $+functions[_pebrel__ctl__help__new-window_commands] )) ||
+_pebrel__ctl__help__new-window_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help new-window commands' commands "$@"
+    _describe -t commands 'pebrel ctl help new-window commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__orchestrate_commands] )) ||
-_nebula__ctl__help__orchestrate_commands() {
+(( $+functions[_pebrel__ctl__help__orchestrate_commands] )) ||
+_pebrel__ctl__help__orchestrate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help orchestrate commands' commands "$@"
+    _describe -t commands 'pebrel ctl help orchestrate commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__paste_commands] )) ||
-_nebula__ctl__help__paste_commands() {
+(( $+functions[_pebrel__ctl__help__paste_commands] )) ||
+_pebrel__ctl__help__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help paste commands' commands "$@"
+    _describe -t commands 'pebrel ctl help paste commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__procs_commands] )) ||
-_nebula__ctl__help__procs_commands() {
+(( $+functions[_pebrel__ctl__help__procs_commands] )) ||
+_pebrel__ctl__help__procs_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help procs commands' commands "$@"
+    _describe -t commands 'pebrel ctl help procs commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__prompt_commands] )) ||
-_nebula__ctl__help__prompt_commands() {
+(( $+functions[_pebrel__ctl__help__prompt_commands] )) ||
+_pebrel__ctl__help__prompt_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help prompt commands' commands "$@"
+    _describe -t commands 'pebrel ctl help prompt commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__read_commands] )) ||
-_nebula__ctl__help__read_commands() {
+(( $+functions[_pebrel__ctl__help__read_commands] )) ||
+_pebrel__ctl__help__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help read commands' commands "$@"
+    _describe -t commands 'pebrel ctl help read commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__rename-tab_commands] )) ||
-_nebula__ctl__help__rename-tab_commands() {
+(( $+functions[_pebrel__ctl__help__rename-tab_commands] )) ||
+_pebrel__ctl__help__rename-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help rename-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl help rename-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__resize-pane_commands] )) ||
-_nebula__ctl__help__resize-pane_commands() {
+(( $+functions[_pebrel__ctl__help__resize-pane_commands] )) ||
+_pebrel__ctl__help__resize-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help resize-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl help resize-pane commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__run_commands] )) ||
-_nebula__ctl__help__run_commands() {
+(( $+functions[_pebrel__ctl__help__run_commands] )) ||
+_pebrel__ctl__help__run_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help run commands' commands "$@"
+    _describe -t commands 'pebrel ctl help run commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__send-key_commands] )) ||
-_nebula__ctl__help__send-key_commands() {
+(( $+functions[_pebrel__ctl__help__send-key_commands] )) ||
+_pebrel__ctl__help__send-key_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help send-key commands' commands "$@"
+    _describe -t commands 'pebrel ctl help send-key commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__snapshot_commands] )) ||
-_nebula__ctl__help__snapshot_commands() {
+(( $+functions[_pebrel__ctl__help__snapshot_commands] )) ||
+_pebrel__ctl__help__snapshot_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help snapshot commands' commands "$@"
+    _describe -t commands 'pebrel ctl help snapshot commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__split_commands] )) ||
-_nebula__ctl__help__split_commands() {
+(( $+functions[_pebrel__ctl__help__split_commands] )) ||
+_pebrel__ctl__help__split_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help split commands' commands "$@"
+    _describe -t commands 'pebrel ctl help split commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__subscribe_commands] )) ||
-_nebula__ctl__help__subscribe_commands() {
+(( $+functions[_pebrel__ctl__help__subscribe_commands] )) ||
+_pebrel__ctl__help__subscribe_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help subscribe commands' commands "$@"
+    _describe -t commands 'pebrel ctl help subscribe commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__wait_commands] )) ||
-_nebula__ctl__help__wait_commands() {
+(( $+functions[_pebrel__ctl__help__wait_commands] )) ||
+_pebrel__ctl__help__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help wait commands' commands "$@"
+    _describe -t commands 'pebrel ctl help wait commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__help__zoom-pane_commands] )) ||
-_nebula__ctl__help__zoom-pane_commands() {
+(( $+functions[_pebrel__ctl__help__zoom-pane_commands] )) ||
+_pebrel__ctl__help__zoom-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl help zoom-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl help zoom-pane commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__move-tab_commands] )) ||
-_nebula__ctl__move-tab_commands() {
+(( $+functions[_pebrel__ctl__move-tab_commands] )) ||
+_pebrel__ctl__move-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl move-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl move-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__new-tab_commands] )) ||
-_nebula__ctl__new-tab_commands() {
+(( $+functions[_pebrel__ctl__new-tab_commands] )) ||
+_pebrel__ctl__new-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl new-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl new-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__new-window_commands] )) ||
-_nebula__ctl__new-window_commands() {
+(( $+functions[_pebrel__ctl__new-window_commands] )) ||
+_pebrel__ctl__new-window_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl new-window commands' commands "$@"
+    _describe -t commands 'pebrel ctl new-window commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__orchestrate_commands] )) ||
-_nebula__ctl__orchestrate_commands() {
+(( $+functions[_pebrel__ctl__orchestrate_commands] )) ||
+_pebrel__ctl__orchestrate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl orchestrate commands' commands "$@"
+    _describe -t commands 'pebrel ctl orchestrate commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__paste_commands] )) ||
-_nebula__ctl__paste_commands() {
+(( $+functions[_pebrel__ctl__paste_commands] )) ||
+_pebrel__ctl__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl paste commands' commands "$@"
+    _describe -t commands 'pebrel ctl paste commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__procs_commands] )) ||
-_nebula__ctl__procs_commands() {
+(( $+functions[_pebrel__ctl__procs_commands] )) ||
+_pebrel__ctl__procs_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl procs commands' commands "$@"
+    _describe -t commands 'pebrel ctl procs commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__prompt_commands] )) ||
-_nebula__ctl__prompt_commands() {
+(( $+functions[_pebrel__ctl__prompt_commands] )) ||
+_pebrel__ctl__prompt_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl prompt commands' commands "$@"
+    _describe -t commands 'pebrel ctl prompt commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__read_commands] )) ||
-_nebula__ctl__read_commands() {
+(( $+functions[_pebrel__ctl__read_commands] )) ||
+_pebrel__ctl__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl read commands' commands "$@"
+    _describe -t commands 'pebrel ctl read commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__rename-tab_commands] )) ||
-_nebula__ctl__rename-tab_commands() {
+(( $+functions[_pebrel__ctl__rename-tab_commands] )) ||
+_pebrel__ctl__rename-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl rename-tab commands' commands "$@"
+    _describe -t commands 'pebrel ctl rename-tab commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__resize-pane_commands] )) ||
-_nebula__ctl__resize-pane_commands() {
+(( $+functions[_pebrel__ctl__resize-pane_commands] )) ||
+_pebrel__ctl__resize-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl resize-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl resize-pane commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__run_commands] )) ||
-_nebula__ctl__run_commands() {
+(( $+functions[_pebrel__ctl__run_commands] )) ||
+_pebrel__ctl__run_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl run commands' commands "$@"
+    _describe -t commands 'pebrel ctl run commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__send-key_commands] )) ||
-_nebula__ctl__send-key_commands() {
+(( $+functions[_pebrel__ctl__send-key_commands] )) ||
+_pebrel__ctl__send-key_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl send-key commands' commands "$@"
+    _describe -t commands 'pebrel ctl send-key commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__snapshot_commands] )) ||
-_nebula__ctl__snapshot_commands() {
+(( $+functions[_pebrel__ctl__snapshot_commands] )) ||
+_pebrel__ctl__snapshot_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl snapshot commands' commands "$@"
+    _describe -t commands 'pebrel ctl snapshot commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__split_commands] )) ||
-_nebula__ctl__split_commands() {
+(( $+functions[_pebrel__ctl__split_commands] )) ||
+_pebrel__ctl__split_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl split commands' commands "$@"
+    _describe -t commands 'pebrel ctl split commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__subscribe_commands] )) ||
-_nebula__ctl__subscribe_commands() {
+(( $+functions[_pebrel__ctl__subscribe_commands] )) ||
+_pebrel__ctl__subscribe_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl subscribe commands' commands "$@"
+    _describe -t commands 'pebrel ctl subscribe commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__wait_commands] )) ||
-_nebula__ctl__wait_commands() {
+(( $+functions[_pebrel__ctl__wait_commands] )) ||
+_pebrel__ctl__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl wait commands' commands "$@"
+    _describe -t commands 'pebrel ctl wait commands' commands "$@"
 }
-(( $+functions[_nebula__ctl__zoom-pane_commands] )) ||
-_nebula__ctl__zoom-pane_commands() {
+(( $+functions[_pebrel__ctl__zoom-pane_commands] )) ||
+_pebrel__ctl__zoom-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ctl zoom-pane commands' commands "$@"
+    _describe -t commands 'pebrel ctl zoom-pane commands' commands "$@"
 }
-(( $+functions[_nebula__env_commands] )) ||
-_nebula__env_commands() {
+(( $+functions[_pebrel__env_commands] )) ||
+_pebrel__env_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula env commands' commands "$@"
+    _describe -t commands 'pebrel env commands' commands "$@"
 }
-(( $+functions[_nebula__help_commands] )) ||
-_nebula__help_commands() {
+(( $+functions[_pebrel__help_commands] )) ||
+_pebrel__help_commands() {
     local commands; commands=(
 'ctl:Agent-oriented terminal control\: split panes, run commands, start Codex/Claude, send prompts, wait for state changes, and read verified terminal output' \
 'env:Report this pane'\''s terminal identity, the control-plane path, and every command available to it. Answers even with no runtime reachable, so an agent can always discover what it has instead of guessing' \
@@ -2047,16 +2047,16 @@ _nebula__help_commands() {
 'pane:Inspect and drive terminal panes\: list, read, send, paste, wait, and change layout' \
 'agent:Inspect and drive the AI agents running in panes\: list, send, read, wait' \
 'migrate:Migrate the configuration file' \
-'config:Validate or create the Nebula configuration' \
+'config:Validate or create the Pebrel configuration' \
 'notify-test:Test system notification (toast) delivery' \
-'setup-ai:Install (or --remove) AI hooks plus the Nebula Runtime Skill for Codex and Claude Code' \
-'ssh:SSH with Nebula shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
+'setup-ai:Install (or --remove) AI hooks plus the Pebrel Runtime Skill for Codex and Claude Code' \
+'ssh:SSH with Pebrel shell integration bootstrapped on the remote host, so tab icons / spinner / cwd track the program running over the connection (claude, vim, cargo…). All arguments are forwarded to the system \`ssh\`' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula help commands' commands "$@"
+    _describe -t commands 'pebrel help commands' commands "$@"
 }
-(( $+functions[_nebula__help__agent_commands] )) ||
-_nebula__help__agent_commands() {
+(( $+functions[_pebrel__help__agent_commands] )) ||
+_pebrel__help__agent_commands() {
     local commands; commands=(
 'list:List the panes running an AI CLI, with session identity and generation' \
 'send:Hand one task to an agent and submit it' \
@@ -2065,63 +2065,63 @@ _nebula__help__agent_commands() {
 'read:Read the tail of what an agent printed' \
 'wait:Block until an agent'\''s turn ends' \
     )
-    _describe -t commands 'nebula help agent commands' commands "$@"
+    _describe -t commands 'pebrel help agent commands' commands "$@"
 }
-(( $+functions[_nebula__help__agent__delegate_commands] )) ||
-_nebula__help__agent__delegate_commands() {
+(( $+functions[_pebrel__help__agent__delegate_commands] )) ||
+_pebrel__help__agent__delegate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help agent delegate commands' commands "$@"
+    _describe -t commands 'pebrel help agent delegate commands' commands "$@"
 }
-(( $+functions[_nebula__help__agent__list_commands] )) ||
-_nebula__help__agent__list_commands() {
+(( $+functions[_pebrel__help__agent__list_commands] )) ||
+_pebrel__help__agent__list_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help agent list commands' commands "$@"
+    _describe -t commands 'pebrel help agent list commands' commands "$@"
 }
-(( $+functions[_nebula__help__agent__paste_commands] )) ||
-_nebula__help__agent__paste_commands() {
+(( $+functions[_pebrel__help__agent__paste_commands] )) ||
+_pebrel__help__agent__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help agent paste commands' commands "$@"
+    _describe -t commands 'pebrel help agent paste commands' commands "$@"
 }
-(( $+functions[_nebula__help__agent__read_commands] )) ||
-_nebula__help__agent__read_commands() {
+(( $+functions[_pebrel__help__agent__read_commands] )) ||
+_pebrel__help__agent__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help agent read commands' commands "$@"
+    _describe -t commands 'pebrel help agent read commands' commands "$@"
 }
-(( $+functions[_nebula__help__agent__send_commands] )) ||
-_nebula__help__agent__send_commands() {
+(( $+functions[_pebrel__help__agent__send_commands] )) ||
+_pebrel__help__agent__send_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help agent send commands' commands "$@"
+    _describe -t commands 'pebrel help agent send commands' commands "$@"
 }
-(( $+functions[_nebula__help__agent__wait_commands] )) ||
-_nebula__help__agent__wait_commands() {
+(( $+functions[_pebrel__help__agent__wait_commands] )) ||
+_pebrel__help__agent__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help agent wait commands' commands "$@"
+    _describe -t commands 'pebrel help agent wait commands' commands "$@"
 }
-(( $+functions[_nebula__help__config_commands] )) ||
-_nebula__help__config_commands() {
+(( $+functions[_pebrel__help__config_commands] )) ||
+_pebrel__help__config_commands() {
     local commands; commands=(
 'check:Validate a Lua, TOML, or YAML configuration without opening the GUI' \
 'init:Create an annotated Lua configuration template' \
     )
-    _describe -t commands 'nebula help config commands' commands "$@"
+    _describe -t commands 'pebrel help config commands' commands "$@"
 }
-(( $+functions[_nebula__help__config__check_commands] )) ||
-_nebula__help__config__check_commands() {
+(( $+functions[_pebrel__help__config__check_commands] )) ||
+_pebrel__help__config__check_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help config check commands' commands "$@"
+    _describe -t commands 'pebrel help config check commands' commands "$@"
 }
-(( $+functions[_nebula__help__config__init_commands] )) ||
-_nebula__help__config__init_commands() {
+(( $+functions[_pebrel__help__config__init_commands] )) ||
+_pebrel__help__config__init_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help config init commands' commands "$@"
+    _describe -t commands 'pebrel help config init commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl_commands] )) ||
-_nebula__help__ctl_commands() {
+(( $+functions[_pebrel__help__ctl_commands] )) ||
+_pebrel__help__ctl_commands() {
     local commands; commands=(
 'describe:Describe the protocol version, runtime version, and available capabilities' \
 'snapshot:Read the authoritative window, tab, pane, and task-state projection' \
 'orchestrate:Execute one typed multi-step terminal workflow in a single Runtime request' \
-'agents:List only panes Nebula recognizes as AI agents, with semantic state and session identity' \
+'agents:List only panes Pebrel recognizes as AI agents, with semantic state and session identity' \
 'agent-start:Start a verified AI CLI in a new terminal tab and assign a stable name' \
 'agent-fork:Create an isolated Git worktree, then start a named AI CLI in that checkout' \
 'agent-get:Resolve one managed agent by stable id or active name' \
@@ -2150,185 +2150,185 @@ _nebula__help__ctl_commands() {
 'exec-pane:Execute argv as an independent non-TTY child and capture stdout/stderr separately' \
 'wait:Wait until a pane reaches a semantic task state' \
     )
-    _describe -t commands 'nebula help ctl commands' commands "$@"
+    _describe -t commands 'pebrel help ctl commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agent-fork_commands] )) ||
-_nebula__help__ctl__agent-fork_commands() {
+(( $+functions[_pebrel__help__ctl__agent-fork_commands] )) ||
+_pebrel__help__ctl__agent-fork_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agent-fork commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agent-fork commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agent-get_commands] )) ||
-_nebula__help__ctl__agent-get_commands() {
+(( $+functions[_pebrel__help__ctl__agent-get_commands] )) ||
+_pebrel__help__ctl__agent-get_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agent-get commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agent-get commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agent-paste_commands] )) ||
-_nebula__help__ctl__agent-paste_commands() {
+(( $+functions[_pebrel__help__ctl__agent-paste_commands] )) ||
+_pebrel__help__ctl__agent-paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agent-paste commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agent-paste commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agent-prompt_commands] )) ||
-_nebula__help__ctl__agent-prompt_commands() {
+(( $+functions[_pebrel__help__ctl__agent-prompt_commands] )) ||
+_pebrel__help__ctl__agent-prompt_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agent-prompt commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agent-prompt commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agent-read_commands] )) ||
-_nebula__help__ctl__agent-read_commands() {
+(( $+functions[_pebrel__help__ctl__agent-read_commands] )) ||
+_pebrel__help__ctl__agent-read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agent-read commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agent-read commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agent-start_commands] )) ||
-_nebula__help__ctl__agent-start_commands() {
+(( $+functions[_pebrel__help__ctl__agent-start_commands] )) ||
+_pebrel__help__ctl__agent-start_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agent-start commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agent-start commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agent-wait_commands] )) ||
-_nebula__help__ctl__agent-wait_commands() {
+(( $+functions[_pebrel__help__ctl__agent-wait_commands] )) ||
+_pebrel__help__ctl__agent-wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agent-wait commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agent-wait commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__agents_commands] )) ||
-_nebula__help__ctl__agents_commands() {
+(( $+functions[_pebrel__help__ctl__agents_commands] )) ||
+_pebrel__help__ctl__agents_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl agents commands' commands "$@"
+    _describe -t commands 'pebrel help ctl agents commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__close-pane_commands] )) ||
-_nebula__help__ctl__close-pane_commands() {
+(( $+functions[_pebrel__help__ctl__close-pane_commands] )) ||
+_pebrel__help__ctl__close-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl close-pane commands' commands "$@"
+    _describe -t commands 'pebrel help ctl close-pane commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__close-tab_commands] )) ||
-_nebula__help__ctl__close-tab_commands() {
+(( $+functions[_pebrel__help__ctl__close-tab_commands] )) ||
+_pebrel__help__ctl__close-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl close-tab commands' commands "$@"
+    _describe -t commands 'pebrel help ctl close-tab commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__close-window_commands] )) ||
-_nebula__help__ctl__close-window_commands() {
+(( $+functions[_pebrel__help__ctl__close-window_commands] )) ||
+_pebrel__help__ctl__close-window_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl close-window commands' commands "$@"
+    _describe -t commands 'pebrel help ctl close-window commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__describe_commands] )) ||
-_nebula__help__ctl__describe_commands() {
+(( $+functions[_pebrel__help__ctl__describe_commands] )) ||
+_pebrel__help__ctl__describe_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl describe commands' commands "$@"
+    _describe -t commands 'pebrel help ctl describe commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__exec-pane_commands] )) ||
-_nebula__help__ctl__exec-pane_commands() {
+(( $+functions[_pebrel__help__ctl__exec-pane_commands] )) ||
+_pebrel__help__ctl__exec-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl exec-pane commands' commands "$@"
+    _describe -t commands 'pebrel help ctl exec-pane commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__focus_commands] )) ||
-_nebula__help__ctl__focus_commands() {
+(( $+functions[_pebrel__help__ctl__focus_commands] )) ||
+_pebrel__help__ctl__focus_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl focus commands' commands "$@"
+    _describe -t commands 'pebrel help ctl focus commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__move-tab_commands] )) ||
-_nebula__help__ctl__move-tab_commands() {
+(( $+functions[_pebrel__help__ctl__move-tab_commands] )) ||
+_pebrel__help__ctl__move-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl move-tab commands' commands "$@"
+    _describe -t commands 'pebrel help ctl move-tab commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__new-tab_commands] )) ||
-_nebula__help__ctl__new-tab_commands() {
+(( $+functions[_pebrel__help__ctl__new-tab_commands] )) ||
+_pebrel__help__ctl__new-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl new-tab commands' commands "$@"
+    _describe -t commands 'pebrel help ctl new-tab commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__new-window_commands] )) ||
-_nebula__help__ctl__new-window_commands() {
+(( $+functions[_pebrel__help__ctl__new-window_commands] )) ||
+_pebrel__help__ctl__new-window_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl new-window commands' commands "$@"
+    _describe -t commands 'pebrel help ctl new-window commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__orchestrate_commands] )) ||
-_nebula__help__ctl__orchestrate_commands() {
+(( $+functions[_pebrel__help__ctl__orchestrate_commands] )) ||
+_pebrel__help__ctl__orchestrate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl orchestrate commands' commands "$@"
+    _describe -t commands 'pebrel help ctl orchestrate commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__paste_commands] )) ||
-_nebula__help__ctl__paste_commands() {
+(( $+functions[_pebrel__help__ctl__paste_commands] )) ||
+_pebrel__help__ctl__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl paste commands' commands "$@"
+    _describe -t commands 'pebrel help ctl paste commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__procs_commands] )) ||
-_nebula__help__ctl__procs_commands() {
+(( $+functions[_pebrel__help__ctl__procs_commands] )) ||
+_pebrel__help__ctl__procs_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl procs commands' commands "$@"
+    _describe -t commands 'pebrel help ctl procs commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__prompt_commands] )) ||
-_nebula__help__ctl__prompt_commands() {
+(( $+functions[_pebrel__help__ctl__prompt_commands] )) ||
+_pebrel__help__ctl__prompt_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl prompt commands' commands "$@"
+    _describe -t commands 'pebrel help ctl prompt commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__read_commands] )) ||
-_nebula__help__ctl__read_commands() {
+(( $+functions[_pebrel__help__ctl__read_commands] )) ||
+_pebrel__help__ctl__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl read commands' commands "$@"
+    _describe -t commands 'pebrel help ctl read commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__rename-tab_commands] )) ||
-_nebula__help__ctl__rename-tab_commands() {
+(( $+functions[_pebrel__help__ctl__rename-tab_commands] )) ||
+_pebrel__help__ctl__rename-tab_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl rename-tab commands' commands "$@"
+    _describe -t commands 'pebrel help ctl rename-tab commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__resize-pane_commands] )) ||
-_nebula__help__ctl__resize-pane_commands() {
+(( $+functions[_pebrel__help__ctl__resize-pane_commands] )) ||
+_pebrel__help__ctl__resize-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl resize-pane commands' commands "$@"
+    _describe -t commands 'pebrel help ctl resize-pane commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__run_commands] )) ||
-_nebula__help__ctl__run_commands() {
+(( $+functions[_pebrel__help__ctl__run_commands] )) ||
+_pebrel__help__ctl__run_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl run commands' commands "$@"
+    _describe -t commands 'pebrel help ctl run commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__send-key_commands] )) ||
-_nebula__help__ctl__send-key_commands() {
+(( $+functions[_pebrel__help__ctl__send-key_commands] )) ||
+_pebrel__help__ctl__send-key_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl send-key commands' commands "$@"
+    _describe -t commands 'pebrel help ctl send-key commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__snapshot_commands] )) ||
-_nebula__help__ctl__snapshot_commands() {
+(( $+functions[_pebrel__help__ctl__snapshot_commands] )) ||
+_pebrel__help__ctl__snapshot_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl snapshot commands' commands "$@"
+    _describe -t commands 'pebrel help ctl snapshot commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__split_commands] )) ||
-_nebula__help__ctl__split_commands() {
+(( $+functions[_pebrel__help__ctl__split_commands] )) ||
+_pebrel__help__ctl__split_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl split commands' commands "$@"
+    _describe -t commands 'pebrel help ctl split commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__subscribe_commands] )) ||
-_nebula__help__ctl__subscribe_commands() {
+(( $+functions[_pebrel__help__ctl__subscribe_commands] )) ||
+_pebrel__help__ctl__subscribe_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl subscribe commands' commands "$@"
+    _describe -t commands 'pebrel help ctl subscribe commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__wait_commands] )) ||
-_nebula__help__ctl__wait_commands() {
+(( $+functions[_pebrel__help__ctl__wait_commands] )) ||
+_pebrel__help__ctl__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl wait commands' commands "$@"
+    _describe -t commands 'pebrel help ctl wait commands' commands "$@"
 }
-(( $+functions[_nebula__help__ctl__zoom-pane_commands] )) ||
-_nebula__help__ctl__zoom-pane_commands() {
+(( $+functions[_pebrel__help__ctl__zoom-pane_commands] )) ||
+_pebrel__help__ctl__zoom-pane_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ctl zoom-pane commands' commands "$@"
+    _describe -t commands 'pebrel help ctl zoom-pane commands' commands "$@"
 }
-(( $+functions[_nebula__help__env_commands] )) ||
-_nebula__help__env_commands() {
+(( $+functions[_pebrel__help__env_commands] )) ||
+_pebrel__help__env_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help env commands' commands "$@"
+    _describe -t commands 'pebrel help env commands' commands "$@"
 }
-(( $+functions[_nebula__help__help_commands] )) ||
-_nebula__help__help_commands() {
+(( $+functions[_pebrel__help__help_commands] )) ||
+_pebrel__help__help_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help help commands' commands "$@"
+    _describe -t commands 'pebrel help help commands' commands "$@"
 }
-(( $+functions[_nebula__help__migrate_commands] )) ||
-_nebula__help__migrate_commands() {
+(( $+functions[_pebrel__help__migrate_commands] )) ||
+_pebrel__help__migrate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help migrate commands' commands "$@"
+    _describe -t commands 'pebrel help migrate commands' commands "$@"
 }
-(( $+functions[_nebula__help__notify-test_commands] )) ||
-_nebula__help__notify-test_commands() {
+(( $+functions[_pebrel__help__notify-test_commands] )) ||
+_pebrel__help__notify-test_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help notify-test commands' commands "$@"
+    _describe -t commands 'pebrel help notify-test commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane_commands] )) ||
-_nebula__help__pane_commands() {
+(( $+functions[_pebrel__help__pane_commands] )) ||
+_pebrel__help__pane_commands() {
     local commands; commands=(
 'list:List every pane with its id, task state, cwd, and Git branch' \
 'read:Read the tail of a pane'\''s real terminal buffer' \
@@ -2340,137 +2340,111 @@ _nebula__help__pane_commands() {
 'zoom:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
 'resize:Set this pane'\''s share of its direct parent split' \
     )
-    _describe -t commands 'nebula help pane commands' commands "$@"
+    _describe -t commands 'pebrel help pane commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__close_commands] )) ||
-_nebula__help__pane__close_commands() {
+(( $+functions[_pebrel__help__pane__close_commands] )) ||
+_pebrel__help__pane__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane close commands' commands "$@"
+    _describe -t commands 'pebrel help pane close commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__exec_commands] )) ||
-_nebula__help__pane__exec_commands() {
+(( $+functions[_pebrel__help__pane__exec_commands] )) ||
+_pebrel__help__pane__exec_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane exec commands' commands "$@"
+    _describe -t commands 'pebrel help pane exec commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__list_commands] )) ||
-_nebula__help__pane__list_commands() {
+(( $+functions[_pebrel__help__pane__list_commands] )) ||
+_pebrel__help__pane__list_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane list commands' commands "$@"
+    _describe -t commands 'pebrel help pane list commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__paste_commands] )) ||
-_nebula__help__pane__paste_commands() {
+(( $+functions[_pebrel__help__pane__paste_commands] )) ||
+_pebrel__help__pane__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane paste commands' commands "$@"
+    _describe -t commands 'pebrel help pane paste commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__read_commands] )) ||
-_nebula__help__pane__read_commands() {
+(( $+functions[_pebrel__help__pane__read_commands] )) ||
+_pebrel__help__pane__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane read commands' commands "$@"
+    _describe -t commands 'pebrel help pane read commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__resize_commands] )) ||
-_nebula__help__pane__resize_commands() {
+(( $+functions[_pebrel__help__pane__resize_commands] )) ||
+_pebrel__help__pane__resize_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane resize commands' commands "$@"
+    _describe -t commands 'pebrel help pane resize commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__send_commands] )) ||
-_nebula__help__pane__send_commands() {
+(( $+functions[_pebrel__help__pane__send_commands] )) ||
+_pebrel__help__pane__send_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane send commands' commands "$@"
+    _describe -t commands 'pebrel help pane send commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__wait_commands] )) ||
-_nebula__help__pane__wait_commands() {
+(( $+functions[_pebrel__help__pane__wait_commands] )) ||
+_pebrel__help__pane__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane wait commands' commands "$@"
+    _describe -t commands 'pebrel help pane wait commands' commands "$@"
 }
-(( $+functions[_nebula__help__pane__zoom_commands] )) ||
-_nebula__help__pane__zoom_commands() {
+(( $+functions[_pebrel__help__pane__zoom_commands] )) ||
+_pebrel__help__pane__zoom_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help pane zoom commands' commands "$@"
+    _describe -t commands 'pebrel help pane zoom commands' commands "$@"
 }
-(( $+functions[_nebula__help__setup-ai_commands] )) ||
-_nebula__help__setup-ai_commands() {
+(( $+functions[_pebrel__help__setup-ai_commands] )) ||
+_pebrel__help__setup-ai_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help setup-ai commands' commands "$@"
+    _describe -t commands 'pebrel help setup-ai commands' commands "$@"
 }
-(( $+functions[_nebula__help__ssh_commands] )) ||
-_nebula__help__ssh_commands() {
+(( $+functions[_pebrel__help__ssh_commands] )) ||
+_pebrel__help__ssh_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help ssh commands' commands "$@"
+    _describe -t commands 'pebrel help ssh commands' commands "$@"
 }
-(( $+functions[_nebula__help__tab_commands] )) ||
-_nebula__help__tab_commands() {
+(( $+functions[_pebrel__help__tab_commands] )) ||
+_pebrel__help__tab_commands() {
     local commands; commands=(
 'close:Close an idle tab' \
 'rename:Set a tab'\''s custom name. Pass an empty name to restore the generated title' \
 'move:Move a tab to another index in the same window' \
     )
-    _describe -t commands 'nebula help tab commands' commands "$@"
+    _describe -t commands 'pebrel help tab commands' commands "$@"
 }
-(( $+functions[_nebula__help__tab__close_commands] )) ||
-_nebula__help__tab__close_commands() {
+(( $+functions[_pebrel__help__tab__close_commands] )) ||
+_pebrel__help__tab__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help tab close commands' commands "$@"
+    _describe -t commands 'pebrel help tab close commands' commands "$@"
 }
-(( $+functions[_nebula__help__tab__move_commands] )) ||
-_nebula__help__tab__move_commands() {
+(( $+functions[_pebrel__help__tab__move_commands] )) ||
+_pebrel__help__tab__move_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help tab move commands' commands "$@"
+    _describe -t commands 'pebrel help tab move commands' commands "$@"
 }
-(( $+functions[_nebula__help__tab__rename_commands] )) ||
-_nebula__help__tab__rename_commands() {
+(( $+functions[_pebrel__help__tab__rename_commands] )) ||
+_pebrel__help__tab__rename_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help tab rename commands' commands "$@"
+    _describe -t commands 'pebrel help tab rename commands' commands "$@"
 }
-(( $+functions[_nebula__help__window_commands] )) ||
-_nebula__help__window_commands() {
+(( $+functions[_pebrel__help__window_commands] )) ||
+_pebrel__help__window_commands() {
     local commands; commands=(
 'close:Close an idle window. Busy panes require confirmation in the GUI instead' \
     )
-    _describe -t commands 'nebula help window commands' commands "$@"
+    _describe -t commands 'pebrel help window commands' commands "$@"
 }
-(( $+functions[_nebula__help__window__close_commands] )) ||
-_nebula__help__window__close_commands() {
+(( $+functions[_pebrel__help__window__close_commands] )) ||
+_pebrel__help__window__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula help window close commands' commands "$@"
+    _describe -t commands 'pebrel help window close commands' commands "$@"
 }
-(( $+functions[_nebula__migrate_commands] )) ||
-_nebula__migrate_commands() {
+(( $+functions[_pebrel__migrate_commands] )) ||
+_pebrel__migrate_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula migrate commands' commands "$@"
+    _describe -t commands 'pebrel migrate commands' commands "$@"
 }
-(( $+functions[_nebula__notify-test_commands] )) ||
-_nebula__notify-test_commands() {
+(( $+functions[_pebrel__notify-test_commands] )) ||
+_pebrel__notify-test_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula notify-test commands' commands "$@"
+    _describe -t commands 'pebrel notify-test commands' commands "$@"
 }
-(( $+functions[_nebula__pane_commands] )) ||
-_nebula__pane_commands() {
-    local commands; commands=(
-'list:List every pane with its id, task state, cwd, and Git branch' \
-'read:Read the tail of a pane'\''s real terminal buffer' \
-'send:Write one line into a pane, submitting it with Enter by default' \
-'paste:Paste bounded UTF-8 text as one bracketed block' \
-'wait:Block until a pane reaches a semantic task state' \
-'exec:Execute an argv vector as an independent non-TTY child and capture both streams' \
-'close:Close an idle pane' \
-'zoom:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
-'resize:Set this pane'\''s share of its direct parent split' \
-'help:Print this message or the help of the given subcommand(s)' \
-    )
-    _describe -t commands 'nebula pane commands' commands "$@"
-}
-(( $+functions[_nebula__pane__close_commands] )) ||
-_nebula__pane__close_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula pane close commands' commands "$@"
-}
-(( $+functions[_nebula__pane__exec_commands] )) ||
-_nebula__pane__exec_commands() {
-    local commands; commands=()
-    _describe -t commands 'nebula pane exec commands' commands "$@"
-}
-(( $+functions[_nebula__pane__help_commands] )) ||
-_nebula__pane__help_commands() {
+(( $+functions[_pebrel__pane_commands] )) ||
+_pebrel__pane_commands() {
     local commands; commands=(
 'list:List every pane with its id, task state, cwd, and Git branch' \
 'read:Read the tail of a pane'\''s real terminal buffer' \
@@ -2483,192 +2457,218 @@ _nebula__pane__help_commands() {
 'resize:Set this pane'\''s share of its direct parent split' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula pane help commands' commands "$@"
+    _describe -t commands 'pebrel pane commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__close_commands] )) ||
-_nebula__pane__help__close_commands() {
+(( $+functions[_pebrel__pane__close_commands] )) ||
+_pebrel__pane__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help close commands' commands "$@"
+    _describe -t commands 'pebrel pane close commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__exec_commands] )) ||
-_nebula__pane__help__exec_commands() {
+(( $+functions[_pebrel__pane__exec_commands] )) ||
+_pebrel__pane__exec_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help exec commands' commands "$@"
+    _describe -t commands 'pebrel pane exec commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__help_commands] )) ||
-_nebula__pane__help__help_commands() {
+(( $+functions[_pebrel__pane__help_commands] )) ||
+_pebrel__pane__help_commands() {
+    local commands; commands=(
+'list:List every pane with its id, task state, cwd, and Git branch' \
+'read:Read the tail of a pane'\''s real terminal buffer' \
+'send:Write one line into a pane, submitting it with Enter by default' \
+'paste:Paste bounded UTF-8 text as one bracketed block' \
+'wait:Block until a pane reaches a semantic task state' \
+'exec:Execute an argv vector as an independent non-TTY child and capture both streams' \
+'close:Close an idle pane' \
+'zoom:Explicitly enable or disable focused-pane zoom for the pane'\''s tab' \
+'resize:Set this pane'\''s share of its direct parent split' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'pebrel pane help commands' commands "$@"
+}
+(( $+functions[_pebrel__pane__help__close_commands] )) ||
+_pebrel__pane__help__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help help commands' commands "$@"
+    _describe -t commands 'pebrel pane help close commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__list_commands] )) ||
-_nebula__pane__help__list_commands() {
+(( $+functions[_pebrel__pane__help__exec_commands] )) ||
+_pebrel__pane__help__exec_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help list commands' commands "$@"
+    _describe -t commands 'pebrel pane help exec commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__paste_commands] )) ||
-_nebula__pane__help__paste_commands() {
+(( $+functions[_pebrel__pane__help__help_commands] )) ||
+_pebrel__pane__help__help_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help paste commands' commands "$@"
+    _describe -t commands 'pebrel pane help help commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__read_commands] )) ||
-_nebula__pane__help__read_commands() {
+(( $+functions[_pebrel__pane__help__list_commands] )) ||
+_pebrel__pane__help__list_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help read commands' commands "$@"
+    _describe -t commands 'pebrel pane help list commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__resize_commands] )) ||
-_nebula__pane__help__resize_commands() {
+(( $+functions[_pebrel__pane__help__paste_commands] )) ||
+_pebrel__pane__help__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help resize commands' commands "$@"
+    _describe -t commands 'pebrel pane help paste commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__send_commands] )) ||
-_nebula__pane__help__send_commands() {
+(( $+functions[_pebrel__pane__help__read_commands] )) ||
+_pebrel__pane__help__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help send commands' commands "$@"
+    _describe -t commands 'pebrel pane help read commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__wait_commands] )) ||
-_nebula__pane__help__wait_commands() {
+(( $+functions[_pebrel__pane__help__resize_commands] )) ||
+_pebrel__pane__help__resize_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help wait commands' commands "$@"
+    _describe -t commands 'pebrel pane help resize commands' commands "$@"
 }
-(( $+functions[_nebula__pane__help__zoom_commands] )) ||
-_nebula__pane__help__zoom_commands() {
+(( $+functions[_pebrel__pane__help__send_commands] )) ||
+_pebrel__pane__help__send_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane help zoom commands' commands "$@"
+    _describe -t commands 'pebrel pane help send commands' commands "$@"
 }
-(( $+functions[_nebula__pane__list_commands] )) ||
-_nebula__pane__list_commands() {
+(( $+functions[_pebrel__pane__help__wait_commands] )) ||
+_pebrel__pane__help__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane list commands' commands "$@"
+    _describe -t commands 'pebrel pane help wait commands' commands "$@"
 }
-(( $+functions[_nebula__pane__paste_commands] )) ||
-_nebula__pane__paste_commands() {
+(( $+functions[_pebrel__pane__help__zoom_commands] )) ||
+_pebrel__pane__help__zoom_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane paste commands' commands "$@"
+    _describe -t commands 'pebrel pane help zoom commands' commands "$@"
 }
-(( $+functions[_nebula__pane__read_commands] )) ||
-_nebula__pane__read_commands() {
+(( $+functions[_pebrel__pane__list_commands] )) ||
+_pebrel__pane__list_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane read commands' commands "$@"
+    _describe -t commands 'pebrel pane list commands' commands "$@"
 }
-(( $+functions[_nebula__pane__resize_commands] )) ||
-_nebula__pane__resize_commands() {
+(( $+functions[_pebrel__pane__paste_commands] )) ||
+_pebrel__pane__paste_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane resize commands' commands "$@"
+    _describe -t commands 'pebrel pane paste commands' commands "$@"
 }
-(( $+functions[_nebula__pane__send_commands] )) ||
-_nebula__pane__send_commands() {
+(( $+functions[_pebrel__pane__read_commands] )) ||
+_pebrel__pane__read_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane send commands' commands "$@"
+    _describe -t commands 'pebrel pane read commands' commands "$@"
 }
-(( $+functions[_nebula__pane__wait_commands] )) ||
-_nebula__pane__wait_commands() {
+(( $+functions[_pebrel__pane__resize_commands] )) ||
+_pebrel__pane__resize_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane wait commands' commands "$@"
+    _describe -t commands 'pebrel pane resize commands' commands "$@"
 }
-(( $+functions[_nebula__pane__zoom_commands] )) ||
-_nebula__pane__zoom_commands() {
+(( $+functions[_pebrel__pane__send_commands] )) ||
+_pebrel__pane__send_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula pane zoom commands' commands "$@"
+    _describe -t commands 'pebrel pane send commands' commands "$@"
 }
-(( $+functions[_nebula__setup-ai_commands] )) ||
-_nebula__setup-ai_commands() {
+(( $+functions[_pebrel__pane__wait_commands] )) ||
+_pebrel__pane__wait_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula setup-ai commands' commands "$@"
+    _describe -t commands 'pebrel pane wait commands' commands "$@"
 }
-(( $+functions[_nebula__ssh_commands] )) ||
-_nebula__ssh_commands() {
+(( $+functions[_pebrel__pane__zoom_commands] )) ||
+_pebrel__pane__zoom_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula ssh commands' commands "$@"
+    _describe -t commands 'pebrel pane zoom commands' commands "$@"
 }
-(( $+functions[_nebula__tab_commands] )) ||
-_nebula__tab_commands() {
+(( $+functions[_pebrel__setup-ai_commands] )) ||
+_pebrel__setup-ai_commands() {
+    local commands; commands=()
+    _describe -t commands 'pebrel setup-ai commands' commands "$@"
+}
+(( $+functions[_pebrel__ssh_commands] )) ||
+_pebrel__ssh_commands() {
+    local commands; commands=()
+    _describe -t commands 'pebrel ssh commands' commands "$@"
+}
+(( $+functions[_pebrel__tab_commands] )) ||
+_pebrel__tab_commands() {
     local commands; commands=(
 'close:Close an idle tab' \
 'rename:Set a tab'\''s custom name. Pass an empty name to restore the generated title' \
 'move:Move a tab to another index in the same window' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula tab commands' commands "$@"
+    _describe -t commands 'pebrel tab commands' commands "$@"
 }
-(( $+functions[_nebula__tab__close_commands] )) ||
-_nebula__tab__close_commands() {
+(( $+functions[_pebrel__tab__close_commands] )) ||
+_pebrel__tab__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula tab close commands' commands "$@"
+    _describe -t commands 'pebrel tab close commands' commands "$@"
 }
-(( $+functions[_nebula__tab__help_commands] )) ||
-_nebula__tab__help_commands() {
+(( $+functions[_pebrel__tab__help_commands] )) ||
+_pebrel__tab__help_commands() {
     local commands; commands=(
 'close:Close an idle tab' \
 'rename:Set a tab'\''s custom name. Pass an empty name to restore the generated title' \
 'move:Move a tab to another index in the same window' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula tab help commands' commands "$@"
+    _describe -t commands 'pebrel tab help commands' commands "$@"
 }
-(( $+functions[_nebula__tab__help__close_commands] )) ||
-_nebula__tab__help__close_commands() {
+(( $+functions[_pebrel__tab__help__close_commands] )) ||
+_pebrel__tab__help__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula tab help close commands' commands "$@"
+    _describe -t commands 'pebrel tab help close commands' commands "$@"
 }
-(( $+functions[_nebula__tab__help__help_commands] )) ||
-_nebula__tab__help__help_commands() {
+(( $+functions[_pebrel__tab__help__help_commands] )) ||
+_pebrel__tab__help__help_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula tab help help commands' commands "$@"
+    _describe -t commands 'pebrel tab help help commands' commands "$@"
 }
-(( $+functions[_nebula__tab__help__move_commands] )) ||
-_nebula__tab__help__move_commands() {
+(( $+functions[_pebrel__tab__help__move_commands] )) ||
+_pebrel__tab__help__move_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula tab help move commands' commands "$@"
+    _describe -t commands 'pebrel tab help move commands' commands "$@"
 }
-(( $+functions[_nebula__tab__help__rename_commands] )) ||
-_nebula__tab__help__rename_commands() {
+(( $+functions[_pebrel__tab__help__rename_commands] )) ||
+_pebrel__tab__help__rename_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula tab help rename commands' commands "$@"
+    _describe -t commands 'pebrel tab help rename commands' commands "$@"
 }
-(( $+functions[_nebula__tab__move_commands] )) ||
-_nebula__tab__move_commands() {
+(( $+functions[_pebrel__tab__move_commands] )) ||
+_pebrel__tab__move_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula tab move commands' commands "$@"
+    _describe -t commands 'pebrel tab move commands' commands "$@"
 }
-(( $+functions[_nebula__tab__rename_commands] )) ||
-_nebula__tab__rename_commands() {
+(( $+functions[_pebrel__tab__rename_commands] )) ||
+_pebrel__tab__rename_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula tab rename commands' commands "$@"
+    _describe -t commands 'pebrel tab rename commands' commands "$@"
 }
-(( $+functions[_nebula__window_commands] )) ||
-_nebula__window_commands() {
+(( $+functions[_pebrel__window_commands] )) ||
+_pebrel__window_commands() {
     local commands; commands=(
 'close:Close an idle window. Busy panes require confirmation in the GUI instead' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula window commands' commands "$@"
+    _describe -t commands 'pebrel window commands' commands "$@"
 }
-(( $+functions[_nebula__window__close_commands] )) ||
-_nebula__window__close_commands() {
+(( $+functions[_pebrel__window__close_commands] )) ||
+_pebrel__window__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula window close commands' commands "$@"
+    _describe -t commands 'pebrel window close commands' commands "$@"
 }
-(( $+functions[_nebula__window__help_commands] )) ||
-_nebula__window__help_commands() {
+(( $+functions[_pebrel__window__help_commands] )) ||
+_pebrel__window__help_commands() {
     local commands; commands=(
 'close:Close an idle window. Busy panes require confirmation in the GUI instead' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
-    _describe -t commands 'nebula window help commands' commands "$@"
+    _describe -t commands 'pebrel window help commands' commands "$@"
 }
-(( $+functions[_nebula__window__help__close_commands] )) ||
-_nebula__window__help__close_commands() {
+(( $+functions[_pebrel__window__help__close_commands] )) ||
+_pebrel__window__help__close_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula window help close commands' commands "$@"
+    _describe -t commands 'pebrel window help close commands' commands "$@"
 }
-(( $+functions[_nebula__window__help__help_commands] )) ||
-_nebula__window__help__help_commands() {
+(( $+functions[_pebrel__window__help__help_commands] )) ||
+_pebrel__window__help__help_commands() {
     local commands; commands=()
-    _describe -t commands 'nebula window help help commands' commands "$@"
+    _describe -t commands 'pebrel window help help commands' commands "$@"
 }
 
-if [ "$funcstack[1]" = "_nebula" ]; then
-    _nebula "$@"
+if [ "$funcstack[1]" = "_pebrel" ]; then
+    _pebrel "$@"
 else
-    compdef _nebula nebula
+    compdef _pebrel pebrel
 fi

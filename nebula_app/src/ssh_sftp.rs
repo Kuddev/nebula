@@ -965,8 +965,24 @@ pub fn upload_clipboard_image(
     png: Vec<u8>,
     on_uploaded: impl FnOnce(String) + Send + 'static,
 ) {
-    let Ok(runtime) = crate::ssh_session::runtime() else {
-        return;
+    upload_clipboard_image_result(destination, png, move |result| match result {
+        Ok(remote) => on_uploaded(remote),
+        Err(error) => log::warn!("clipboard image upload failed: {error}"),
+    });
+}
+
+/// The GPUI adapter needs both outcomes to end its pending state and show errors.
+pub(crate) fn upload_clipboard_image_result(
+    destination: String,
+    png: Vec<u8>,
+    on_finished: impl FnOnce(Result<String, String>) + Send + 'static,
+) {
+    let runtime = match crate::ssh_session::runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            on_finished(Err(error.to_string()));
+            return;
+        },
     };
     runtime.spawn(async move {
         let stamp = std::time::SystemTime::now()
@@ -975,24 +991,37 @@ pub fn upload_clipboard_image(
             .unwrap_or(0);
         // `/tmp` 而不是远端 cwd：绝对路径对远端的命令行工具一样可读，且不往
         // 用户的项目目录里排泄粘贴产物；`~` 需要展开，这里没有 shell。
-        let remote = format!("/tmp/nebula-paste-{stamp}.png");
-        let result = async {
+        let nonce = TRANSFER_NONCE.fetch_add(1, Ordering::Relaxed);
+        let remote = format!("/tmp/pebrel-paste-{stamp}-{}-{nonce}.png", std::process::id());
+        let upload = async {
             let sftp = crate::ssh_session::open_sftp(&destination).await?;
+            let attributes = russh_sftp::protocol::FileAttributes {
+                permissions: Some(0o600),
+                ..russh_sftp::protocol::FileAttributes::empty()
+            };
             let mut file = sftp
-                .open_with_flags(
+                .open_with_flags_and_attributes(
                     remote.clone(),
-                    OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+                    OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                    attributes,
                 )
                 .await?;
-            file.write_all(&png).await?;
-            file.shutdown().await?;
+            if let Err(error) = async {
+                file.write_all(&png).await?;
+                file.shutdown().await
+            }
+            .await
+            {
+                let _ = sftp.remove_file(&remote).await;
+                return Err(error.into());
+            }
             Ok::<_, SftpError>(())
-        }
-        .await;
-        match result {
-            Ok(()) => on_uploaded(remote),
-            Err(err) => log::warn!("剪贴板图片上传失败（{destination}）: {err}"),
-        }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(30), upload).await;
+        on_finished(match result {
+            Ok(result) => result.map(|()| remote).map_err(|error| error.to_string()),
+            Err(_) => Err("clipboard image upload timed out".to_owned()),
+        });
     });
 }
 

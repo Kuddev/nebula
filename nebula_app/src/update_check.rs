@@ -19,8 +19,8 @@ use crate::event::{Event, EventType};
 #[cfg(feature = "legacy-shell")]
 use crate::message_bar::{Message, MessageType};
 
-const RELEASES_API: &str = "https://api.github.com/repos/Kuddev/nebula/releases/latest";
-pub const RELEASES_PAGE: &str = "https://github.com/Kuddev/nebula/releases";
+const RELEASES_API: &str = "https://api.github.com/repos/Kuddev/pebrel/releases/latest";
+pub const RELEASES_PAGE: &str = "https://github.com/Kuddev/pebrel/releases";
 const UPDATE_STATE_FILE: &str = "update_state.json";
 const REMIND_LATER_SECS: u64 = 3 * 24 * 60 * 60;
 
@@ -138,7 +138,7 @@ pub fn spawn_once(proxy: EventLoopProxy<Event>) {
             log::debug!("update-check: v{current} is current (latest v{latest})");
             return;
         }
-        let text = format!("Nebula v{latest} 已发布（当前 v{current}），下载：{RELEASES_PAGE}");
+        let text = format!("Pebrel v{latest} 已发布（当前 v{current}），下载：{RELEASES_PAGE}");
         let _ = proxy.send_event(Event::new(
             EventType::Message(Message::new(text, MessageType::Warning)),
             None,
@@ -231,7 +231,7 @@ fn update_prompt_state(change: impl FnOnce(&mut UpdatePromptState)) -> Result<()
     let Some(_file_lock) = crate::atomic_file::try_lock(&path)
         .map_err(|error| format!("无法锁定更新提醒状态：{error}"))?
     else {
-        return Err("更新提醒状态正由另一个 Nebula 进程写入".to_owned());
+        return Err("更新提醒状态正由另一个 Pebrel 进程写入".to_owned());
     };
     let mut state = load_prompt_state();
     change(&mut state);
@@ -266,7 +266,7 @@ fn fetch_latest_release() -> Result<LatestRelease, String> {
         "--max-time",
         "10",
         "-H",
-        "User-Agent: nebula-terminal",
+        "User-Agent: pebrel",
         "-H",
         "Accept: application/vnd.github+json",
         RELEASES_API,
@@ -298,16 +298,23 @@ fn parse_latest_release(bytes: &[u8]) -> Result<LatestRelease, String> {
         return Err("GitHub release 的版本号为空".to_owned());
     }
     let version = version.to_owned();
-    let asset = select_windows_x64_installer(
-        &version,
-        release.body.as_deref().unwrap_or_default(),
-        release.assets,
-    );
+    let asset = if cfg!(all(windows, target_arch = "x86_64")) {
+        select_windows_x64_installer(
+            &version,
+            release.body.as_deref().unwrap_or_default(),
+            release.assets,
+        )
+    } else {
+        None
+    };
     Ok(LatestRelease { version, asset })
 }
 
-fn expected_windows_x64_installer_name(version: &str) -> String {
-    format!("NebulaTerminal-{version}-windows-x64-setup.exe")
+pub(crate) fn windows_x64_installer_names(version: &str) -> [String; 2] {
+    [
+        format!("Pebrel-{version}-windows-x64-setup.exe"),
+        format!("NebulaTerminal-{version}-windows-x64-setup.exe"),
+    ]
 }
 
 fn select_windows_x64_installer(
@@ -315,16 +322,15 @@ fn select_windows_x64_installer(
     release_body: &str,
     assets: Vec<GitHubReleaseAsset>,
 ) -> Option<UpdateAsset> {
-    if !cfg!(all(windows, target_arch = "x86_64")) {
-        return None;
-    }
-    let expected_name = expected_windows_x64_installer_name(version);
-    let asset = assets.into_iter().find(|asset| asset.name == expected_name)?;
+    let selected = windows_x64_installer_names(version)
+        .iter()
+        .find_map(|name| assets.iter().position(|asset| asset.name == *name))?;
+    let asset = assets.into_iter().nth(selected)?;
     let sha256 = asset
         .digest
         .as_deref()
         .and_then(normalize_sha256)
-        .or_else(|| checksum_from_release_body(release_body, &expected_name));
+        .or_else(|| checksum_from_release_body(release_body, &asset.name));
     Some(UpdateAsset {
         version: version.to_owned(),
         name: asset.name,
@@ -378,8 +384,8 @@ fn is_newer(latest: &str, current: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        REMIND_LATER_SECS, UpdatePromptState, checksum_from_release_body, is_newer,
-        parse_latest_release,
+        GitHubReleaseAsset, REMIND_LATER_SECS, UpdatePromptState, checksum_from_release_body,
+        is_newer, parse_latest_release, select_windows_x64_installer, windows_x64_installer_names,
     };
 
     #[test]
@@ -463,6 +469,73 @@ mod tests {
             checksum_from_release_body(&body, "NebulaTerminal-1.4.1-windows-x64-setup.exe"),
             None
         );
+    }
+
+    fn release_asset(name: &str) -> GitHubReleaseAsset {
+        GitHubReleaseAsset {
+            name: name.to_owned(),
+            browser_download_url: format!(
+                "https://github.com/Kuddev/nebula/releases/download/v1.6.0/{name}"
+            ),
+            size: 42,
+            digest: Some(format!("sha256:{}", "a".repeat(64))),
+        }
+    }
+
+    #[test]
+    fn installer_selection_prefers_pebrel_regardless_of_asset_order() {
+        let [pebrel, legacy] = windows_x64_installer_names("1.6.0");
+        for names in [[&legacy, &pebrel], [&pebrel, &legacy]] {
+            let assets = names.map(|name| release_asset(name)).into_iter().collect();
+            let selected = select_windows_x64_installer("1.6.0", "", assets).unwrap();
+            assert_eq!(selected.name, pebrel);
+            assert_eq!(selected.sha256, Some("a".repeat(64)));
+        }
+    }
+
+    #[test]
+    fn installer_selection_accepts_legacy_only_releases_and_body_checksums() {
+        let [_, legacy] = windows_x64_installer_names("1.6.0");
+        let mut asset = release_asset(&legacy);
+        asset.digest = None;
+        let hash = "b".repeat(64);
+        let body = format!("- `{legacy}`: `{hash}`");
+        let selected = select_windows_x64_installer("1.6.0", &body, vec![asset]).unwrap();
+        assert_eq!(selected.name, legacy);
+        assert_eq!(selected.sha256, Some(hash));
+    }
+
+    #[test]
+    fn installer_selection_rejects_other_versions_platforms_and_archive_names() {
+        let names = [
+            "Pebrel-1.5.0-windows-x64-setup.exe",
+            "NebulaTerminal-1.5.0-windows-x64-setup.exe",
+            "Pebrel-1.6.0-windows-arm64-setup.exe",
+            "Pebrel-v1.6.0-windows-x64.zip",
+            "Pebrel-1.6.0-linux-x86_64.deb",
+            "prefix-Pebrel-1.6.0-windows-x64-setup.exe",
+            "NebulaTerminal-1.6.0-windows-x64-setup.exe.bak",
+        ];
+        let assets = names.map(release_asset).into_iter().collect();
+        assert!(select_windows_x64_installer("1.6.0", "", assets).is_none());
+    }
+
+    #[test]
+    fn unsupported_platforms_do_not_offer_a_windows_installer() {
+        if cfg!(all(windows, target_arch = "x86_64")) {
+            return;
+        }
+        let json = serde_json::json!({
+            "tag_name": "v1.6.0",
+            "assets": [{
+                "name": "Pebrel-1.6.0-windows-x64-setup.exe",
+                "browser_download_url": "https://github.com/Kuddev/nebula/releases/download/v1.6.0/Pebrel-1.6.0-windows-x64-setup.exe",
+                "size": 42,
+                "digest": format!("sha256:{}", "a".repeat(64)),
+            }],
+        });
+        let release = parse_latest_release(&serde_json::to_vec(&json).unwrap()).unwrap();
+        assert!(release.asset.is_none());
     }
 
     #[test]

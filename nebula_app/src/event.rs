@@ -2383,14 +2383,8 @@ impl<'a, N: Notify + 'a, T: EventListener> input::ActionContext<T> for ActionCon
             });
             return true;
         }
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("nebula-paste-{stamp}.png"));
-        if std::fs::write(&path, &png).is_err() {
-            return false;
-        }
+        let Ok(path) = crate::clipboard::stage_image_png(&png) else { return false };
+        let Ok(path) = path.keep() else { return false };
         self.paste(&path.display().to_string(), true);
         true
     }

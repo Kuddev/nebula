@@ -783,7 +783,7 @@ pub(crate) fn nebula_link_log(message: impl AsRef<str>) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()))
         .unwrap_or_else(|_| "0.000".to_owned());
-    let path = nebula_data_dir().join("nebula_debug.log");
+    let path = nebula_data_dir().join("pebrel_debug.log");
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[{ts}] {}", message.as_ref());
     }
@@ -803,7 +803,7 @@ pub(crate) fn nebula_data_dir() -> PathBuf {
 /// The typed loader is `settings::nebula_settings_load`; this is for the few
 /// callers (e.g. the default-shell id) that want the raw string verbatim.
 pub(crate) fn nebula_settings_value(key: &str) -> Option<String> {
-    let data = std::fs::read_to_string(nebula_data_dir().join("nebula_settings.txt")).ok()?;
+    let data = std::fs::read_to_string(nebula_settings::settings_path()).ok()?;
     data.lines().find_map(|line| {
         let (k, v) = line.split_once('=')?;
         k.trim().eq_ignore_ascii_case(key).then(|| v.trim().to_owned())
@@ -10881,9 +10881,9 @@ mod nebula_ux_tests {
     use winit::window::Theme as WinitTheme;
 
     use super::{
-        AI_LOGO_GROK_DARK_PNG, AI_LOGO_GROK_LIGHT_PNG, AiLogo, NebulaConfirm, SizeInfo, ai_logo,
-        alt_screen_vertical_padding_bands, compute_cell_size, extract_program, nebula_pad_to_cells,
-        percent_decode_lossy, prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
+        AiLogo, NebulaConfirm, SizeInfo, ai_logo, alt_screen_vertical_padding_bands,
+        compute_cell_size, extract_program, nebula_pad_to_cells, percent_decode_lossy,
+        prepare_ai_logo_texture, program_icon, remove_ssh_host_from_lists,
         replays_untrusted_terminal_output, restore_ssh_host_to_lists, strip_file_scheme,
         system_theme_snapshot,
     };

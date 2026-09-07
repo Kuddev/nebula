@@ -154,7 +154,7 @@ jobs:
         run: cargo test --locked -p nebula --features gpui-test-support dialog
 
       - name: Build GPUI release binary
-        run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
+        run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
 
       - name: Download pinned linuxdeploy
         env:
@@ -172,7 +172,7 @@ jobs:
           SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
           export SOURCE_DATE_EPOCH
           bash scripts/package-linux.sh \
-            --binary target/release/nebula \
+            --binary target/release/pebrel \
             --version "$PACKAGE_VERSION" \
             --preview-id "$PREVIEW_ID" \
             --output-directory dist \
@@ -181,28 +181,28 @@ jobs:
 
       - name: Verify portable archive layout
         run: |
-          archive="dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.tar.gz"
-          root="NebulaTerminal-v$ASSET_VERSION-linux-x86_64"
+          archive="dist/Pebrel-v$ASSET_VERSION-linux-x86_64.tar.gz"
+          root="Pebrel-v$ASSET_VERSION-linux-x86_64"
           tar -tzf "$archive" "$root/AppRun"
-          tar -tzf "$archive" "$root/usr/share/applications/io.github.kuddev.nebula.preview.desktop"
+          tar -tzf "$archive" "$root/usr/share/applications/io.github.kuddev.pebrel.preview.desktop"
 
       - name: Run AppImage conformance under X11
         run: |
           xvfb-run -a -s "-screen 0 1600x1000x24" \
             python3 scripts/conformance/run.py \
-              --app "dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.AppImage" \
+              --app "dist/Pebrel-v$ASSET_VERSION-linux-x86_64.AppImage" \
               --platform linux-x86_64-appimage \
               --output dist/conformance/linux-appimage-report.json
 
       - name: Run AppImage conformance under Wayland
         run: |
-          runtime_directory="$RUNNER_TEMP/nebula-wayland-runtime"
+          runtime_directory="$RUNNER_TEMP/pebrel-wayland-runtime"
           mkdir -p "$runtime_directory" dist/conformance
           chmod 0700 "$runtime_directory"
           XDG_RUNTIME_DIR="$runtime_directory" \
             weston \
               --backend=headless-backend.so \
-              --socket=wayland-nebula \
+              --socket=wayland-pebrel \
               --width=1600 \
               --height=1000 \
               --idle-time=0 \
@@ -215,7 +215,7 @@ jobs:
           trap cleanup_weston EXIT
 
           for _ in $(seq 1 100); do
-            if [[ -S "$runtime_directory/wayland-nebula" ]]; then
+            if [[ -S "$runtime_directory/wayland-pebrel" ]]; then
               break
             fi
             if ! kill -0 "$weston_pid" >/dev/null 2>&1; then
@@ -224,25 +224,25 @@ jobs:
             fi
             sleep 0.1
           done
-          test -S "$runtime_directory/wayland-nebula"
+          test -S "$runtime_directory/wayland-pebrel"
 
           DISPLAY='' \
           XDG_RUNTIME_DIR="$runtime_directory" \
-          WAYLAND_DISPLAY=wayland-nebula \
+          WAYLAND_DISPLAY=wayland-pebrel \
             python3 scripts/conformance/run.py \
-              --app "dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.AppImage" \
+              --app "dist/Pebrel-v$ASSET_VERSION-linux-x86_64.AppImage" \
               --platform linux-x86_64-appimage-wayland \
               --output dist/conformance/linux-appimage-wayland-report.json
 
       - name: Install and run Debian package conformance under X11
         run: |
           sudo apt-get install -y \
-            "./dist/NebulaTerminal-v$ASSET_VERSION-linux-x86_64.deb"
-          test "$(dpkg-query -W -f='${Status}' nebula-terminal-preview)" = \
+            "./dist/Pebrel-v$ASSET_VERSION-linux-x86_64.deb"
+          test "$(dpkg-query -W -f='${Status}' pebrel-preview)" = \
             "install ok installed"
           xvfb-run -a -s "-screen 0 1600x1000x24" \
             python3 scripts/conformance/run.py \
-              --app /usr/bin/nebula \
+              --app /usr/bin/pebrel \
               --platform linux-x86_64-deb \
               --output dist/conformance/linux-deb-report.json
 
@@ -309,7 +309,7 @@ jobs:
         run: cargo test --locked -p nebula --features gpui-test-support dialog
 
       - name: Build GPUI release binary
-        run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
+        run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
 
       - name: Import signing credentials into a temporary keychain
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_signing == 'developer-id' }}
@@ -321,7 +321,7 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          export SIGNING_DIRECTORY="$RUNNER_TEMP/nebula-signing"
+          export SIGNING_DIRECTORY="$RUNNER_TEMP/pebrel-signing"
           mkdir -m 0700 "$SIGNING_DIRECTORY"
           python3 - <<'PY'
           import base64
@@ -347,9 +347,9 @@ jobs:
           security import "$SIGNING_DIRECTORY/certificate.p12" -k "$keychain" \
             -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
-          xcrun notarytool store-credentials nebula-preview --keychain "$keychain" \
+          xcrun notarytool store-credentials pebrel-preview --keychain "$keychain" \
             --key "$SIGNING_DIRECTORY/AuthKey.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
-          echo "NEBULA_SIGNING_KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+          echo "PEBREL_SIGNING_KEYCHAIN=$keychain" >>"$GITHUB_ENV"
 
       - name: Package Preview DMG with the requested signing mode
         env:
@@ -357,12 +357,12 @@ jobs:
         run: |
           signing_args=()
           if [[ "$MACOS_SIGNING" == developer-id ]]; then
-            test -n "$NEBULA_SIGNING_KEYCHAIN"
-            signing_args=(--sign-identity "$APPLE_SIGNING_IDENTITY" --notary-profile nebula-preview \
-              --signing-keychain "$NEBULA_SIGNING_KEYCHAIN")
+            test -n "$PEBREL_SIGNING_KEYCHAIN"
+            signing_args=(--sign-identity "$APPLE_SIGNING_IDENTITY" --notary-profile pebrel-preview \
+              --signing-keychain "$PEBREL_SIGNING_KEYCHAIN")
           fi
           bash scripts/package-macos.sh \
-            --binary target/release/nebula \
+            --binary target/release/pebrel \
             --version "$PACKAGE_VERSION" \
             --preview-id "$PREVIEW_ID" \
             --architecture "${{ matrix.architecture }}" \
@@ -372,8 +372,8 @@ jobs:
 
       - name: Mount final DMG and run conformance
         run: |
-          dmg="dist/NebulaTerminal-v$ASSET_VERSION-macos-${{ matrix.architecture }}.dmg"
-          mount_point="$RUNNER_TEMP/nebula-preview-${{ matrix.architecture }}"
+          dmg="dist/Pebrel-v$ASSET_VERSION-macos-${{ matrix.architecture }}.dmg"
+          mount_point="$RUNNER_TEMP/pebrel-preview-${{ matrix.architecture }}"
           mkdir -p "$mount_point"
           hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
           cleanup_mount() {
@@ -381,12 +381,12 @@ jobs:
           }
           trap cleanup_mount EXIT
 
-          app="$mount_point/Nebula Terminal Preview.app"
+          app="$mount_point/Pebrel Preview.app"
           codesign --verify --deep --strict --verbose=2 "$app"
           plutil -lint "$app/Contents/Info.plist"
           test "$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" = \
-            "io.github.kuddev.nebula.preview"
-          test "$(lipo -archs "$app/Contents/MacOS/nebula")" = \
+            "io.github.kuddev.pebrel.preview"
+          test "$(lipo -archs "$app/Contents/MacOS/pebrel")" = \
             "${{ matrix.native_architecture }}"
           python3 scripts/conformance/run.py \
             --app "$app" \
@@ -399,7 +399,7 @@ jobs:
       - name: Remove temporary signing credentials
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.macos_signing == 'developer-id' }}
         run: |
-          directory="$RUNNER_TEMP/nebula-signing"
+          directory="$RUNNER_TEMP/pebrel-signing"
           if [[ -f "$directory/preview.keychain-db" ]]; then
             security delete-keychain "$directory/preview.keychain-db"
           fi
@@ -441,10 +441,10 @@ jobs:
       - name: Test SSH confirmation and password dialogs
         run: cargo test --locked -p nebula --features gpui-test-support dialog
       - name: Build GPUI comparison binary
-        run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
+        run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
       - name: Run Windows conformance
         run: >-
-          python scripts/conformance/run.py --app target/release/nebula.exe
+          python scripts/conformance/run.py --app target/release/pebrel.exe
           --platform windows-x86_64 --output dist/conformance/windows-report.json
       - name: Upload Windows conformance evidence
         if: always()
@@ -499,7 +499,7 @@ jobs:
       - name: Upload complete Preview set
         uses: actions/upload-artifact@v4
         with:
-          name: NebulaTerminal-v${{ needs.prepare.outputs.asset_version }}
+          name: Pebrel-v${{ needs.prepare.outputs.asset_version }}
           path: release-dist
           if-no-files-found: error
           retention-days: 14
@@ -519,12 +519,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: NebulaTerminal-v${{ needs.prepare.outputs.asset_version }}
+          name: Pebrel-v${{ needs.prepare.outputs.asset_version }}
           path: release-dist
       - name: Create public GitHub prerelease
         run: |
           tag="preview-v$PACKAGE_VERSION-$PREVIEW_ID"
-          title="Nebula Terminal $PACKAGE_VERSION Preview $PREVIEW_ID"
+          title="Pebrel $PACKAGE_VERSION Preview $PREVIEW_ID"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "refusing to replace existing Preview release: $tag" >&2
             exit 1

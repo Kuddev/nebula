@@ -30,6 +30,15 @@ mod lifecycle;
 mod route;
 use route::{ResolvedRoute, RouteTransport};
 
+/// Remote terminals have no pre-primed ConPTY handshake or host row anchoring.
+pub(crate) fn terminal_config(
+    mut config: nebula_terminal::term::Config,
+) -> nebula_terminal::term::Config {
+    config.suppress_bringup_da1 = false;
+    config.conpty_resize = false;
+    config
+}
+
 type SessionError = Box<dyn std::error::Error + Send + Sync>;
 type ClientSession = client::Handle<ClientHandler>;
 type SharedSession = Arc<ClientSession>;
@@ -504,7 +513,7 @@ pub fn spawn_session_at<H: SshEventHost>(
 /// Relative and control-character-bearing values are rejected: a duplicated
 /// tab must never turn terminal metadata into an arbitrary command stream.
 fn initial_remote_cd_command(path: Option<&str>) -> Option<Vec<u8>> {
-    let path = path?.trim();
+    let path = path?;
     if !path.starts_with('/') || path.len() > 16 * 1024 || path.chars().any(char::is_control) {
         return None;
     }

@@ -4,6 +4,10 @@
 
 <h1 align="center">Pebrel</h1>
 
+Repository / 仓库：[Kuddev/pebrel](https://github.com/Kuddev/pebrel)。
+Existing `Kuddev/nebula` repository and Git links redirect here.
+旧 `Kuddev/nebula` 仓库与 Git 链接会自动跳转到新地址。
+
 Contributing / 参与贡献：[Guide / 指南](CONTRIBUTING.md) · [Architecture / 架构](docs/architecture.md) · [Engineering contracts / 工程规范](docs/project-constraints.md)
 
 <p align="center">
@@ -15,14 +19,14 @@ Contributing / 参与贡献：[Guide / 指南](CONTRIBUTING.md) · [Architecture
   <img src="https://img.shields.io/badge/Rust-2024_edition-CE412B?style=for-the-badge&logo=rust&logoColor=white" alt="Rust"/>
   <img src="https://img.shields.io/badge/OpenGL-ES_2.0+-5586A4?style=for-the-badge&logo=opengl&logoColor=white" alt="OpenGL"/>
   <img src="https://img.shields.io/badge/Windows-10_/_11-0078D6?style=for-the-badge&logo=windows11&logoColor=white" alt="Windows"/>
-  <img src="https://img.shields.io/badge/PowerShell-Nebula_prompt-5391FE?style=for-the-badge&logo=powershell&logoColor=white" alt="PowerShell"/>
+  <img src="https://img.shields.io/badge/PowerShell-Pebrel_prompt-5391FE?style=for-the-badge&logo=powershell&logoColor=white" alt="PowerShell"/>
   <img src="https://img.shields.io/badge/License-GPL--3.0-1f6feb?style=for-the-badge" alt="License"/>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/Kuddev/nebula?style=flat-square&color=ffd33d&logo=github" alt="Stars"/>
-  <img src="https://img.shields.io/github/forks/Kuddev/nebula?style=flat-square&color=8957e5&logo=github" alt="Forks"/>
-  <img src="https://img.shields.io/github/last-commit/Kuddev/nebula?style=flat-square&color=3fb950" alt="Last commit"/>
+  <img src="https://img.shields.io/github/stars/Kuddev/pebrel?style=flat-square&color=ffd33d&logo=github" alt="Stars"/>
+  <img src="https://img.shields.io/github/forks/Kuddev/pebrel?style=flat-square&color=8957e5&logo=github" alt="Forks"/>
+  <img src="https://img.shields.io/github/last-commit/Kuddev/pebrel?style=flat-square&color=3fb950" alt="Last commit"/>
   <a href="https://linux.do"><img src="https://img.shields.io/badge/友链-linux.do-ffb003?style=flat-square&logo=discourse&logoColor=white" alt="linux.do"/></a>
 </p>
 
@@ -83,7 +87,7 @@ experience that works without extra setup.
   `vim`, `cargo`, …).
 - **Live turn state, wired to the source** — Pebrel installs Claude Code
   hooks (and Codex notify) pointing at a bundled bridge
-  (`nebula-hook.exe`, dependency-free): prompt submitted → spinner; turn
+  (`pebrel-hook.exe`, dependency-free): prompt submitted → spinner; turn
   finished → dot + toast; Claude needs your input → toast carrying the actual
   message text. Delivered over a local named pipe, with no shell integration
   required.
@@ -93,7 +97,7 @@ experience that works without extra setup.
 - **Zero setup, self-healing** — the hook entries install on first boot and
   re-install themselves if a config switcher rewrites the file (a watcher on
   the config directory re-applies them). Scoped by environment: claude
-  running in any other terminal is untouched. `nebula setup-ai --remove`
+  running in any other terminal is untouched. `pebrel setup-ai --remove`
   undoes everything.
 - **Plays nice with existing notifiers** — codex has a single notify slot;
   Pebrel wraps it (`--chain`) instead of stealing it, so a pre-existing
@@ -117,7 +121,7 @@ experience that works without extra setup.
   per-channel, randomly authenticated private OSC bridge. Pebrel validates the
   channel token, replaces any remote pane identifier with the local pane, and
   routes the event through the existing sidebar and Windows notification path.
-  The `nebula ssh` compatibility command remains available for forwarding,
+  The `pebrel ssh` compatibility command remains available for forwarding,
   query and explicit-command forms that need the system SSH client.
 
 <p align="center">
@@ -127,7 +131,7 @@ experience that works without extra setup.
 **Performance & correctness**
 
 - **Instrumented startup** — the boot path is fully traceable
-  (`NEBULA_BOOT_TRACE=1`); no shell profile is loaded and history loads
+  (`PEBREL_BOOT_TRACE=1`); no shell profile is loaded and history loads
   lazily.
 - **Modern ConPTY host** — ships the side-by-side ConPTY host for correct
   resize behavior, with its startup handshake (DA1) pre-primed so a new tab
@@ -141,7 +145,7 @@ experience that works without extra setup.
 - **Inline ghost-text completions** — fish-style dim suggestions from command
   history and filesystem paths; accept with `→` or `Tab`.
 - **Persistent indexed history** — commands stored as JSONL under
-  `%APPDATA%\Nebula`, shared across sessions, with prefix hints.
+  `%APPDATA%\Pebrel`, shared across sessions, with prefix hints.
 - **Powerline prompt built in** — themed gradient prompt with git branch and
   clock, for PowerShell and Git Bash, no plugins to install.
 - **Quality-of-life fixes** — unquoted `cd D:/Program Files` just works, bare
@@ -189,11 +193,11 @@ experience that works without extra setup.
 **Interface**
 
 <p align="center">
-  <!-- 📸 SHOT #5 主题拼图：设置面板主题卡或三窗拼图（一深一浅一 Nebula） -->
+  <!-- 📸 SHOT #5 主题拼图：设置面板主题卡或三窗拼图（一深一浅一 Pebrel） -->
   <img src="docs/screenshots/themes.png" alt="Themes" width="720" />
 </p>
 
-- **Glass chrome & seven themes** — Nebula plus three matched light/dark
+- **Glass chrome & seven themes** — Pebrel plus three matched light/dark
   pairs: Silver Light / Steel Dark, Limestone / Coal Dark, Linen Light /
   Moss Dark. One skin system drives chrome, prompt and dialogs; every theme
   persists across restarts.
@@ -212,37 +216,30 @@ experience that works without extra setup.
 
 ### 📥 Install
 
-> **⚠️ Install the bundled font first.** Pebrel's powerline prompt, program
-> icons and AI brand marks are drawn with **Maple Mono Normal NF CN** (a Nerd Font).
-> Pebrel embeds the same font as a runtime fallback so forgetting to install it
-> no longer breaks the interface, but a normal system installation is still the
-> intended setup. The font ships in the release zip under `fonts/` and the repo at
-> `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf` — double-click
-> it and press **Install**, then launch Pebrel. Pebrel checks the font on every
-> launch; if the system font is missing, a dismissible reminder can open the
-> bundled `fonts/` folder. Install the font and restart Pebrel for the complete
-> icon set. (Licensed under SIL OFL 1.1.)
+Pebrel embeds **Maple Mono Normal NF CN** for terminal text, powerline symbols,
+and icons. The Windows installer also offers system font installation.
+The font is licensed under SIL OFL 1.1.
 
-**Release build (recommended)** — download
-`NebulaTerminal-v0.6.0-windows-x64.zip` from
-[Releases](https://github.com/Kuddev/nebula/releases), unzip
-anywhere, install `fonts/MapleMonoNormal-NF-CN-Regular.ttf`, then run
-`nebula.exe`. Keep the extracted folders in place: AI and ConPTY helpers live
-under `runtime/`, while fonts, documentation, and notices live under `fonts/`,
-`docs/`, and `licenses/`.
+**Windows packages** are listed on
+[Releases](https://github.com/Kuddev/pebrel/releases/latest). Pebrel 1.6 uses
+`Pebrel-<version>-windows-x64-setup.exe` for installation and
+`Pebrel-v<version>-windows-x64.zip` for portable use. Extract the ZIP and run
+`pebrel.exe`; keep `runtime/`, `docs/`, `skills/`, and `licenses/` in place.
+Older releases retain their original asset names. See the
+[installation guide](INSTALL.md) for upgrade and configuration migration details.
 
 **From source**
 
 ```powershell
-cargo build --release   # artifacts land in target/release/
+cargo build --release --locked -p nebula --bin pebrel --features gpui-shell
 ```
 
 ### Lua Configuration
 
-Pebrel ships a vendored Lua 5.4 runtime with `require 'nebula'` and
-`nebula.config_builder()`. Generate an annotated template with
-`nebula config init --language system|zh-CN|en-US`, then validate it without
-opening the GUI using `nebula config check`. Module `require` paths participate
+Pebrel ships a vendored Lua 5.4 runtime with `require 'pebrel'` and
+`pebrel.config_builder()`. Generate an annotated template with
+`pebrel config init --language system|zh-CN|en-US`, then validate it without
+opening the GUI using `pebrel config check`. Module `require` paths participate
 in live reload; invalid edits keep the last-known-good configuration active.
 Existing TOML files remain supported. See the
 [Lua configuration guide](docs/lua-configuration.md) for APIs, discovery order,
@@ -327,14 +324,14 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
   `codex` 显示 OpenAI 花结（贴图渲染、跟随主题染色）；其余程序用
   Nerd Font 图标（`gemini`、`copilot`、`git`、`vim`、`cargo`……）。
 - **回合状态实时直连** — Pebrel 自动安装 Claude Code hooks（及 Codex
-  notify），指向随包的桥接器 `nebula-hook.exe`（无第三方依赖）：
+  notify），指向随包的桥接器 `pebrel-hook.exe`（无第三方依赖）：
   提交 prompt → 转圈；回合完成 → 圆点 + 通知；claude 要你确认 → 通知里
   带消息原文。经本地命名管道传递，无需任何 shell 集成。
 - **通知点击直达** — 每条 toast 都知道自己来自哪个 pane：点一下，Pebrel
   前置、切到那个标签、聚焦那个分屏。
 - **零配置、自愈合** — hook 条目首次启动自动写入；被配置切换工具覆盖后
   会自动补回（配置目录上有监视器重新写入）。作用域由环境变量限定：其他
-  终端里的 claude 完全不受影响。`nebula setup-ai --remove` 一键撤销。
+  终端里的 claude 完全不受影响。`pebrel setup-ai --remove` 一键撤销。
 - **不抢占已有 notifier** — codex 只有一个 notify 槽位，Pebrel 用
   `--chain` 包装而非顶掉：原有通知程序照常触发。
 - **兜底信号** — OSC 133 命令跟踪 + BEL 覆盖其余所有 CLI：长构建完成也
@@ -351,7 +348,7 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 - **SSH 里也 AI 感知** — 远端 Hook 信封可通过每通道随机认证的私有 OSC 桥
   返回。Pebrel 会校验通道令牌，用本地 Pane 身份覆盖远端字段，再复用现有侧栏
   状态和 Windows 通知链路。需要端口转发、配置查询或显式远程命令时，仍可使用
-  `nebula ssh` 兼容命令交给系统 SSH 客户端处理。
+  `pebrel ssh` 兼容命令交给系统 SSH 客户端处理。
 
 <p align="center">
   <img src="docs/screenshots/ssh.gif" alt="Pebrel 原生 SSH 会话" width="920" />
@@ -359,7 +356,7 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 
 **性能与正确性**
 
-- **启动全程可观测** — 启动路径全程打点（`NEBULA_BOOT_TRACE=1`），不加载
+- **启动全程可观测** — 启动路径全程打点（`PEBREL_BOOT_TRACE=1`），不加载
   shell profile，历史惰性加载。
 - **现代 ConPTY 宿主** — 内置 side-by-side ConPTY 宿主保证 resize 行为正确，
   并预热其启动握手（DA1），让新标签不必卡在这一次往返上。
@@ -370,7 +367,7 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 
 - **行内幽灵补全** — fish 风格暗色建议，来自命令历史与文件路径，
   `→` 或 `Tab` 接受。
-- **持久化索引历史** — 命令以 JSONL 存于 `%APPDATA%\Nebula`，跨会话共享，
+- **持久化索引历史** — 命令以 JSONL 存于 `%APPDATA%\Pebrel`，跨会话共享，
   提供前缀提示。
 - **内置 powerline 提示符** — 主题化渐变提示符，含 git 分支与时钟，
   PowerShell 与 Git Bash 皆可用，无需安装任何插件。
@@ -415,7 +412,7 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
   <img src="docs/screenshots/themes.png" alt="七套主题" width="720" />
 </p>
 
-- **玻璃质感与七套主题** — Nebula + 三对明暗成组主题：Silver Light /
+- **玻璃质感与七套主题** — Pebrel + 三对明暗成组主题：Silver Light /
   Steel Dark、Limestone / Coal Dark、Linen Light / Moss Dark。一套皮肤
   系统驱动 chrome、提示符与弹窗，主题选择跨重启持久化。
 - **标签与分屏** — 侧边栏标签支持拖拽排序、拖入终端区四方位分屏；非焦点
@@ -430,35 +427,28 @@ Pebrel（原名 Nebula）是一款 Windows 上的终端模拟器，以 Rust 编�
 
 ### 📥 安装
 
-> **⚠️ 请先安装随附字体。** Pebrel 的 powerline 提示符、程序图标与 AI 品牌
-> 标识都用 **Maple Mono Normal NF CN**（一款 Nerd Font）绘制。Pebrel 已把同一字体
-> 内置为运行时兜底，忘记安装也不会再让界面显示异常，但正常使用仍建议安装到系统。
-> 字体在 release 包内、仓库里也有：
-> `assets/fonts/MapleMonoNormal-NF-CN-Regular.ttf`；压缩包内位于 `fonts/` ——
-> 双击它点**安装**，再启动
-> Pebrel。Pebrel 每次启动都会检查系统字体；如果还没有正确安装，会显示一个
-> 可关闭的提醒，并提供“打开字体文件夹”按钮。安装完成后重启 Pebrel 即可显示完整图
-> 标。（SIL OFL 1.1 许可。）
+Pebrel 内嵌 **Maple Mono Normal NF CN**，用于终端文字、powerline 符号与图标。
+Windows 安装器同时提供可选的系统字体安装。字体使用 SIL OFL 1.1 许可。
 
-**Release 包（推荐）** — 从
-[Releases](https://github.com/Kuddev/nebula/releases) 下载
-`NebulaTerminal-v0.6.0-windows-x64.zip`，解压到任意目录，先安装
-`fonts/MapleMonoNormal-NF-CN-Regular.ttf`，再运行 `nebula.exe`。请保持解压后的
-目录结构不变：AI 通知与 ConPTY 组件位于 `runtime/`，字体、文档和许可说明分别
-位于 `fonts/`、`docs/` 与 `licenses/`。
+**Windows 安装包**见
+[Releases](https://github.com/Kuddev/pebrel/releases/latest)。Pebrel 1.6 的安装器命名为
+`Pebrel-<version>-windows-x64-setup.exe`，便携包命名为
+`Pebrel-v<version>-windows-x64.zip`。解压 ZIP 后运行 `pebrel.exe`，保留
+`runtime/`、`docs/`、`skills/` 与 `licenses/` 目录。旧版本资产保留原文件名。
+升级与配置迁移详见[安装指南](INSTALL.md)。
 
 **从源码构建**
 
 ```powershell
-cargo build --release   # 产物在 target/release/
+cargo build --release --locked -p nebula --bin pebrel --features gpui-shell
 ```
 
 ### Lua 配置
 
-Pebrel 内置 Lua 5.4，使用 `require 'nebula'` 与
-`nebula.config_builder()`。运行
-`nebula config init --language system|zh-CN|en-US` 可生成带完整注释的模板，
-`nebula config check` 可在不启动 GUI 的情况下检查语法与字段。通过 `require`
+Pebrel 内置 Lua 5.4，使用 `require 'pebrel'` 与
+`pebrel.config_builder()`。运行
+`pebrel config init --language system|zh-CN|en-US` 可生成带完整注释的模板，
+`pebrel config check` 可在不启动 GUI 的情况下检查语法与字段。通过 `require`
 载入的模块会参与热重载；配置错误时继续使用上一份有效配置。已有 TOML 仍兼容。
 路径优先级、Windows/Linux 位置、数组、模块与重载说明见
 [Lua 配置指南](docs/lua-configuration.md)。
@@ -514,10 +504,10 @@ Pebrel 的部分代码衍生自上游开源项目，其原始许可与版权声�
 
 ## ⭐ Star History
 
-<a href="https://star-history.dera.page/#Kuddev/nebula&type=date">
+<a href="https://star-history.dera.page/#Kuddev/pebrel&type=date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Kuddev/nebula&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Kuddev/nebula&type=Date" />
-    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Kuddev/nebula&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
+    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=Kuddev/pebrel&type=Date" />
   </picture>
 </a>

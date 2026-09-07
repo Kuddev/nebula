@@ -14,10 +14,16 @@ use crate::ssh_session::{AcquiredSession, NoopSshEventHost, authenticated_route}
 struct Events {
     exits: Arc<std::sync::atomic::AtomicUsize>,
     stages: Arc<Mutex<Vec<SshStage>>>,
+    replies: Option<mpsc::UnboundedSender<Msg>>,
 }
 
 impl EventListener for Events {
     fn send_event(&self, event: TerminalEvent) {
+        if let TerminalEvent::PtyWrite(reply) = &event
+            && let Some(sender) = &self.replies
+        {
+            sender.send(Msg::Input(reply.as_bytes().to_vec().into())).unwrap();
+        }
         if matches!(event, TerminalEvent::Exit) {
             self.exits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -49,6 +55,7 @@ fn check(future: impl Future<Output = ()>) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Open,
+    TerminalQuery,
     RejectPty,
     RejectShell,
     DropWithoutStatus,
@@ -113,6 +120,10 @@ impl server::Handler for Loopback {
         session.data(channel, &b"welcome before shell confirmation\r\n"[..])?;
         session.channel_success(channel)?;
         match self.mode {
+            Mode::TerminalQuery => {
+                // The primary DA reply terminates crossterm's capability discovery.
+                session.data(channel, &b"\x1b[2J\x1b[?u\x1b[c"[..])?;
+            },
             Mode::DropWithoutStatus => {
                 session.eof(channel)?;
                 session.close(channel)?;
@@ -136,6 +147,99 @@ impl server::Handler for Loopback {
         let _ = self.data.send(data.to_vec());
         Ok(())
     }
+}
+
+#[test]
+fn ssh_first_capability_query_receives_reply_and_input_keeps_flowing() {
+    check(async {
+        let mut fixture = Fixture::new(Mode::TerminalQuery).await;
+        let acquired = fixture.connect().await;
+        let (sender, mut input) = mpsc::unbounded_channel();
+        let events = Events { replies: Some(sender.clone()), ..Events::default() };
+        let options = super::super::terminal_config(nebula_terminal::term::Config {
+            suppress_bringup_da1: true,
+            conpty_resize: true,
+            kitty_keyboard: true,
+            ..Default::default()
+        });
+        assert!(!options.conpty_resize);
+        let terminal = Arc::new(FairMutex::new(Term::new(options, &size(), events.clone())));
+        let (mut channel, token) = open_shell(&acquired, size(), None, &events).await.unwrap();
+        let exchange = async {
+            let mut replies = Vec::new();
+            while !replies.ends_with(b"\x1b[?6c") {
+                replies.extend(fixture.data.recv().await.unwrap());
+            }
+            assert_eq!(replies, b"\x1b[?0u\x1b[?6c");
+            let keys = b"\x1b[A\x1b[B\x03\x1a";
+            sender.send(Msg::Input(keys.to_vec().into())).unwrap();
+            let mut received = Vec::new();
+            while received.len() < keys.len() {
+                received.extend(fixture.data.recv().await.unwrap());
+            }
+            assert_eq!(received, keys);
+            sender.send(Msg::Shutdown).unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            pump(&mut channel, token, size(), &terminal, &events, &mut input),
+            exchange,
+        );
+        result.unwrap();
+        fixture.forget(&acquired.session).await;
+    });
+}
+
+#[test]
+fn ssh_terminal_options_preserve_preferences_but_disable_conpty_only_behavior() {
+    use nebula_terminal::term::{Config, Osc52};
+    use nebula_terminal::vte::ansi::{CursorShape, CursorStyle};
+
+    let local = Config {
+        suppress_bringup_da1: true,
+        conpty_resize: true,
+        kitty_keyboard: true,
+        scrolling_history: 42,
+        semantic_escape_chars: "test".to_owned(),
+        osc52: Osc52::Disabled,
+        default_cursor_style: CursorStyle { shape: CursorShape::Underline, blinking: true },
+        ..Default::default()
+    };
+    let remote = super::super::terminal_config(local.clone());
+    assert!(!remote.suppress_bringup_da1);
+    assert!(!remote.conpty_resize);
+    assert_eq!(remote.kitty_keyboard, local.kitty_keyboard);
+    assert_eq!(remote.scrolling_history, local.scrolling_history);
+    assert_eq!(remote.semantic_escape_chars, local.semantic_escape_chars);
+    assert_eq!(remote.osc52, local.osc52);
+    assert_eq!(remote.default_cursor_style, local.default_cursor_style);
+
+    let (sender, mut input) = mpsc::unbounded_channel();
+    let events = Events { replies: Some(sender), ..Default::default() };
+    let mut terminal = Term::new(local, &size(), events);
+    let mut parser: nebula_terminal::vte::ansi::Processor =
+        nebula_terminal::vte::ansi::Processor::new();
+    parser.advance(&mut terminal, b"\x1b[c");
+    assert!(input.try_recv().is_err(), "the pre-primed local handshake is still suppressed");
+    parser.advance(&mut terminal, b"\x1b[c");
+    assert!(matches!(input.try_recv(), Ok(Msg::Input(reply)) if reply.as_ref() == b"\x1b[?6c"));
+}
+
+#[test]
+fn duplicate_ssh_directory_preserves_literal_paths_and_rejects_control_characters() {
+    use super::super::initial_remote_cd_command;
+
+    assert_eq!(
+        initial_remote_cd_command(Some("/srv/Team's \"App\" ")),
+        Some(b"cd '/srv/Team'\\''s \"App\" '\r".to_vec())
+    );
+    assert_eq!(
+        initial_remote_cd_command(Some("/srv/$(whoami);pwd")),
+        Some(b"cd '/srv/$(whoami);pwd'\r".to_vec())
+    );
+    for path in ["/srv/app\n", "/srv/app\r", "\t/srv/app", "/srv/\x1bapp", "", "relative"] {
+        assert_eq!(initial_remote_cd_command(Some(path)), None, "{path:?}");
+    }
+    assert_eq!(initial_remote_cd_command(Some(&format!("/{}", "x".repeat(16 * 1024)))), None);
 }
 
 struct Fixture {
@@ -284,14 +388,14 @@ fn shell_confirmation_preserves_early_output_and_remote_directory() {
         let mut fixture = Fixture::new(Mode::Open).await;
         let acquired = fixture.connect().await;
         let (channel, _) =
-            open_shell(&acquired, size(), Some("/srv/Team's App"), &Events::default())
+            open_shell(&acquired, size(), Some("/srv/Team's App "), &Events::default())
                 .await
                 .unwrap();
         assert!(channel.pending.iter().any(
             |message| matches!(message, ChannelMsg::Data { data } if data.starts_with(b"welcome"))
         ));
         let command = fixture.data.recv().await.unwrap();
-        assert_eq!(command, b"cd '/srv/Team'\\''s App'\r");
+        assert_eq!(command, b"cd '/srv/Team'\\''s App '\r");
         drop(channel);
         fixture.forget(&acquired.session).await;
     });

@@ -51,10 +51,10 @@ tocodex-docs/
 !/docs/engineering-evidence.md
 !/docs/internationalization.md
 !/docs/skills/
-!/docs/skills/nebula-runtime/
-!/docs/skills/nebula-runtime/SKILL.md
-!/docs/skills/nebula-runtime/agents/
-!/docs/skills/nebula-runtime/agents/openai.yaml
+!/docs/skills/pebrel-runtime/
+!/docs/skills/pebrel-runtime/SKILL.md
+!/docs/skills/pebrel-runtime/agents/
+!/docs/skills/pebrel-runtime/agents/openai.yaml
 !/docs/release-notes/
 !/docs/release-notes/**
 !/docs/screenshots/

@@ -10,8 +10,8 @@ APP_MANIFEST RT_MANIFEST nebula.manifest
 #endif
 
 1 VERSIONINFO
-FILEVERSION 1,5,0,0
-PRODUCTVERSION 1,5,0,0
+FILEVERSION 1,6,0,0
+PRODUCTVERSION 1,6,0,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L
@@ -24,11 +24,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Kuddev"
             VALUE "FileDescription", "Pebrel"
-            VALUE "FileVersion", "1.5.0"
+            VALUE "FileVersion", "1.6.0"
             VALUE "InternalName", "nebula"
-            VALUE "OriginalFilename", "nebula.exe"
+            VALUE "OriginalFilename", "pebrel.exe"
             VALUE "ProductName", "Pebrel"
-            VALUE "ProductVersion", "1.5.0"
+            VALUE "ProductVersion", "1.6.0"
         END
     END
     BLOCK "VarFileInfo"

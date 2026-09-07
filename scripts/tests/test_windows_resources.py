@@ -24,7 +24,7 @@ class WindowsResourceTests(unittest.TestCase):
         self.assertIn('ICON "nebula.ico"', resource)
         self.assertIn('"ProductName", "Pebrel"', resource)
         self.assertIn('"FileDescription", "Pebrel"', resource)
-        self.assertIn('"OriginalFilename", "nebula.exe"', resource)
+        self.assertIn('"OriginalFilename", "pebrel.exe"', resource)
         self.assertIn("1 VERSIONINFO", resource)
 
     def test_legacy_shell_still_embeds_its_manifest(self):

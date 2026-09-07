@@ -16,11 +16,11 @@ use crate::config::ui_config::Program;
 use crate::config::window::{Class, Identity};
 use crate::logging::LOG_TARGET_IPC_CONFIG;
 
-/// CLI options for the main Nebula executable.
+/// CLI options for the main Pebrel executable.
 #[derive(Parser, Default, Debug)]
 #[clap(
     name = crate::brand::NAME,
-    bin_name = "nebula",
+    bin_name = "pebrel",
     display_name = crate::brand::NAME,
     author,
     about = crate::brand::DESCRIPTION,
@@ -180,7 +180,7 @@ pub struct TerminalOptions {
 ///
 /// The installed verb passes `--working-directory "%V"`; for a drive root
 /// `%V` is `D:\`, so the command line ends in `\"` and `CommandLineToArgvW`
-/// reads that trailing backslash as an escaped quote — Nebula receives `D:"`
+/// reads that trailing backslash as an escaped quote — Pebrel receives `D:"`
 /// and rejects it as an invalid directory (issue #36). A double quote can
 /// never appear in a Windows path, so a trailing one is unambiguously that
 /// swallowed separator: restore it. Any other path is returned unchanged, and
@@ -247,7 +247,7 @@ pub struct WindowIdentity {
     #[clap(short = 'T', short_alias('t'), long)]
     pub title: Option<String>,
 
-    /// Defines window class/app_id on X11/Wayland [default: Nebula].
+    /// Defines window class/app_id on X11/Wayland [default: Pebrel].
     #[clap(long, value_name = "general> | <general>,<instance", value_parser = parse_class)]
     pub class: Option<Class>,
 }
@@ -286,16 +286,16 @@ pub enum Subcommands {
     #[cfg(all(unix, feature = "legacy-shell"))]
     Msg(MessageOptions),
     Migrate(MigrateOptions),
-    /// Validate or create the Nebula configuration.
+    /// Validate or create the Pebrel configuration.
     Config(ConfigOptions),
     /// Test system notification (toast) delivery.
     #[cfg(windows)]
     NotifyTest,
-    /// Install (or --remove) AI hooks plus the Nebula Runtime Skill for
+    /// Install (or --remove) AI hooks plus the Pebrel Runtime Skill for
     /// Codex and Claude Code.
     #[cfg(windows)]
     SetupAi(SetupAiOptions),
-    /// SSH with Nebula shell integration bootstrapped on the remote host, so
+    /// SSH with Pebrel shell integration bootstrapped on the remote host, so
     /// tab icons / spinner / cwd track the program running over the connection
     /// (claude, vim, cargo…). All arguments are forwarded to the system `ssh`.
     #[cfg(windows)]
@@ -306,7 +306,7 @@ pub enum Subcommands {
 /// UI thread, short enough that a wedged runtime does not hang an agent.
 const SHORT_TIMEOUT_MS: u64 = 30_000;
 
-/// Default ceiling for `nebula pane wait` / `nebula agent wait`. Waiting on a
+/// Default ceiling for `pebrel pane wait` / `pebrel agent wait`. Waiting on a
 /// coding agent is measured in minutes, so reusing the query timeout would turn
 /// a normal turn into a spurious `timeout` error.
 const SHORT_WAIT_TIMEOUT_MS: u64 = 600_000;
@@ -345,7 +345,7 @@ pub enum WindowCommand {
 
 #[derive(Args, Debug)]
 pub struct WindowCloseOptions {
-    /// Window id from `nebula pane list`.
+    /// Window id from `pebrel pane list`.
     pub window: u64,
 
     #[clap(flatten)]
@@ -432,7 +432,7 @@ pub struct PaneOptions {
     pub command: PaneCommand,
 }
 
-/// Pane verbs. A pane is addressed by its numeric id from `nebula pane list`.
+/// Pane verbs. A pane is addressed by its numeric id from `pebrel pane list`.
 #[derive(Subcommand, Debug)]
 pub enum PaneCommand {
     /// List every pane with its id, task state, cwd, and Git branch.
@@ -462,7 +462,7 @@ pub struct AgentOptions {
 }
 
 /// Agent verbs. An agent is addressed by the name or stable id from
-/// `nebula agent list` — not by pane, so a restarted session cannot silently
+/// `pebrel agent list` — not by pane, so a restarted session cannot silently
 /// inherit work aimed at the one it replaced.
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
@@ -495,7 +495,7 @@ pub struct ListOptions {
 
 #[derive(Args, Debug)]
 pub struct PaneReadOptions {
-    /// Pane id from `nebula pane list`.
+    /// Pane id from `pebrel pane list`.
     pub pane: u64,
 
     /// Logical terminal rows to read from the buffer tail.
@@ -515,7 +515,7 @@ pub struct PaneReadOptions {
 
 #[derive(Args, Debug)]
 pub struct PaneSendOptions {
-    /// Pane id from `nebula pane list`.
+    /// Pane id from `pebrel pane list`.
     pub pane: u64,
 
     /// The line to write. Several words are joined with single spaces, so both
@@ -568,7 +568,7 @@ pub struct PasteSourceOptions {
 
 #[derive(Args, Debug)]
 pub struct PanePasteOptions {
-    /// Pane id from `nebula pane list`.
+    /// Pane id from `pebrel pane list`.
     pub pane: u64,
 
     #[clap(flatten)]
@@ -598,7 +598,7 @@ pub struct PanePasteOptions {
 
 #[derive(Args, Debug)]
 pub struct PaneWaitOptions {
-    /// Pane id from `nebula pane list`.
+    /// Pane id from `pebrel pane list`.
     pub pane: u64,
 
     /// The state to wait for. `settled` covers finished, failed, and
@@ -624,7 +624,7 @@ pub struct PaneWaitOptions {
 
 #[derive(Args, Debug)]
 pub struct PaneExecOptions {
-    /// Pane id from `nebula pane list`; its current cwd and local environment are reused.
+    /// Pane id from `pebrel pane list`; its current cwd and local environment are reused.
     pub pane: u64,
 
     #[clap(long)]
@@ -641,14 +641,14 @@ pub struct PaneExecOptions {
     #[clap(long, default_value_t = SHORT_TIMEOUT_MS)]
     pub timeout_ms: u64,
 
-    /// Program and arguments. `--` is required so child flags cannot be parsed by Nebula.
+    /// Program and arguments. `--` is required so child flags cannot be parsed by Pebrel.
     #[clap(last = true, required = true, num_args = 1.., value_name = "ARGV")]
     pub argv: Vec<String>,
 }
 
 #[derive(Args, Debug)]
 pub struct PaneCloseOptions {
-    /// Pane id from `nebula pane list`.
+    /// Pane id from `pebrel pane list`.
     pub pane: u64,
 
     #[clap(long)]
@@ -663,7 +663,7 @@ pub struct PaneCloseOptions {
 
 #[derive(Args, Debug)]
 pub struct PaneZoomOptions {
-    /// Pane id from `nebula pane list`.
+    /// Pane id from `pebrel pane list`.
     pub pane: u64,
 
     /// Desired zoom state. Requiring the value keeps the command idempotent.
@@ -687,7 +687,7 @@ pub struct PaneZoomOptions {
 
 #[derive(Args, Debug)]
 pub struct PaneResizeOptions {
-    /// Pane id from `nebula pane list`.
+    /// Pane id from `pebrel pane list`.
     pub pane: u64,
 
     /// Desired share of the pane's direct parent split, from 0.05 through 0.95.
@@ -705,7 +705,7 @@ pub struct PaneResizeOptions {
 
 #[derive(Args, Debug)]
 pub struct AgentSendOptions {
-    /// Agent name or stable id from `nebula agent list`.
+    /// Agent name or stable id from `pebrel agent list`.
     pub agent: String,
 
     /// The task itself. Several words are joined with single spaces, so both
@@ -740,7 +740,7 @@ pub struct AgentSendOptions {
 
 #[derive(Args, Debug)]
 pub struct AgentDelegateOptions {
-    /// Agent name or stable id from `nebula agent list`.
+    /// Agent name or stable id from `pebrel agent list`.
     pub agent: String,
 
     /// The delegated task. Several words are joined with single spaces.
@@ -760,7 +760,7 @@ pub struct AgentDelegateOptions {
 
 #[derive(Args, Debug)]
 pub struct AgentPasteOptions {
-    /// Agent name or stable id from `nebula agent list`.
+    /// Agent name or stable id from `pebrel agent list`.
     pub agent: String,
 
     #[clap(flatten)]
@@ -791,7 +791,7 @@ pub struct AgentPasteOptions {
 
 #[derive(Args, Debug)]
 pub struct AgentReadOptions {
-    /// Agent name or stable id from `nebula agent list`.
+    /// Agent name or stable id from `pebrel agent list`.
     pub agent: String,
 
     /// Logical terminal rows to read from the buffer tail.
@@ -810,7 +810,7 @@ pub struct AgentReadOptions {
 
 #[derive(Args, Debug)]
 pub struct AgentWaitOptions {
-    /// Agent name or stable id from `nebula agent list`.
+    /// Agent name or stable id from `pebrel agent list`.
     pub agent: String,
 
     /// The state to wait for.
@@ -896,7 +896,7 @@ impl ConfigLanguage {
 #[cfg(windows)]
 #[derive(Args, Debug)]
 pub struct SetupAiOptions {
-    /// Remove Nebula's hooks from claude's settings.json instead of
+    /// Remove Pebrel's hooks from claude's settings.json instead of
     /// installing them.
     #[clap(long)]
     pub remove: bool,
@@ -904,7 +904,7 @@ pub struct SetupAiOptions {
 
 /// Options for the `ssh` subcommand: every token after `ssh` is captured raw
 /// and handed to the system `ssh` binary (host, `-p`, `-i`, `-L`, …), so
-/// `nebula ssh -p 2222 user@host` behaves exactly like the real client.
+/// `pebrel ssh -p 2222 user@host` behaves exactly like the real client.
 #[cfg(windows)]
 #[derive(Args, Debug)]
 pub struct SshOptions {
@@ -915,7 +915,7 @@ pub struct SshOptions {
 
 /// Options for the cross-platform runtime control API used by humans and coding agents.
 ///
-/// Start with `nebula ctl describe --pretty` and `nebula ctl snapshot --pretty`.
+/// Start with `pebrel ctl describe --pretty` and `pebrel ctl snapshot --pretty`.
 /// A split returns the new focused pane id; pass that id to `prompt`, `run`, `wait`,
 /// or `read` to build deterministic multi-pane workflows without GUI automation.
 #[derive(Args, Debug)]
@@ -948,7 +948,7 @@ pub enum ControlCommand {
         #[clap(long, value_hint = ValueHint::FilePath, conflicts_with = "spec")]
         file: Option<PathBuf>,
     },
-    /// List only panes Nebula recognizes as AI agents, with semantic state and session identity.
+    /// List only panes Pebrel recognizes as AI agents, with semantic state and session identity.
     Agents {
         #[clap(long)]
         window: Option<u64>,
@@ -1254,7 +1254,7 @@ pub enum ControlWaitState {
     Settled,
 }
 
-/// Send a message to the Nebula socket.
+/// Send a message to the Pebrel socket.
 #[cfg(unix)]
 #[derive(Args, Debug)]
 pub struct MessageOptions {
@@ -1271,13 +1271,13 @@ pub struct MessageOptions {
 #[cfg(unix)]
 #[derive(Subcommand, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum SocketMessage {
-    /// Create a new window in the same Nebula process.
+    /// Create a new window in the same Pebrel process.
     CreateWindow(WindowOptions),
 
-    /// Update the Nebula configuration.
+    /// Update the Pebrel configuration.
     Config(IpcConfig),
 
-    /// Read runtime Nebula configuration.
+    /// Read runtime Pebrel configuration.
     GetConfig(IpcGetConfig),
 }
 
@@ -1501,7 +1501,7 @@ mod tests {
     #[test]
     fn parses_config_check_and_init_subcommands() {
         let check =
-            Options::try_parse_from(["nebula", "config", "check", "--config-file", "sample.lua"])
+            Options::try_parse_from(["pebrel", "config", "check", "--config-file", "sample.lua"])
                 .unwrap();
         assert!(matches!(
             check.subcommands,
@@ -1509,7 +1509,7 @@ mod tests {
         ));
 
         let init =
-            Options::try_parse_from(["nebula", "config", "init", "--language", "zh-CN"]).unwrap();
+            Options::try_parse_from(["pebrel", "config", "init", "--language", "zh-CN"]).unwrap();
         assert!(matches!(
             init.subcommands,
             Some(Subcommands::Config(ConfigOptions {
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn send_options_after_text_are_not_swallowed_by_the_positional() {
         let agent = Options::try_parse_from([
-            "nebula",
+            "pebrel",
             "agent",
             "send",
             "codex",
@@ -1544,7 +1544,7 @@ mod tests {
         assert!(agent.output.pretty);
 
         let pane = Options::try_parse_from([
-            "nebula",
+            "pebrel",
             "pane",
             "send",
             "17",
@@ -1567,7 +1567,7 @@ mod tests {
     #[test]
     fn send_double_dash_preserves_hyphen_prefixed_text() {
         let parsed = Options::try_parse_from([
-            "nebula",
+            "pebrel",
             "agent",
             "send",
             "codex",
@@ -1590,7 +1590,7 @@ mod tests {
     #[test]
     fn paste_sources_are_explicit_and_mutually_exclusive() {
         let parsed = Options::try_parse_from([
-            "nebula",
+            "pebrel",
             "pane",
             "paste",
             "17",
@@ -1610,7 +1610,7 @@ mod tests {
         assert!(options.no_submit);
 
         let parsed =
-            Options::try_parse_from(["nebula", "agent", "paste", "codex", "--stdin", "--wait"])
+            Options::try_parse_from(["pebrel", "agent", "paste", "codex", "--stdin", "--wait"])
                 .unwrap();
         let Some(Subcommands::Agent(AgentOptions { command: AgentCommand::Paste(options) })) =
             parsed.subcommands
@@ -1623,7 +1623,7 @@ mod tests {
 
         assert!(
             Options::try_parse_from([
-                "nebula",
+                "pebrel",
                 "pane",
                 "paste",
                 "17",
@@ -1635,7 +1635,7 @@ mod tests {
         );
         assert!(
             Options::try_parse_from([
-                "nebula",
+                "pebrel",
                 "agent",
                 "paste",
                 "codex",
@@ -1650,7 +1650,7 @@ mod tests {
     #[test]
     fn layout_resource_commands_keep_ids_and_explicit_zoom_state() {
         let parsed = Options::try_parse_from([
-            "nebula", "tab", "move", "2", "0", "--window", "7", "--pretty",
+            "pebrel", "tab", "move", "2", "0", "--window", "7", "--pretty",
         ])
         .unwrap();
         assert!(matches!(
@@ -1667,7 +1667,7 @@ mod tests {
         ));
 
         let parsed = Options::try_parse_from([
-            "nebula", "pane", "zoom", "17", "--zoomed", "false", "--window", "7",
+            "pebrel", "pane", "zoom", "17", "--zoomed", "false", "--window", "7",
         ])
         .unwrap();
         assert!(matches!(
@@ -1683,7 +1683,7 @@ mod tests {
         ));
 
         // 省略状态不是“默认关闭”：调用方必须明确表达期望状态，才能安全重试。
-        assert!(Options::try_parse_from(["nebula", "pane", "zoom", "17"]).is_err());
+        assert!(Options::try_parse_from(["pebrel", "pane", "zoom", "17"]).is_err());
     }
 
     #[test]
@@ -1761,10 +1761,10 @@ mod tests {
         let mut clap = Options::command();
 
         for (shell, file) in
-            &[(Shell::Bash, "nebula.bash"), (Shell::Fish, "nebula.fish"), (Shell::Zsh, "_nebula")]
+            &[(Shell::Bash, "pebrel.bash"), (Shell::Fish, "pebrel.fish"), (Shell::Zsh, "_pebrel")]
         {
             let mut generated = Vec::new();
-            clap_complete::generate(*shell, &mut clap, "nebula", &mut generated);
+            clap_complete::generate(*shell, &mut clap, "pebrel", &mut generated);
             let generated = String::from_utf8_lossy(&generated);
 
             let mut completion = String::new();
@@ -1788,15 +1788,16 @@ mod tests {
     #[ignore = "maintenance command: rewrites checked-in shell completions"]
     fn regenerate_completions() {
         let mut clap = Options::command();
-        let directory = std::env::var_os("NEBULA_COMPLETION_OUTPUT")
+        let directory = std::env::var_os("PEBREL_COMPLETION_OUTPUT")
+            .or_else(|| std::env::var_os("NEBULA_COMPLETION_OUTPUT"))
             .map(PathBuf::from)
             .unwrap_or_else(completion_directory);
         std::fs::create_dir_all(&directory).expect("create completion directory");
         for (shell, file) in
-            &[(Shell::Bash, "nebula.bash"), (Shell::Fish, "nebula.fish"), (Shell::Zsh, "_nebula")]
+            &[(Shell::Bash, "pebrel.bash"), (Shell::Fish, "pebrel.fish"), (Shell::Zsh, "_pebrel")]
         {
             let mut generated = Vec::new();
-            clap_complete::generate(*shell, &mut clap, "nebula", &mut generated);
+            clap_complete::generate(*shell, &mut clap, "pebrel", &mut generated);
             File::create(directory.join(file))
                 .and_then(|mut file| file.write_all(&generated))
                 .expect("write generated completion");

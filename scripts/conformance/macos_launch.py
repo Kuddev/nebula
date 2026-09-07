@@ -60,9 +60,9 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
         require(sys.platform == "darwin", "LaunchServices requires native macOS")
-        with tempfile.TemporaryDirectory(prefix="nebula-installed-smoke-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="pebrel-installed-smoke-") as temporary:
             root = Path(temporary).resolve()
-            installed = root / "Applications" / "Nebula Terminal Preview.app"
+            installed = root / "Applications" / "Pebrel Preview.app"
             subprocess.run(["/usr/bin/ditto", str(args.app.resolve()), str(installed)], check=True)
             subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(installed)], check=True)
             app = ResolvedApp(installed)
@@ -74,6 +74,7 @@ def main() -> int:
                 try:
                     launcher = subprocess.Popen(
                         ["/usr/bin/open", "-n", "-W", "-a", str(installed),
+                         "--env", f"PEBREL_CONFIG_DIR={ctx.config_dir}",
                          "--env", f"NEBULA_CONFIG_DIR={ctx.config_dir}",
                          "--env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin",
                          "--env", "LANG=", "--env", "LC_ALL=", "--env", "LC_CTYPE="],

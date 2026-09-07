@@ -3,6 +3,31 @@
 use super::*;
 
 #[test]
+fn ssh_host_icons_are_confined_to_the_selected_configuration_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let legacy = temporary.path().join("Nebula");
+    let isolated = temporary.path().join("isolated");
+    let save_icon = |directory: &Path, host: &str, icon: &str| {
+        let mut profiles = crate::ssh_profiles::SshProfiles::default();
+        let mut profile = profiles.for_destination(host);
+        profile.icon = Some(icon.to_owned());
+        profiles.upsert(profile);
+        profiles.save(&directory.join("ssh_profiles.json")).unwrap();
+    };
+    save_icon(&legacy, "private@legacy.example", "ubuntu");
+    assert!(ssh_host_icon_ids(&isolated).is_empty());
+    save_icon(&isolated, "fixture@isolated.example", "debian");
+    assert_eq!(
+        ssh_host_icon_ids(&isolated),
+        [("fixture@isolated.example".to_owned(), "debian".to_owned())].into()
+    );
+    assert_eq!(
+        ssh_host_icon_ids(&legacy),
+        [("private@legacy.example".to_owned(), "ubuntu".to_owned())].into()
+    );
+}
+
+#[test]
 fn settings_only_fold_the_sidebar_in_sidebar_tab_mode() {
     assert!(settings_should_fold_sidebar(nebula_settings::TabsPositionName::Sidebar));
     assert!(!settings_should_fold_sidebar(nebula_settings::TabsPositionName::Top));

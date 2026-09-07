@@ -141,7 +141,7 @@ impl SettingsPane {
                         h_flex()
                             .gap(px(7.0))
                             .child(div().text_color(accent).child("❯"))
-                            .child("nebula --version"),
+                            .child("pebrel --version"),
                     )
                     .child(div().mt(px(10.0)).text_size(px(size * 0.75)).child(format!(
                         "{} · {}",

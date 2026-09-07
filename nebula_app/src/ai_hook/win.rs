@@ -6,9 +6,14 @@ use serde_json::{Value, json};
 #[cfg(feature = "legacy-shell")]
 use winit::event_loop::EventLoopProxy;
 
-use super::{CLAUDE_EVENTS, HELPER_ARGS, HELPER_MARK, HOOK_EXE_ENV, PIPE_ENV, parse_envelope};
+use super::{
+    CLAUDE_EVENTS, HELPER_ARGS, HOOK_EXE_ENV, LEGACY_HOOK_EXE_ENV, LEGACY_PIPE_ENV, PIPE_ENV,
+    contains_helper, parse_envelope,
+};
 #[cfg(feature = "legacy-shell")]
 use crate::event::{Event, EventType};
+
+mod managed_files;
 
 // ─── pipe server ────────────────────────────────────────────────────────
 
@@ -31,19 +36,25 @@ pub fn spawn_gpui_server() -> std::sync::mpsc::Receiver<super::AiHookEvent> {
 }
 
 fn spawn_pipe_server(sink: impl Fn(super::AiHookEvent) -> bool + Send + 'static) {
-    let name = format!(r"\\.\pipe\nebula-notify-{}", std::process::id());
+    let name = format!(r"\\.\pipe\pebrel-notify-{}", std::process::id());
     // SAFETY: single-threaded startup; no other thread reads the env yet.
-    unsafe { std::env::set_var(PIPE_ENV, &name) };
+    unsafe {
+        std::env::set_var(PIPE_ENV, &name);
+        std::env::set_var(LEGACY_PIPE_ENV, &name);
+    };
     // Export nebula-hook.exe's path for the opencode plugin (best-effort:
     // if the helper isn't found, the plugin simply no-ops like anywhere
     // outside Nebula). Forward slashes: the path is interpolated into
     // Bun's `$` shell inside the plugin, matching `helper_command`.
     if let Some(helper) = helper_path() {
         let p = helper.display().to_string().replace('\\', "/");
-        unsafe { std::env::set_var(HOOK_EXE_ENV, p) };
+        unsafe {
+            std::env::set_var(HOOK_EXE_ENV, &p);
+            std::env::set_var(LEGACY_HOOK_EXE_ENV, &p);
+        };
     }
     if let Err(err) =
-        std::thread::Builder::new().name("nebula-ai-pipe".into()).spawn(move || serve(&name, sink))
+        std::thread::Builder::new().name("pebrel-ai-pipe".into()).spawn(move || serve(&name, sink))
     {
         log::warn!("ai_hook: failed to spawn pipe server: {err}");
     }
@@ -164,7 +175,7 @@ pub fn spawn_config_guard() {
         log::info!("ai_hook: ai_hooks=0 (setup-ai --remove); auto-install disabled");
         return;
     }
-    if let Err(err) = std::thread::Builder::new().name("nebula-ai-setup".into()).spawn(config_guard)
+    if let Err(err) = std::thread::Builder::new().name("pebrel-ai-setup".into()).spawn(config_guard)
     {
         log::warn!("ai_hook: failed to spawn settings guard: {err}");
     }
@@ -286,8 +297,8 @@ fn announce() {
     }
     match claim_setup_announcement(&nebula_settings::settings_dir()) {
         Ok(true) => crate::notify::toast(
-            "Nebula",
-            "已接入 AI 回合通知（Claude / Codex / Pi / opencode）。撤销：nebula setup-ai --remove",
+            "Pebrel",
+            "已接入 AI 回合通知（Claude / Codex / Pi / opencode）。撤销：pebrel setup-ai --remove",
         ),
         Ok(false) => {},
         Err(error) => log::debug!("ai_hook: could not persist setup announcement: {error}"),
@@ -333,13 +344,19 @@ const NOTIFY_BYTE_BUDGET: usize = 8 * 1024;
 fn desired_codex_notify(current: &[String], helper: &str) -> Option<Vec<String>> {
     let desired: Vec<String> = match current.first() {
         // Already ours: heal the helper path, keep any chain tail as-is.
-        Some(first) if first.contains(HELPER_MARK) => {
+        Some(first) if contains_helper(first) => {
             let mut argv = current.to_vec();
             argv[0] = helper.to_owned();
             argv
         },
         // 已在链中但不在最外层：保持现状，绝不再包（见上）。
-        Some(_) if current.iter().any(|arg| arg.contains(HELPER_MARK)) => return None,
+        Some(_) if current.iter().any(|arg| contains_helper(arg)) => {
+            let mut argv = current.to_vec();
+            if !heal_nested_codex_notify(&mut argv, helper, 0) {
+                return None;
+            }
+            argv
+        },
         // Occupied: wrap the existing notifier behind --chain.
         Some(_) => {
             let mut argv = vec![helper.to_owned(), "codex".to_owned(), "--chain".to_owned()];
@@ -362,6 +379,34 @@ fn desired_codex_notify(current: &[String], helper: &str) -> Option<Vec<String>>
         return None;
     }
     Some(desired)
+}
+
+fn heal_nested_codex_notify(argv: &mut [String], helper: &str, depth: usize) -> bool {
+    if depth >= 8 || argv.iter().map(String::len).sum::<usize>() > NOTIFY_BYTE_BUDGET {
+        return false;
+    }
+    let mut changed = false;
+    if let Some(first) = argv.first_mut().filter(|first| contains_helper(first)) {
+        if first != helper {
+            *first = helper.to_owned();
+            changed = true;
+        }
+    }
+    for index in 1..argv.len() {
+        if argv[index - 1] != "--previous-notify" {
+            continue;
+        }
+        let Ok(mut previous) = serde_json::from_str::<Vec<String>>(&argv[index]) else {
+            continue;
+        };
+        if heal_nested_codex_notify(&mut previous, helper, depth + 1) {
+            if let Ok(serialized) = serde_json::to_string(&previous) {
+                argv[index] = serialized;
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 /// Wire codex's `notify` to nebula-hook. Codex has a SINGLE notify slot
@@ -397,7 +442,7 @@ pub fn ensure_codex_notify() -> bool {
     }
     doc["notify"] = toml_edit::value(array);
 
-    let bak = path.with_extension("toml.nebula-bak");
+    let bak = path.with_extension("toml.pebrel-bak");
     if !bak.exists() {
         if let Err(err) = std::fs::copy(&path, &bak) {
             log::warn!("ai_hook: backup failed ({err}); not touching {}", path.display());
@@ -434,7 +479,7 @@ fn remove_codex_notify() -> std::io::Result<bool> {
         .and_then(|v| v.as_array())
         .map(|a| a.iter().filter_map(|i| i.as_str().map(str::to_owned)).collect())
         .unwrap_or_default();
-    if !current.first().is_some_and(|f| f.contains(HELPER_MARK)) {
+    if !current.first().is_some_and(|f| contains_helper(f)) {
         return Ok(false); // not ours
     }
     match current.iter().position(|a| a == "--chain") {
@@ -466,11 +511,11 @@ fn remove_codex_notify() -> std::io::Result<bool> {
 /// starting the next, so a delayed processing edge cannot overtake idle.
 /// A 3 s watchdog releases the chain if a helper hangs — otherwise one stuck
 /// process would swallow every later event, including the final idle.
-const OPENCODE_PLUGIN_JS: &str = r#"// Nebula ↔ opencode bridge — AUTO-GENERATED by Nebula, do not edit.
-// Forwards turn lifecycle to Nebula's sidebar (icon + spinner + toasts).
-// Inert outside Nebula (no NEBULA_HOOK_EXE in the environment).
-export const NebulaNotify = async ({ $, directory, worktree }) => {
-  const hook = process.env.NEBULA_HOOK_EXE
+const OPENCODE_PLUGIN_JS: &str = r#"// Pebrel ↔ opencode bridge — AUTO-GENERATED by Pebrel, do not edit.
+// Forwards turn lifecycle to Pebrel's sidebar (icon + spinner + toasts).
+// Inert outside Pebrel (no PEBREL_HOOK_EXE or legacy alias in the environment).
+export const PebrelNotify = async ({ $, directory, worktree }) => {
+  const hook = process.env.PEBREL_HOOK_EXE ?? process.env.NEBULA_HOOK_EXE
   if (!hook) return {}
   let active = false
   let lastUser = ""
@@ -481,7 +526,7 @@ export const NebulaNotify = async ({ $, directory, worktree }) => {
   const WATCHDOG_MS = 3000
   const send = (obj) => {
     // Serialize helper processes. opencode may publish busy → idle → idle in
-    // one tick; detached children can otherwise reach Nebula out of order.
+    // one tick; detached children can otherwise reach Pebrel out of order.
     try {
       if (sessionId) obj.session_id = sessionId
       if (!obj.cwd && (directory || worktree)) obj.cwd = directory || worktree
@@ -565,7 +610,7 @@ export const NebulaNotify = async ({ $, directory, worktree }) => {
 // Pi 官方扩展 API 在 agent_start/agent_end 提供稳定的回合边界。扩展只做
 // fire-and-forget 转发，且 NEBULA_HOOK_EXE 不存在时完全静默，因此全局安装
 // 不会影响从其他终端启动的 Pi。
-const PI_EXTENSION_TS: &str = r#"// Nebula ↔ Pi bridge — AUTO-GENERATED by Nebula, do not edit.
+const PI_EXTENSION_TS: &str = r#"// Pebrel ↔ Pi bridge — AUTO-GENERATED by Pebrel, do not edit.
 import { spawn } from "node:child_process";
 import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -585,7 +630,7 @@ export default function (pi: ExtensionAPI) {
   let sequence = 0;
   const sequenceEpoch = BigInt(Date.now()) * 1000000n;
   const send = (kind: "session-start" | "prompt" | "tool-complete" | "done" | "session-end", ctx?: any) => {
-    const hook = process.env.NEBULA_HOOK_EXE;
+    const hook = process.env.PEBREL_HOOK_EXE ?? process.env.NEBULA_HOOK_EXE;
     if (!hook) return;
     try {
       const session_id = sessionIdFor(ctx);
@@ -654,7 +699,7 @@ pub fn ensure_claude_hooks() -> bool {
 
     // First modification keeps a pristine copy next to the original.
     if path.exists() {
-        let bak = path.with_extension("json.nebula-bak");
+        let bak = path.with_extension("json.pebrel-bak");
         if !bak.exists() {
             if let Err(err) = std::fs::copy(&path, &bak) {
                 log::warn!("ai_hook: backup failed ({err}); not touching {}", path.display());
@@ -691,10 +736,7 @@ fn install_into(root: &mut Value, command: &str) -> Option<bool> {
                 continue;
             };
             for cmd in cmds {
-                let ours = cmd
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|c| c.contains(HELPER_MARK));
+                let ours = cmd.get("command").and_then(Value::as_str).is_some_and(contains_helper);
                 if !ours {
                     continue;
                 }
@@ -748,9 +790,7 @@ fn remove_hooks() -> std::io::Result<bool> {
                 if let Some(cmds) = matcher.get_mut("hooks").and_then(Value::as_array_mut) {
                     let before = cmds.len();
                     cmds.retain(|c| {
-                        !c.get("command")
-                            .and_then(Value::as_str)
-                            .is_some_and(|c| c.contains(HELPER_MARK))
+                        !c.get("command").and_then(Value::as_str).is_some_and(contains_helper)
                     });
                     changed |= cmds.len() != before;
                 }
@@ -778,7 +818,7 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
         let mut failed = false;
         match remove_hooks() {
             Ok(true) => println!("claude: 已从 {} 移除 hooks。", path.display()),
-            Ok(false) => println!("claude: {} 中没有 Nebula 的 hooks。", path.display()),
+            Ok(false) => println!("claude: {} 中没有 Pebrel 的 hooks。", path.display()),
             Err(err) => {
                 eprintln!("claude: 移除失败：{err}");
                 failed = true;
@@ -786,23 +826,23 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
         }
         match remove_codex_notify() {
             Ok(true) => println!("codex: 已还原 config.toml 的 notify。"),
-            Ok(false) => println!("codex: notify 不是 Nebula 接管的，未改动。"),
+            Ok(false) => println!("codex: notify 不是 Pebrel 接管的，未改动。"),
             Err(err) => {
                 eprintln!("codex: 还原失败：{err}");
                 failed = true;
             },
         }
         match remove_opencode_plugin() {
-            Ok(true) => println!("opencode: 已删除 plugins/nebula.js。"),
-            Ok(false) => println!("opencode: 没有 Nebula 的插件，未改动。"),
+            Ok(true) => println!("opencode: 已删除 Pebrel 管理的插件。"),
+            Ok(false) => println!("opencode: 没有 Pebrel 的插件，未改动。"),
             Err(err) => {
                 eprintln!("opencode: 删除失败：{err}");
                 failed = true;
             },
         }
         match remove_pi_extension() {
-            Ok(true) => println!("pi: 已删除 extensions/nebula.ts。"),
-            Ok(false) => println!("pi: 没有 Nebula 的扩展，未改动。"),
+            Ok(true) => println!("pi: 已删除 Pebrel 管理的扩展。"),
+            Ok(false) => println!("pi: 没有 Pebrel 的扩展，未改动。"),
             Err(err) => {
                 eprintln!("pi: 删除失败：{err}");
                 failed = true;
@@ -811,10 +851,10 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
         for (agent, path) in runtime_skill_candidates() {
             match remove_runtime_skill(&path) {
                 Ok(ManagedSkillRemoval::Removed) => {
-                    println!("{agent}: 已移除 Nebula Runtime Skill（{}）。", path.display())
+                    println!("{agent}: 已移除 Pebrel Runtime Skill（{}）。", path.display())
                 },
                 Ok(ManagedSkillRemoval::Absent) => {
-                    println!("{agent}: 没有 Nebula 管理的 Runtime Skill，未改动。")
+                    println!("{agent}: 没有 Pebrel 管理的 Runtime Skill，未改动。")
                 },
                 Ok(ManagedSkillRemoval::Conflict) => {
                     eprintln!(
@@ -833,7 +873,7 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
         // 刚清掉的四处原样装回——移除必须比自愈活得久（#8、#38）。
         match nebula_settings::persist_keys(&[("ai_hooks", "0".to_owned())]) {
             Ok(()) => println!(
-                "已写入 ai_hooks=0：Nebula 启动时不再自动接线（重新启用：nebula setup-ai）。"
+                "已写入 ai_hooks=0：Pebrel 启动时不再自动接线（重新启用：pebrel setup-ai）。"
             ),
             Err(err) => {
                 eprintln!("警告：无法写入 ai_hooks=0（{err}），下次启动仍会自动装回。");
@@ -849,7 +889,7 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
             println!("hook 命令：{command} {}（exec 形式，不经 shell 解析）", HELPER_ARGS[0])
         },
         None => {
-            eprintln!("runtime/ 和 nebula.exe 同目录中均未找到 nebula-hook.exe，无法安装。");
+            eprintln!("runtime/ 和 pebrel.exe 同目录中均未找到 pebrel-hook.exe，无法安装。");
             return 1;
         },
     }
@@ -863,7 +903,7 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
     }
     if dir.exists() {
         if ensure_claude_hooks() {
-            println!("claude: 已写入 {}（首次改动备份 *.nebula-bak）。", path.display());
+            println!("claude: 已写入 {}（首次改动备份 *.pebrel-bak）。", path.display());
         } else {
             println!("claude: {} 已是最新。", path.display());
         }
@@ -882,35 +922,29 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
     }
     match opencode_config_dir() {
         Some(cfg) if cfg.exists() => {
-            if ensure_opencode_plugin() {
-                println!("opencode: 已安装 {}。", cfg.join("plugins").join("nebula.js").display());
-            } else {
-                println!("opencode: 插件已是最新。");
-            }
+            let dir = cfg.join("plugins");
+            setup_failed |= report_cli_bridge_install("opencode", &dir, Bridge::Opencode);
         },
         _ => println!("opencode: 未检测到（~/.config/opencode 不存在），跳过。"),
     }
     match pi_agent_dir() {
         Some(agent) if agent.exists() => {
-            if ensure_pi_extension() {
-                println!("pi: 已安装 {}。", agent.join("extensions").join("nebula.ts").display());
-            } else {
-                println!("pi: 扩展已是最新。");
-            }
+            let dir = agent.join("extensions");
+            setup_failed |= report_cli_bridge_install("pi", &dir, Bridge::Pi);
         },
         _ => println!("pi: 未检测到（~/.pi/agent 不存在），跳过。"),
     }
     for (agent, path, result) in ensure_runtime_skills() {
         match result {
             Ok(ManagedSkillInstall::Installed) => {
-                println!("{agent}: 已安装 Nebula Runtime Skill 到 {}。", path.display())
+                println!("{agent}: 已安装 Pebrel Runtime Skill 到 {}。", path.display())
             },
             Ok(ManagedSkillInstall::Current) => {
-                println!("{agent}: Nebula Runtime Skill 已是最新。")
+                println!("{agent}: Pebrel Runtime Skill 已是最新。")
             },
             Ok(ManagedSkillInstall::Conflict) => {
                 eprintln!(
-                    "{agent}: {} 已存在非 Nebula 管理或被编辑的同名 Skill，未覆盖。",
+                    "{agent}: {} 或旧目录存在非 Pebrel 管理或被编辑的 Skill，未覆盖。",
                     path.display()
                 );
                 setup_failed = true;
@@ -925,12 +959,36 @@ pub fn setup_ai_cli(remove: bool) -> i32 {
     i32::from(setup_failed)
 }
 
+fn report_cli_bridge_install(agent: &str, directory: &Path, bridge: Bridge) -> bool {
+    let path = directory.join(bridge.files().0);
+    match install_bridge(directory, bridge) {
+        Ok(managed_files::Install::Installed) => {
+            println!("{agent}: 已安装 {}。", path.display());
+            announce();
+            false
+        },
+        Ok(managed_files::Install::Current) => {
+            println!("{agent}: {} 已是最新。", path.display());
+            false
+        },
+        Ok(managed_files::Install::Conflict) => {
+            eprintln!("{agent}: {} 或旧文件已被编辑或属于用户，未覆盖。", path.display());
+            true
+        },
+        Err(error) => {
+            eprintln!("{agent}: 安装 {} 失败：{error}", path.display());
+            true
+        },
+    }
+}
+
 // ─── Runtime skill (Codex + Claude Code) ───────────────────────────────
 
-const RUNTIME_SKILL_MD: &str = include_str!("../../../docs/skills/nebula-runtime/SKILL.md");
+const RUNTIME_SKILL_MD: &str = include_str!("../../../docs/skills/pebrel-runtime/SKILL.md");
 const RUNTIME_SKILL_OPENAI_YAML: &str =
-    include_str!("../../../docs/skills/nebula-runtime/agents/openai.yaml");
-const RUNTIME_SKILL_MARKER: &str = ".nebula-managed";
+    include_str!("../../../docs/skills/pebrel-runtime/agents/openai.yaml");
+const RUNTIME_SKILL_MARKER: &str = ".pebrel-managed";
+const LEGACY_RUNTIME_SKILL_MARKER: &str = ".nebula-managed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedSkillInstall {
@@ -951,11 +1009,11 @@ fn runtime_skill_candidates() -> Vec<(&'static str, PathBuf)> {
     if let Some(profile) = std::env::var_os("USERPROFILE") {
         targets.push((
             "codex",
-            PathBuf::from(profile).join(".agents").join("skills").join("nebula-runtime"),
+            PathBuf::from(profile).join(".agents").join("skills").join("pebrel-runtime"),
         ));
     }
     if let Some(claude) = claude_config_dir() {
-        targets.push(("claude", claude.join("skills").join("nebula-runtime")));
+        targets.push(("claude", claude.join("skills").join("pebrel-runtime")));
     }
     targets
 }
@@ -991,6 +1049,13 @@ fn read_skill_fingerprint(dir: &Path) -> Option<String> {
     Some(skill_fingerprint(&skill, &metadata))
 }
 
+fn read_skill_marker(dir: &Path) -> Option<String> {
+    [RUNTIME_SKILL_MARKER, LEGACY_RUNTIME_SKILL_MARKER]
+        .into_iter()
+        .find_map(|name| std::fs::read_to_string(dir.join(name)).ok())
+        .map(|value| value.trim().to_owned())
+}
+
 fn ensure_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillInstall> {
     let skill_path = dir.join("SKILL.md");
     let metadata_path = dir.join("agents").join("openai.yaml");
@@ -998,7 +1063,7 @@ fn ensure_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillInstall> {
     let expected =
         skill_fingerprint(RUNTIME_SKILL_MD.as_bytes(), RUNTIME_SKILL_OPENAI_YAML.as_bytes());
     let current = read_skill_fingerprint(dir);
-    let marker = std::fs::read_to_string(&marker_path).ok().map(|value| value.trim().to_owned());
+    let marker = read_skill_marker(dir);
     let exact_skill =
         std::fs::read(&skill_path).is_ok_and(|contents| contents == RUNTIME_SKILL_MD.as_bytes());
     let metadata_compatible = !metadata_path.exists()
@@ -1007,34 +1072,85 @@ fn ensure_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillInstall> {
     let empty = !skill_path.exists() && !metadata_path.exists();
     let owned = current.as_ref().zip(marker.as_ref()).is_some_and(|(a, b)| a == b);
 
-    if current.as_deref() == Some(expected.as_str()) && marker.as_deref() == Some(expected.as_str())
-    {
-        return Ok(ManagedSkillInstall::Current);
-    }
     if !(empty || owned || (exact_skill && metadata_compatible)) {
         return Ok(ManagedSkillInstall::Conflict);
     }
 
+    let legacy = dir.with_file_name("nebula-runtime");
+    let migrating = legacy != dir && legacy.exists();
+    if migrating {
+        let legacy_owned = read_skill_fingerprint(&legacy)
+            .zip(read_skill_marker(&legacy))
+            .is_some_and(|(fingerprint, marker)| fingerprint == marker);
+        if !legacy_owned {
+            return Ok(ManagedSkillInstall::Conflict);
+        }
+        if dir.exists() {
+            if remove_skill_at(&legacy)? == ManagedSkillRemoval::Conflict {
+                return Ok(ManagedSkillInstall::Conflict);
+            }
+        } else {
+            std::fs::rename(&legacy, dir)?;
+        }
+    }
+    if !migrating
+        && current.as_deref() == Some(expected.as_str())
+        && std::fs::read_to_string(&marker_path).is_ok_and(|value| value.trim() == expected)
+    {
+        return Ok(ManagedSkillInstall::Current);
+    }
+
+    let old_marker = dir.join(LEGACY_RUNTIME_SKILL_MARKER);
+    let remove_old_marker = std::fs::read_to_string(&old_marker)
+        .ok()
+        .zip(read_skill_fingerprint(dir))
+        .is_some_and(|(marker, fingerprint)| marker.trim() == fingerprint);
     // 标记只在两份内容都原子写完后落下；崩溃不会把半套文件误认成
     // Nebula 所有，后续也绝不凭目录名覆盖用户同名 Skill。
     crate::atomic_file::write(&skill_path, RUNTIME_SKILL_MD.as_bytes())?;
     crate::atomic_file::write(&metadata_path, RUNTIME_SKILL_OPENAI_YAML.as_bytes())?;
     crate::atomic_file::write(&marker_path, format!("{expected}\n").as_bytes())?;
+    if remove_old_marker {
+        std::fs::remove_file(old_marker)?;
+    }
     Ok(ManagedSkillInstall::Installed)
 }
 
 fn remove_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillRemoval> {
-    let marker_path = dir.join(RUNTIME_SKILL_MARKER);
-    let Some(marker) =
-        std::fs::read_to_string(&marker_path).ok().map(|value| value.trim().to_owned())
-    else {
+    let current = remove_skill_at(dir)?;
+    let legacy_dir = dir.with_file_name("nebula-runtime");
+    if legacy_dir == dir {
+        return Ok(current);
+    }
+    let legacy = remove_skill_at(&legacy_dir)?;
+    Ok(match (current, legacy) {
+        (ManagedSkillRemoval::Conflict, _) | (_, ManagedSkillRemoval::Conflict) => {
+            ManagedSkillRemoval::Conflict
+        },
+        (ManagedSkillRemoval::Removed, _) | (_, ManagedSkillRemoval::Removed) => {
+            ManagedSkillRemoval::Removed
+        },
+        _ => ManagedSkillRemoval::Absent,
+    })
+}
+
+fn remove_skill_at(dir: &Path) -> std::io::Result<ManagedSkillRemoval> {
+    let Some(marker) = read_skill_marker(dir) else {
         return Ok(ManagedSkillRemoval::Absent);
     };
     if read_skill_fingerprint(dir).as_deref() != Some(marker.as_str()) {
         return Ok(ManagedSkillRemoval::Conflict);
     }
 
-    for path in [dir.join("SKILL.md"), dir.join("agents").join("openai.yaml"), marker_path] {
+    let marker_paths: Vec<_> = [RUNTIME_SKILL_MARKER, LEGACY_RUNTIME_SKILL_MARKER]
+        .into_iter()
+        .map(|name| dir.join(name))
+        .filter(|path| std::fs::read_to_string(path).is_ok_and(|value| value.trim() == marker))
+        .collect();
+    for path in [dir.join("SKILL.md"), dir.join("agents").join("openai.yaml")]
+        .into_iter()
+        .chain(marker_paths)
+    {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
@@ -1052,14 +1168,15 @@ fn remove_runtime_skill(dir: &Path) -> std::io::Result<ManagedSkillRemoval> {
 #[cfg(test)]
 mod runtime_skill_tests {
     use super::{
-        ManagedSkillInstall, ManagedSkillRemoval, RUNTIME_SKILL_MD, ensure_runtime_skill,
-        remove_runtime_skill,
+        LEGACY_RUNTIME_SKILL_MARKER, ManagedSkillInstall, ManagedSkillRemoval,
+        RUNTIME_SKILL_MARKER, RUNTIME_SKILL_MD, ensure_runtime_skill, remove_runtime_skill,
+        skill_fingerprint,
     };
 
     #[test]
     fn managed_skill_installs_idempotently_and_removes_its_own_files() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("nebula-runtime");
+        let dir = temp.path().join("pebrel-runtime");
 
         assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Installed);
         assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Current);
@@ -1071,7 +1188,7 @@ mod runtime_skill_tests {
     #[test]
     fn managed_skill_never_overwrites_an_unmanaged_same_name() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("nebula-runtime");
+        let dir = temp.path().join("pebrel-runtime");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("SKILL.md"), "user-owned\n").unwrap();
 
@@ -1083,7 +1200,7 @@ mod runtime_skill_tests {
     #[test]
     fn managed_skill_preserves_user_edits_during_update_and_remove() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("nebula-runtime");
+        let dir = temp.path().join("pebrel-runtime");
         assert_eq!(ensure_runtime_skill(&dir).unwrap(), ManagedSkillInstall::Installed);
         std::fs::write(dir.join("SKILL.md"), "edited after install\n").unwrap();
 
@@ -1093,6 +1210,59 @@ mod runtime_skill_tests {
             std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
             "edited after install\n"
         );
+    }
+    fn legacy_skill(directory: &std::path::Path) -> std::path::PathBuf {
+        let legacy = directory.join("nebula-runtime");
+        std::fs::create_dir_all(legacy.join("agents")).unwrap();
+        std::fs::write(legacy.join("SKILL.md"), "legacy skill").unwrap();
+        std::fs::write(legacy.join("agents/openai.yaml"), "legacy metadata").unwrap();
+        std::fs::write(
+            legacy.join(LEGACY_RUNTIME_SKILL_MARKER),
+            skill_fingerprint(b"legacy skill", b"legacy metadata"),
+        )
+        .unwrap();
+        legacy
+    }
+
+    #[test]
+    fn legacy_skill_migrates_without_losing_extra_user_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = legacy_skill(temp.path());
+        std::fs::write(legacy.join("notes.txt"), "user notes").unwrap();
+        let path = temp.path().join("pebrel-runtime");
+        assert_eq!(ensure_runtime_skill(&path).unwrap(), ManagedSkillInstall::Installed);
+        assert!(!legacy.exists());
+        assert_eq!(std::fs::read_to_string(path.join("notes.txt")).unwrap(), "user notes");
+        assert!(path.join(RUNTIME_SKILL_MARKER).is_file());
+        assert!(!path.join(LEGACY_RUNTIME_SKILL_MARKER).exists());
+        assert_eq!(ensure_runtime_skill(&path).unwrap(), ManagedSkillInstall::Current);
+    }
+
+    #[test]
+    fn edited_legacy_skill_prevents_a_second_registration() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = legacy_skill(temp.path());
+        std::fs::write(legacy.join("SKILL.md"), "edited legacy skill").unwrap();
+        let path = temp.path().join("pebrel-runtime");
+        assert_eq!(ensure_runtime_skill(&path).unwrap(), ManagedSkillInstall::Conflict);
+        assert!(!path.exists());
+        assert_eq!(remove_runtime_skill(&path).unwrap(), ManagedSkillRemoval::Conflict);
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("SKILL.md")).unwrap(),
+            "edited legacy skill"
+        );
+    }
+
+    #[test]
+    fn new_skill_name_conflict_preserves_the_valid_legacy_skill() {
+        let temp = tempfile::tempdir().unwrap();
+        let legacy = legacy_skill(temp.path());
+        let path = temp.path().join("pebrel-runtime");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("SKILL.md"), "user skill").unwrap();
+        assert_eq!(ensure_runtime_skill(&path).unwrap(), ManagedSkillInstall::Conflict);
+        assert_eq!(std::fs::read_to_string(legacy.join("SKILL.md")).unwrap(), "legacy skill");
+        assert_eq!(std::fs::read_to_string(path.join("SKILL.md")).unwrap(), "user skill");
     }
 }
 
@@ -1125,39 +1295,13 @@ pub fn ensure_opencode_plugin() -> bool {
     // Only act when opencode exists — don't scaffold its config tree.
     let Some(cfg) = opencode_config_dir().filter(|d| d.exists()) else { return false };
     let dir = cfg.join("plugins");
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        log::warn!("ai_hook: cannot create {}: {err}", dir.display());
-        return false;
-    }
-    let path = dir.join("nebula.js");
-    // Skip the rewrite (and opencode's file-watcher reload) when identical.
-    if std::fs::read_to_string(&path).is_ok_and(|cur| cur == OPENCODE_PLUGIN_JS) {
-        return false;
-    }
-    match write_atomic(&path, OPENCODE_PLUGIN_JS) {
-        Ok(()) => {
-            log::info!("ai_hook: opencode plugin installed at {}", path.display());
-            announce();
-            true
-        },
-        Err(err) => {
-            log::warn!("ai_hook: failed to write {}: {err}", path.display());
-            false
-        },
-    }
+    report_bridge_install(&dir.join("pebrel.js"), install_bridge(&dir, Bridge::Opencode))
 }
 
 /// Undo [`ensure_opencode_plugin`]: delete the plugin file if it is ours.
 fn remove_opencode_plugin() -> std::io::Result<bool> {
     let Some(cfg) = opencode_config_dir() else { return Ok(false) };
-    let path = cfg.join("plugins").join("nebula.js");
-    // Only delete a file we recognise as ours (carries the pipe env name).
-    let ours = std::fs::read_to_string(&path).is_ok_and(|c| c.contains("NEBULA_HOOK_EXE"));
-    if ours {
-        std::fs::remove_file(&path)?;
-        return Ok(true);
-    }
-    Ok(false)
+    remove_bridge(&cfg.join("plugins"), Bridge::Opencode)
 }
 
 // ─── Pi extension (~/.pi/agent/extensions/nebula.ts) ───────────────────
@@ -1171,37 +1315,75 @@ fn pi_agent_dir() -> Option<PathBuf> {
 pub fn ensure_pi_extension() -> bool {
     let Some(agent) = pi_agent_dir().filter(|dir| dir.exists()) else { return false };
     let dir = agent.join("extensions");
-    if let Err(err) = std::fs::create_dir_all(&dir) {
-        log::warn!("ai_hook: cannot create {}: {err}", dir.display());
-        return false;
-    }
-    let path = dir.join("nebula.ts");
-    if std::fs::read_to_string(&path).is_ok_and(|current| current == PI_EXTENSION_TS) {
-        return false;
-    }
-    match write_atomic(&path, PI_EXTENSION_TS) {
-        Ok(()) => {
-            log::info!("ai_hook: Pi extension installed at {}", path.display());
-            announce();
-            true
-        },
-        Err(err) => {
-            log::warn!("ai_hook: failed to write {}: {err}", path.display());
-            false
-        },
-    }
+    report_bridge_install(&dir.join("pebrel.ts"), install_bridge(&dir, Bridge::Pi))
 }
 
 fn remove_pi_extension() -> std::io::Result<bool> {
     let Some(agent) = pi_agent_dir() else { return Ok(false) };
-    let path = agent.join("extensions").join("nebula.ts");
-    let ours = std::fs::read_to_string(&path)
-        .is_ok_and(|content| content.contains("NEBULA_HOOK_EXE") && content.contains("Pi bridge"));
-    if !ours {
-        return Ok(false);
+    remove_bridge(&agent.join("extensions"), Bridge::Pi)
+}
+
+#[derive(Clone, Copy)]
+enum Bridge {
+    Opencode,
+    Pi,
+}
+
+impl Bridge {
+    fn files(self) -> (&'static str, &'static str, &'static str, &'static [&'static str]) {
+        // Exact embedded payloads verified from v1.0.0 through v1.5.0.
+        match self {
+            Self::Opencode => (
+                "pebrel.js",
+                "nebula.js",
+                OPENCODE_PLUGIN_JS,
+                &[
+                    "f42225dac77b7f9e577b6a025309c44f8b35a830a60dee475eefc68f00c30190",
+                    "e81481ed990d205911f22096a34aff5bbbda3d220450a3b39230b121ca158075",
+                    "5f155e7330a9ef51c5ad1a048e27bedf6f48ade94e0bbe0624d76e632b545a06",
+                ],
+            ),
+            Self::Pi => (
+                "pebrel.ts",
+                "nebula.ts",
+                PI_EXTENSION_TS,
+                &[
+                    "52a13a3a39114a9ca1ddb1e224712449124a532a21e9a57e6627a89d2ae02302",
+                    "496680cbec44d1f4b60f2138ec86b8fe453a74e974507867cb72736c0ac00766",
+                    "50e81b910107150fd4c7e47064ab2b78e4fc6dfca4484d8ad3d64f17a0a5fb7e",
+                ],
+            ),
+        }
     }
-    std::fs::remove_file(path)?;
-    Ok(true)
+}
+
+fn install_bridge(dir: &Path, bridge: Bridge) -> std::io::Result<managed_files::Install> {
+    let (name, legacy, content, hashes) = bridge.files();
+    managed_files::install(&dir.join(name), &dir.join(legacy), content, hashes)
+}
+
+fn remove_bridge(dir: &Path, bridge: Bridge) -> std::io::Result<bool> {
+    let (name, legacy, content, hashes) = bridge.files();
+    managed_files::remove(&dir.join(name), &dir.join(legacy), content, hashes)
+}
+
+fn report_bridge_install(path: &Path, result: std::io::Result<managed_files::Install>) -> bool {
+    match result {
+        Ok(managed_files::Install::Installed) => {
+            log::info!("ai_hook: installed bridge at {}", path.display());
+            announce();
+            true
+        },
+        Ok(managed_files::Install::Current) => false,
+        Ok(managed_files::Install::Conflict) => {
+            log::warn!("ai_hook: preserving edited or unmanaged bridge near {}", path.display());
+            false
+        },
+        Err(error) => {
+            log::warn!("ai_hook: failed to install bridge at {}: {error}", path.display());
+            false
+        },
+    }
 }
 
 /// Absolute path of the bridge exe.
@@ -1228,7 +1410,7 @@ fn helper_path() -> Option<PathBuf> {
         None => {
             if !HELPER_MISSING_ANNOUNCED.swap(true, Ordering::Relaxed) {
                 log::warn!(
-                    "ai_hook: nebula-hook.exe missing from runtime/ and executable directory; AI integrations not installed"
+                    "ai_hook: pebrel-hook.exe missing from runtime/ and executable directory; AI integrations not installed"
                 );
             }
             None
@@ -1239,9 +1421,14 @@ fn helper_path() -> Option<PathBuf> {
 fn helper_path_from_exe(exe: &Path) -> Option<PathBuf> {
     let exe_dir = exe.parent()?;
     // 新包优先使用分类目录，旧同目录位置仅用于开发构建和兼容历史包。
-    [exe_dir.join("runtime").join("nebula-hook.exe"), exe_dir.join("nebula-hook.exe")]
-        .into_iter()
-        .find(|path| path.is_file())
+    [
+        exe_dir.join("runtime").join("pebrel-hook.exe"),
+        exe_dir.join("pebrel-hook.exe"),
+        exe_dir.join("runtime").join("nebula-hook.exe"),
+        exe_dir.join("nebula-hook.exe"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 /// The hook entry's `command`: nothing but the helper's absolute path.
@@ -1273,7 +1460,7 @@ fn write_atomic(path: &Path, data: &str) -> std::io::Result<()> {
     //
     // 内容本身是幂等的（装的是同一套 hook 条目），所以最后谁赢都行，
     // 要防的只是这个假报错。
-    let tmp = path.with_extension(format!("nebula-tmp-{}", std::process::id()));
+    let tmp = path.with_extension(format!("pebrel-tmp-{}", std::process::id()));
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, path)
 }
@@ -1284,7 +1471,7 @@ mod generated_hook_tests {
 
     use super::{CLAUDE_EVENTS, OPENCODE_PLUGIN_JS, PI_EXTENSION_TS, install_into};
 
-    const HELPER: &str = "C:/Program Files/Nebula Terminal/runtime/nebula-hook.exe";
+    const HELPER: &str = "C:/Program Files/Pebrel/runtime/pebrel-hook.exe";
 
     #[test]
     fn claude_install_includes_permission_requests_and_remains_idempotent() {
@@ -1326,7 +1513,7 @@ mod generated_hook_tests {
                 "SessionStart": [{
                     "hooks": [{
                         "type": "command",
-                        "command": format!("\"{HELPER}\" claude"),
+                        "command": "\"D:/old/Nebula/runtime/nebula-hook.exe\" claude",
                         "timeout": 10,
                     }]
                 }]
@@ -1351,6 +1538,40 @@ mod generated_hook_tests {
         assert!(PI_EXTENSION_TS.contains("getSessionFile"));
         assert!(PI_EXTENSION_TS.contains("const sequenceEpoch = BigInt(Date.now())"));
         assert!(PI_EXTENSION_TS.contains("event_id"));
+        for source in [OPENCODE_PLUGIN_JS, PI_EXTENSION_TS] {
+            assert!(source.contains("process.env.PEBREL_HOOK_EXE ?? process.env.NEBULA_HOOK_EXE"));
+        }
+    }
+
+    #[test]
+    fn verified_legacy_plugins_migrate_to_a_single_current_bridge() {
+        use super::{Bridge, install_bridge, managed_files};
+
+        let temp = tempfile::tempdir().unwrap();
+        for bridge in [Bridge::Opencode, Bridge::Pi] {
+            let (name, legacy_name, source, _) = bridge.files();
+            let legacy = source
+                .replace("Pebrel", "Nebula")
+                .replace(
+                    "no PEBREL_HOOK_EXE or legacy alias in the environment",
+                    "no NEBULA_HOOK_EXE in the environment",
+                )
+                .replace(
+                    "process.env.PEBREL_HOOK_EXE ?? process.env.NEBULA_HOOK_EXE",
+                    "process.env.NEBULA_HOOK_EXE",
+                );
+            std::fs::write(temp.path().join(legacy_name), legacy).unwrap();
+            assert_eq!(
+                install_bridge(temp.path(), bridge).unwrap(),
+                managed_files::Install::Installed
+            );
+            assert!(!temp.path().join(legacy_name).exists());
+            assert_eq!(std::fs::read_to_string(temp.path().join(name)).unwrap(), source);
+            assert_eq!(
+                install_bridge(temp.path(), bridge).unwrap(),
+                managed_files::Install::Current
+            );
+        }
     }
 }
 
@@ -1397,7 +1618,7 @@ mod setup_announcement_tests {
 mod codex_notify_tests {
     use super::desired_codex_notify;
 
-    const HELPER: &str = "C:/Program Files/Nebula/runtime/nebula-hook.exe";
+    const HELPER: &str = "C:/Program Files/Pebrel/runtime/pebrel-hook.exe";
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| (*s).to_owned()).collect()
@@ -1442,13 +1663,28 @@ mod codex_notify_tests {
     // 编码进 --previous-notify。我们不在最外层，但已在链中——再包一层
     // 就进入互相包装、反斜杠每轮翻倍的指数爆炸。
     #[test]
-    fn a_notifier_that_swallowed_us_into_previous_notify_is_not_wrapped_again() {
+    fn a_notifier_that_swallowed_us_into_previous_notify_is_migrated_without_wrapping_again() {
         let current = argv(&[
             "C:/cua/codex-computer-use.exe",
             "--previous-notify",
             r#"["C:\\Program Files\\Nebula\\runtime\\nebula-hook.exe", "codex", "--chain", "C:\\cua\\cua.exe", "turn-ended"]"#,
             "turn-ended",
         ]);
+        let desired = desired_codex_notify(&current, HELPER).expect("old embedded path migrates");
+        assert_eq!(desired.len(), current.len());
+        assert_eq!(desired[0], current[0]);
+        assert_eq!(desired[1], current[1]);
+        assert_eq!(desired[3], current[3]);
+        let previous: Vec<String> = serde_json::from_str(&desired[2]).unwrap();
+        let old_previous: Vec<String> = serde_json::from_str(&current[2]).unwrap();
+        assert_eq!(previous[0], HELPER);
+        assert_eq!(previous[1..], old_previous[1..]);
+        assert_eq!(desired_codex_notify(&desired, HELPER), None);
+    }
+
+    #[test]
+    fn an_unknown_wrapper_encoding_never_grows_another_hook_layer() {
+        let current = argv(&["foreign.exe", "--notify", "encoded:nebula-hook.exe:payload"]);
         assert_eq!(desired_codex_notify(&current, HELPER), None);
     }
 
@@ -1469,13 +1705,14 @@ mod runtime_asset_tests {
     #[test]
     fn hook_helper_prefers_runtime_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("nebula.exe");
+        let exe = dir.path().join("pebrel.exe");
         let runtime = dir.path().join("runtime");
         std::fs::create_dir(&runtime).unwrap();
         std::fs::write(dir.path().join("nebula-hook.exe"), b"legacy").unwrap();
         std::fs::write(runtime.join("nebula-hook.exe"), b"structured").unwrap();
+        std::fs::write(runtime.join("pebrel-hook.exe"), b"current").unwrap();
 
-        assert_eq!(helper_path_from_exe(&exe), Some(runtime.join("nebula-hook.exe")));
+        assert_eq!(helper_path_from_exe(&exe), Some(runtime.join("pebrel-hook.exe")));
     }
 
     #[test]

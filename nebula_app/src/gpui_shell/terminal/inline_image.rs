@@ -147,13 +147,55 @@ pub(super) fn decode(pending: PendingInlineImage) -> Result<(u64, InlineImage), 
 }
 
 pub(super) fn decode_bytes(data: &[u8]) -> Result<(Arc<RenderImage>, usize), String> {
-    if data.len() > MAX_IMAGE_ENCODED_BYTES {
-        return Err("encoded terminal image exceeds 12 MiB".to_owned());
-    }
     let format = image::guess_format(data)
         .map_err(|error| format!("unsupported terminal image: {error}"))?;
     if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif) {
         return Err(format!("unsupported terminal image format: {format:?}"));
+    }
+
+    let mut bgra = decode_rgba(data, format, MAX_IMAGE_ENCODED_BYTES)?;
+    let decoded_bytes = bgra.len();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let render_image = Arc::new(RenderImage::new([Frame::new(bgra)]));
+    Ok((render_image, decoded_bytes))
+}
+
+/// Clipboard bitmaps may be uncompressed; normalization shares the terminal
+/// decoder's pixel/allocation limits while keeping its protocol formats intact.
+pub(super) fn clipboard_png(data: &[u8]) -> Result<Vec<u8>, String> {
+    let format = image::guess_format(data)
+        .map_err(|error| format!("unsupported clipboard image: {error}"))?;
+    if !matches!(
+        format,
+        ImageFormat::Png
+            | ImageFormat::Jpeg
+            | ImageFormat::Gif
+            | ImageFormat::Bmp
+            | ImageFormat::WebP
+    ) {
+        return Err(format!("unsupported clipboard image format: {format:?}"));
+    }
+    let rgba = decode_rgba(data, format, MAX_IMAGE_DECODED_BYTES)?;
+    let mut output = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut output, ImageFormat::Png)
+        .map_err(|error| format!("could not encode clipboard image: {error}"))?;
+    let png = output.into_inner();
+    if png.len() > MAX_IMAGE_ENCODED_BYTES {
+        return Err("clipboard PNG exceeds 12 MiB".to_owned());
+    }
+    Ok(png)
+}
+
+fn decode_rgba(
+    data: &[u8],
+    format: ImageFormat,
+    encoded_limit: usize,
+) -> Result<image::RgbaImage, String> {
+    if data.len() > encoded_limit {
+        return Err("encoded image exceeds its size limit".to_owned());
     }
 
     let (encoded_width, encoded_height) =
@@ -172,21 +214,19 @@ pub(super) fn decode_bytes(data: &[u8]) -> Result<(Arc<RenderImage>, usize), Str
         return Err("decoded terminal image exceeds 64 MiB".to_owned());
     }
 
-    // `load_from_memory_with_format` decodes the first frame for animated
-    // formats. Animation is deliberately outside this first bounded slice.
-    let decoded = image::load_from_memory_with_format(data, format)
-        .map_err(|error| format!("failed to decode terminal image: {error}"))?;
+    // Decode only the first frame and cap allocations before decoding.
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_IMAGE_DECODED_BYTES as u64);
+    reader.limits(limits);
+    let decoded =
+        reader.decode().map_err(|error| format!("failed to decode terminal image: {error}"))?;
     let (actual_width, actual_height) = (decoded.width(), decoded.height());
     if actual_width != encoded_width || actual_height != encoded_height {
         return Err("terminal image dimensions changed while decoding".to_owned());
     }
 
-    let mut bgra = decoded.into_rgba8();
-    for pixel in bgra.chunks_exact_mut(4) {
-        pixel.swap(0, 2);
-    }
-    let render_image = Arc::new(RenderImage::new([Frame::new(bgra)]));
-    Ok((render_image, decoded_bytes))
+    Ok(decoded.into_rgba8())
 }
 
 #[cfg(test)]
@@ -264,6 +304,28 @@ mod tests {
             panic!("MP4 input was accepted as a terminal image");
         };
         assert!(error.contains("unsupported terminal image"));
+    }
+
+    #[test]
+    fn clipboard_bitmaps_become_png_without_extending_terminal_protocol_formats() {
+        let pixels = image::RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 255]));
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels.clone())
+            .write_to(&mut output, ImageFormat::Bmp)
+            .unwrap();
+        let bmp = output.into_inner();
+        assert!(decode_bytes(&bmp).is_err());
+        let png = clipboard_png(&bmp).unwrap();
+        assert_eq!(image::guess_format(&png).unwrap(), ImageFormat::Png);
+        assert_eq!(image::load_from_memory(&png).unwrap().into_rgba8(), pixels);
+    }
+
+    #[test]
+    fn clipboard_rejects_invalid_bytes_and_pixel_bombs_before_staging() {
+        assert!(clipboard_png(b"not an image").is_err());
+        let mut png = encoded_png();
+        png[16..20].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(clipboard_png(&png).is_err());
     }
 
     #[test]

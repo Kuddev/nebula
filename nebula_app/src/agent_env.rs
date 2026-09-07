@@ -37,16 +37,18 @@ pub(crate) use crate::ai_hook::PANE_ENV;
 /// `TERM_PROGRAM` 的取值。这是程序判断"我跑在哪个终端里"的事实标准入口，
 /// 终端生态普遍使用同一个变量，所以第三方工具的既有识别逻辑不需要为 Nebula
 /// 改代码。
-pub const TERM_PROGRAM: &str = "nebula";
+pub const TERM_PROGRAM: &str = "pebrel";
 
 /// Nebula 可执行文件的绝对路径。
 ///
 /// 便携版（解压即用）不一定在 `PATH` 上，而 Agent 需要的是"现在就能执行"，
 /// 不是"也许装过"。给精确路径就不必让模型去猜安装位置。
-pub const CLI_ENV: &str = "NEBULA_CLI";
+pub const CLI_ENV: &str = "PEBREL_CLI";
+const LEGACY_CLI_ENV: &str = "NEBULA_CLI";
 
 /// [`CLI_ENV`] 所在目录，同时被前置到 `PATH`，这样 `nebula` 裸命令也可用。
-pub const BIN_DIR_ENV: &str = "NEBULA_BIN_DIR";
+pub const BIN_DIR_ENV: &str = "PEBREL_BIN_DIR";
+const LEGACY_BIN_DIR_ENV: &str = "NEBULA_BIN_DIR";
 
 const TERM_PROGRAM_ENV: &str = "TERM_PROGRAM";
 const TERM_PROGRAM_VERSION_ENV: &str = "TERM_PROGRAM_VERSION";
@@ -58,14 +60,26 @@ const PATH_ENV: &str = "PATH";
 /// [`crate::shell_detect::wsl_cwd_report_env`] 也会往里追加条目，本函数以
 /// 环境表里的现值为基准合并，从而与调用顺序无关地保住两边的条目。
 pub fn apply(env: &mut HashMap<String, String>, pane_id: impl Display) {
-    insert_env(env, PANE_ENV, pane_id.to_string());
+    let aliases = crate::brand::environment_aliases(
+        env.iter().map(|(name, value)| (name.into(), value.into())).collect(),
+    );
+    for (name, value) in aliases {
+        if let Ok(value) = value.into_string() {
+            insert_env(env, &name, value);
+        }
+    }
+    let pane_id = pane_id.to_string();
+    insert_env(env, PANE_ENV, pane_id.clone());
+    insert_env(env, crate::ai_hook::LEGACY_PANE_ENV, pane_id);
     insert_env(env, TERM_PROGRAM_ENV, TERM_PROGRAM.to_owned());
     insert_env(env, TERM_PROGRAM_VERSION_ENV, env!("VERSION").to_owned());
 
     if let Some(executable) = executable() {
         insert_env(env, CLI_ENV, executable.display().to_string());
+        insert_env(env, LEGACY_CLI_ENV, executable.display().to_string());
         if let Some(directory) = executable.parent() {
             insert_env(env, BIN_DIR_ENV, directory.display().to_string());
+            insert_env(env, LEGACY_BIN_DIR_ENV, directory.display().to_string());
             if let Some(path) = prepended_path(directory, env_value(env, PATH_ENV)) {
                 insert_env(env, PATH_ENV, path);
             }
@@ -100,7 +114,9 @@ fn insert_env(env: &mut HashMap<String, String>, name: &str, value: String) {
 /// 外层那个二进制，可能已经是旧版本或另一个便携副本；PTY 应当指向**正在为它
 /// 提供控制面的那个**进程。
 pub fn executable() -> Option<PathBuf> {
-    std::env::current_exe().ok().or_else(|| std::env::var_os(CLI_ENV).map(PathBuf::from))
+    std::env::current_exe().ok().or_else(|| {
+        std::env::var_os(CLI_ENV).or_else(|| std::env::var_os(LEGACY_CLI_ENV)).map(PathBuf::from)
+    })
 }
 
 /// 把 `directory` 挪到 `PATH` 首位，返回新值；已经在首位时返回 `None`。
@@ -143,8 +159,16 @@ fn same_directory(left: &Path, right: &Path) -> bool {
 /// 带标志位的条目只能写成字面量（`concat!` 不接受常量），[`wslenv_entries_match_variables`]
 /// 负责在变量改名时让编译测试失败。
 #[cfg(windows)]
-const WSLENV_ENTRIES: &[&str] =
-    &[PANE_ENV, TERM_PROGRAM_ENV, TERM_PROGRAM_VERSION_ENV, "NEBULA_CLI/p", "NEBULA_BIN_DIR/p"];
+const WSLENV_ENTRIES: &[&str] = &[
+    PANE_ENV,
+    crate::ai_hook::LEGACY_PANE_ENV,
+    TERM_PROGRAM_ENV,
+    TERM_PROGRAM_VERSION_ENV,
+    "PEBREL_CLI/p",
+    "PEBREL_BIN_DIR/p",
+    "NEBULA_CLI/p",
+    "NEBULA_BIN_DIR/p",
+];
 
 /// 把 [`WSLENV_ENTRIES`] 合并进 `WSLENV`，保留已有条目。
 ///
@@ -194,12 +218,31 @@ mod tests {
     fn identity_is_complete() {
         let env = applied(17);
         assert_eq!(env.get(PANE_ENV).map(String::as_str), Some("17"));
+        assert_eq!(env.get(crate::ai_hook::LEGACY_PANE_ENV), env.get(PANE_ENV));
+        assert_eq!(env.get(LEGACY_CLI_ENV), env.get(CLI_ENV));
+        assert_eq!(env.get(LEGACY_BIN_DIR_ENV), env.get(BIN_DIR_ENV));
         assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some(TERM_PROGRAM));
         assert_eq!(env.get("TERM_PROGRAM_VERSION").map(String::as_str), Some(env!("VERSION")));
         // 测试二进制的 `current_exe` 一定存在，所以可达性字段必须齐。
         let cli = PathBuf::from(env.get(CLI_ENV).expect("cli path"));
         let bin_dir = PathBuf::from(env.get(BIN_DIR_ENV).expect("bin dir"));
         assert_eq!(cli.parent(), Some(bin_dir.as_path()));
+    }
+
+    #[test]
+    fn child_configuration_aliases_refer_to_the_same_directory() {
+        let mut env = HashMap::from([
+            ("PEBREL_CONFIG_DIR".to_owned(), "current-config".to_owned()),
+            ("NEBULA_CONFIG_DIR".to_owned(), "stale-config".to_owned()),
+        ]);
+        apply(&mut env, 5);
+        assert_eq!(env.get("NEBULA_CONFIG_DIR"), env.get("PEBREL_CONFIG_DIR"));
+        assert_eq!(env.get("NEBULA_CONFIG_DIR").unwrap(), "current-config");
+
+        let mut legacy =
+            HashMap::from([("NEBULA_CONFIG_DIR".to_owned(), "legacy-config".to_owned())]);
+        apply(&mut legacy, 6);
+        assert_eq!(legacy.get("PEBREL_CONFIG_DIR").unwrap(), "legacy-config");
     }
 
     #[test]

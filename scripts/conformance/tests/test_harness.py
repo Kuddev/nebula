@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 import re
 import subprocess
 import sys
@@ -114,6 +115,43 @@ class ComparisonTests(unittest.TestCase):
 
 
 class ArchiveSafetyTests(unittest.TestCase):
+    def test_new_portable_package_resolves_only_the_product_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory) / "Pebrel-v1.6.0-windows-x64.zip"
+            with zipfile.ZipFile(archive, "w") as output:
+                output.writestr("pebrel.exe", b"MZfixture")
+                output.writestr("runtime/pebrel-hook.exe", b"MZhelper")
+                output.writestr("runtime/OpenConsole.exe", b"MZhost")
+            app = ResolvedApp(archive)
+            try:
+                self.assertEqual(app.executable.name, "pebrel.exe")
+                self.assertEqual(app.executable.read_bytes(), b"MZfixture")
+            finally:
+                app.close()
+
+    def test_duplicate_product_binaries_remain_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "pebrel.exe").write_bytes(b"MZnew")
+            (root / "nebula.exe").write_bytes(b"MZold")
+            with self.assertRaisesRegex(ConformanceError, "2 product executables"):
+                ResolvedApp(root)
+
+    def test_macos_bundle_resolves_declared_executable_and_rejects_other_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Pebrel Preview.app"
+            binary = root / "Contents" / "MacOS" / "pebrel"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"fixture")
+            info = root / "Contents" / "Info.plist"
+            info.write_bytes(plistlib.dumps({"CFBundleExecutable": "pebrel"}))
+            app = ResolvedApp(root)
+            self.assertEqual(app.executable, binary)
+            app.close()
+            info.write_bytes(plistlib.dumps({"CFBundleExecutable": "../elsewhere"}))
+            with self.assertRaisesRegex(ConformanceError, "unexpected app executable"):
+                ResolvedApp(root)
+
     def test_zip_member_cannot_escape_extraction_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

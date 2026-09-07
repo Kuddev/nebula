@@ -1,6 +1,6 @@
 # Launch a debug nebula instance for ui_probe and print its PID.
 #
-# It runs a COPY, never target/debug/nebula.exe itself. Two reasons, both hit:
+# It runs a COPY, never target/debug/pebrel.exe itself. Two reasons, both hit:
 #
 #   1. Windows will not let a running exe be overwritten. Probing the build
 #      output directly makes the next `cargo build` die with
@@ -9,7 +9,7 @@
 #
 #   2. The probe instance must be disposable, and the user's own Nebula window
 #      must never be collateral. Different exe paths remove any temptation to
-#      clean up by image name. NEVER run `taskkill /IM nebula.exe` here: the
+#      clean up by image name. NEVER run `taskkill /IM pebrel.exe` here: the
 #      active Claude Code session may itself be hosted in a Nebula window.
 #
 # conpty.dll and OpenConsole.exe are copied alongside: the Windows PTY backend
@@ -27,10 +27,10 @@ $ErrorActionPreference = "Stop"
 
 New-Item -ItemType Directory -Force -Path $ProbeDir | Out-Null
 
-foreach ($name in @("nebula.exe", "conpty.dll", "OpenConsole.exe")) {
+foreach ($name in @("pebrel.exe", "conpty.dll", "OpenConsole.exe")) {
     $src = Join-Path $SourceDir $name
     if (-not (Test-Path $src)) {
-        Write-Error "missing build artifact: $src (run cargo build -p nebula --bin nebula first)"
+        Write-Error "missing build artifact: $src (run cargo build -p nebula --bin pebrel first)"
     }
     # A previous probe may still hold the same file. A failed copy means it is
     # alive; say so, and point at killing it BY PID rather than by image name.
@@ -41,7 +41,7 @@ foreach ($name in @("nebula.exe", "conpty.dll", "OpenConsole.exe")) {
     }
 }
 
-$exe = Join-Path $ProbeDir "nebula.exe"
+$exe = Join-Path $ProbeDir "pebrel.exe"
 $p = Start-Process $exe -ArgumentList '--working-directory', $WorkingDir -PassThru
 Start-Sleep -Seconds $WarmupSeconds
 $p.Refresh()

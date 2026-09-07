@@ -1,7 +1,7 @@
-local nebula = require 'nebula'
-local config = nebula.config_builder()
+local pebrel = require 'pebrel'
+local config = pebrel.config_builder()
 
--- Nebula Lua 配置文件。修改后可运行 `nebula config check` 检查语法和字段。
+-- Pebrel Lua 配置文件。修改后可运行 `pebrel config check` 检查语法和字段。
 -- 字段名和枚举值使用稳定的英文标识；注释使用简体中文，方便直接修改。
 
 -- 保留的滚动历史行数。较大的值会占用更多内存。
@@ -41,7 +41,7 @@ config.scrolling = {
 -- }
 
 -- Linux 示例：根据运行平台选择 Shell。此段可以和 Windows 共用同一份配置。
--- if nebula.platform.os == 'linux' then
+-- if pebrel.platform.os == 'linux' then
 --     config.terminal = { shell = '/bin/bash' }
 -- end
 
@@ -50,8 +50,8 @@ config.scrolling = {
 --     EDITOR = 'nvim',
 -- }
 
--- 快速启动配置。空列表必须写成 nebula.array()，不能写普通空表 {}。
--- config.profiles = nebula.array {
+-- 快速启动配置。空列表必须写成 pebrel.array()，不能写普通空表 {}。
+-- config.profiles = pebrel.array {
 --     { name = 'Production SSH', command = 'ssh', args = { 'user@server' } },
 --     { name = 'Project', command = 'pwsh.exe', args = { '-NoLogo' }, cwd = 'D:/src/project' },
 -- }

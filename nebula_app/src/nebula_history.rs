@@ -1,4 +1,4 @@
-//! Persistent, scoped command history backing Nebula's fish-style suggestions.
+//! Persistent, scoped command history backing Pebrel's fish-style suggestions.
 //!
 //! Local Windows shells share one pool. WSL commands are isolated by distro,
 //! and SSH commands by destination, so a valid command on one machine never
@@ -9,9 +9,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const HISTORY_MAX: usize = 5_000;
-pub(crate) const LOCAL_HISTORY_FILE: &str = "nebula_history.jsonl";
-pub(crate) const WSL_HISTORY_FILE: &str = "nebula_history_wsl.jsonl";
-pub(crate) const SSH_HISTORY_FILE: &str = "nebula_history_ssh.jsonl";
+pub(crate) const LOCAL_HISTORY_FILE: &str = "pebrel_history.jsonl";
+pub(crate) const WSL_HISTORY_FILE: &str = "pebrel_history_wsl.jsonl";
+pub(crate) const SSH_HISTORY_FILE: &str = "pebrel_history_ssh.jsonl";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum HistoryScope {
@@ -200,10 +200,12 @@ fn history_debug_log(_message: impl AsRef<str>) {}
 fn history_debug_log(message: impl AsRef<str>) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ENABLED.get_or_init(|| {
-        std::env::var("NEBULA_DEBUG_LOG").is_ok_and(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
+        std::env::var("PEBREL_DEBUG_LOG").or_else(|_| std::env::var("NEBULA_DEBUG_LOG")).is_ok_and(
+            |value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            },
+        )
     }) {
         return;
     }
@@ -211,7 +213,7 @@ fn history_debug_log(message: impl AsRef<str>) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| format!("{}.{:03}", duration.as_secs(), duration.subsec_millis()))
         .unwrap_or_else(|_| "0.000".to_owned());
-    let path = history_path(LOCAL_HISTORY_FILE).with_file_name("nebula_debug.log");
+    let path = history_path(LOCAL_HISTORY_FILE).with_file_name("pebrel_debug.log");
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[{ts}] {}", message.as_ref());
     }

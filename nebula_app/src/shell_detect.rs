@@ -503,6 +503,47 @@ pub fn wsl_guest_cwd(cwd: &str) -> Option<&str> {
     trimmed.starts_with('/').then_some(trimmed)
 }
 
+/// Set the WSL guest cwd without changing its distribution, user or command.
+pub fn wsl_args_at(program: &str, args: &[String], cwd: &str) -> Option<Vec<String>> {
+    let name = program.rsplit(['/', '\\']).next()?;
+    if !name.eq_ignore_ascii_case("wsl.exe") && !name.eq_ignore_ascii_case("wsl") {
+        return None;
+    }
+    if !cwd.starts_with('/') || cwd.chars().any(char::is_control) {
+        return None;
+    }
+    let mut result = vec!["--cd".to_owned(), cwd.to_owned()];
+    let mut arguments = args.iter();
+    while let Some(arg) = arguments.next() {
+        match arg.as_str() {
+            "--cd" => {
+                arguments.next()?;
+            },
+            arg if arg.starts_with("--cd=") => {},
+            "-d" | "--distribution" | "-u" | "--user" | "--shell-type" => {
+                result.push(arg.clone());
+                result.push(arguments.next()?.clone());
+            },
+            "--system" => result.push(arg.clone()),
+            option
+                if ["--distribution=", "--user=", "--shell-type="]
+                    .iter()
+                    .any(|prefix| option.starts_with(prefix)) =>
+            {
+                result.push(arg.clone());
+            },
+            _ => {
+                // Explicit markers and implicit commands both end WSL's options.
+                // Their remaining arguments belong to the guest program.
+                result.push(arg.clone());
+                result.extend(arguments.cloned());
+                break;
+            },
+        }
+    }
+    Some(result)
+}
+
 /// 来宾绝对路径 → `\\wsl.localhost\<发行版>\…` 形式的宿主 UNC 路径（纯拼接，
 /// 不碰文件系统，便于单测）。
 ///
@@ -747,6 +788,65 @@ mod tests {
         assert_eq!(super::wsl_guest_cwd(r"D:\temp_build"), None);
         assert_eq!(super::wsl_guest_cwd(""), None);
         assert_eq!(super::wsl_guest_cwd("home/hello"), None);
+    }
+
+    #[test]
+    fn wsl_duplicate_directory_replaces_launch_options_and_preserves_identity() {
+        let args =
+            ["-d", "Team Linux", "--cd", "/old", "-u", "guest", "--cd=/older"].map(String::from);
+        let cwd = "/home/guest/Team's \"project\" ";
+        assert_eq!(
+            super::wsl_args_at(r"C:\Windows\System32\WSL.EXE", &args, cwd).unwrap(),
+            ["--cd", cwd, "-d", "Team Linux", "-u", "guest"]
+        );
+        assert_eq!(super::wsl_args_at("wsl", &[], "/home/guest").unwrap(), ["--cd", "/home/guest"]);
+    }
+
+    #[test]
+    fn wsl_duplicate_directory_does_not_rewrite_guest_command_arguments() {
+        for marker in [Some("--"), Some("--exec"), Some("--execute"), Some("-e"), None] {
+            let mut args = vec!["--distribution=Debian".to_owned(), "--user=guest".to_owned()];
+            if let Some(marker) = marker {
+                args.push(marker.to_owned());
+            }
+            args.extend(
+                ["zsh", "--cd", "/guest-argument", "--cd=/another", "-c", "printf '%s' x"]
+                    .map(String::from),
+            );
+            let mut expected = vec!["--cd".to_owned(), "/new directory".to_owned()];
+            expected.extend(args.clone());
+            assert_eq!(super::wsl_args_at("wsl.exe", &args, "/new directory"), Some(expected));
+        }
+    }
+
+    #[test]
+    fn wsl_duplicate_directory_preserves_shell_type_and_option_values() {
+        for shell_type in [vec!["--shell-type", "login"], vec!["--shell-type=login"]] {
+            let args: Vec<_> = [vec!["--system"], shell_type, vec!["--cd", "/old"]]
+                .concat()
+                .into_iter()
+                .map(String::from)
+                .collect();
+            let mut expected = vec!["--cd".to_owned(), "/new".to_owned()];
+            expected.extend_from_slice(&args[..args.len() - 2]);
+            assert_eq!(super::wsl_args_at("wsl.exe", &args, "/new"), Some(expected));
+        }
+        let args = ["--user", "--cd", "--exec", "zsh"].map(String::from);
+        assert_eq!(
+            super::wsl_args_at("wsl.exe", &args, "/new").unwrap(),
+            ["--cd", "/new", "--user", "--cd", "--exec", "zsh"]
+        );
+    }
+
+    #[test]
+    fn wsl_duplicate_directory_rejects_invalid_inputs_without_changing_launch() {
+        for cwd in ["relative", "", r"D:\project", "/tmp/\nproject", "/tmp/project\r", "\n/tmp"] {
+            assert!(super::wsl_args_at("wsl.exe", &[], cwd).is_none(), "{cwd:?}");
+        }
+        for args in [["--cd"], ["-d"], ["--user"], ["--shell-type"]] {
+            assert!(super::wsl_args_at("wsl.exe", &args.map(String::from), "/tmp").is_none());
+        }
+        assert!(super::wsl_args_at("bash.exe", &[], "/tmp").is_none());
     }
 
     #[test]

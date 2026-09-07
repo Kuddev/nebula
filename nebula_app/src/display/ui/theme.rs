@@ -82,7 +82,7 @@ impl NebulaTheme {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Nebula => "Nebula",
+            Self::Nebula => "Pebrel",
             Self::SilverLight => "Silver Light",
             Self::SteelDark => "Steel Dark",
             Self::LimestoneLight => "Limestone",
@@ -956,7 +956,7 @@ fn paper_skin() -> Skin {
 /// atomically (tmp + rename) so readers never see a torn value.
 pub(crate) fn write_nebula_prompt_theme(theme: NebulaTheme) {
     let dir = std::env::temp_dir();
-    let path = dir.join("nebula_theme.txt");
+    let path = dir.join("pebrel_theme.txt");
     let tmp = dir.join(format!("nebula_theme.{}.tmp", std::process::id()));
 
     if std::fs::write(&tmp, theme.prompt_name()).is_ok() {
@@ -977,6 +977,10 @@ mod tests {
 
     #[test]
     fn system_appearance_keeps_the_selected_theme_family() {
+        assert_eq!(NebulaTheme::Nebula.label(), "Pebrel");
+        assert_eq!(NebulaTheme::Nebula.short_label(), "Pebrel");
+        assert_eq!(NebulaTheme::Nebula.prompt_name(), "Nebula");
+        assert_eq!(NebulaTheme::from_prompt_name("Nebula"), Some(NebulaTheme::Nebula));
         assert_eq!(NebulaTheme::Nebula.for_system_appearance(true), NebulaTheme::SilverLight);
         assert_eq!(NebulaTheme::Nebula.for_system_appearance(false), NebulaTheme::Nebula);
         assert_eq!(NebulaTheme::SilverLight.for_system_appearance(false), NebulaTheme::SteelDark);

@@ -62,6 +62,7 @@ mod settings_navigation;
 mod sidebar;
 mod ssh_dialog;
 mod tab_drag;
+mod tab_duplication;
 mod tab_menu;
 mod tab_scroll;
 mod top_tabs;
@@ -872,7 +873,7 @@ fn shell_palette_rows(
         let default_row = rows.remove(position);
         rows.insert(0, default_row);
     }
-    let ssh_icons = ssh_host_icon_ids();
+    let ssh_icons = ssh_host_icon_ids(&crate::display::nebula_data_dir());
     rows.extend(ssh_hosts.into_iter().map(|host| {
         let glyph =
             crate::display::ui::os_icons::resolve(ssh_icons.get(&host).map(String::as_str)).glyph;
@@ -892,23 +893,10 @@ fn shell_palette_rows(
     rows
 }
 
-fn ssh_host_icon_ids() -> std::collections::HashMap<String, String> {
-    let mut icons = crate::ssh_profiles::SshProfiles::load(
-        &crate::display::nebula_data_dir().join("ssh_profiles.json"),
-    )
-    .map(|profiles| profiles.icons())
-    .unwrap_or_default();
-    if std::env::var_os("NEBULA_CONFIG_DIR").is_some() {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            let user = std::path::PathBuf::from(appdata).join("Nebula").join("ssh_profiles.json");
-            if let Ok(profiles) = crate::ssh_profiles::SshProfiles::load(&user) {
-                for (host, icon) in profiles.icons() {
-                    icons.entry(host).or_insert(icon);
-                }
-            }
-        }
-    }
-    icons
+fn ssh_host_icon_ids(data_dir: &Path) -> std::collections::HashMap<String, String> {
+    crate::ssh_profiles::SshProfiles::load(&data_dir.join("ssh_profiles.json"))
+        .map(|profiles| profiles.icons())
+        .unwrap_or_default()
 }
 
 /// 标签的用户可编辑元数据：重命名与色标（旧壳 `TabEntry::custom_name` /
@@ -3050,7 +3038,7 @@ impl NebulaWorkspace {
                 .collect();
             // 启动器混排（旧壳 ⌘K 裁定）：SSH 主机与命令同列，置顶/隐藏
             // 次序由共享 merge 权威裁定。
-            let ssh_icons = ssh_host_icon_ids();
+            let ssh_icons = ssh_host_icon_ids(&crate::display::nebula_data_dir());
             rows.extend(
                 crate::gpui_shell::ssh_hosts::SshHostLists::load().merged().into_iter().map(
                     |host| {
@@ -3620,46 +3608,6 @@ impl NebulaWorkspace {
                 },
             )
             .into_any_element()
-    }
-
-    /// 复制标签页：另开一个**同身份**的 Tab，不克隆活动 PTY 也不克隆分屏树
-    /// （旧壳 `window_context::duplicate_tab` 同合同——副本是新进程/新会话，
-    /// 也避开 PTY 共享所有权）。
-    ///
-    /// 关键是继承 launch 身份。WSL / Git Bash / Nushell 这类 Tab 的
-    /// program+args 记在 [`TabMeta::launch`]，而此前这里一律走
-    /// `add_terminal_at`——那是"现取设置里的默认 shell"，于是复制一个
-    /// WSL Tab 会得到 pwsh。`Default`（含旧快照没记身份的 `None`）仍按
-    /// "复制这一刻"的默认 shell 解析，与旧壳 `spawn_tab_at` 一致；用户
-    /// 元数据（自定义名字 / 色标）照旧壳一并带到副本上。
-    fn duplicate_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(ix) else { return };
-        let Some(view) = tab.focused_view() else { return };
-        let (ssh, cwd, remote_cwd, pane_id) = {
-            let view = view.read(cx);
-            (view.ssh_destination.clone(), view.local_cwd(), view.remote_cwd(), view.pane_id)
-        };
-        let meta = self.meta(ix);
-        if let Some(destination) = ssh {
-            let remote_cwd = remote_cwd.or_else(|| {
-                self.remote_browser.path_for(pane_id, &destination).map(ToOwned::to_owned)
-            });
-            self.add_ssh_terminal_at(destination, remote_cwd, window, cx);
-        } else {
-            let launch = match meta.launch {
-                None | Some(crate::session::LaunchSession::Default) => {
-                    Self::configured_local_launch(cx)
-                },
-                Some(launch) => launch,
-            };
-            self.add_terminal_with(launch, cwd, None, window, cx);
-        }
-        // 两个 add_* 入口都已把副本设为 active，名字与色标在这里覆写。
-        if let Some(target) = self.tab_meta.get_mut(self.active) {
-            target.custom_name = meta.custom_name;
-            target.color = meta.color;
-        }
-        cx.notify();
     }
 
     /// 进入行内重命名：对照旧壳 `TabRequest::BeginRename`

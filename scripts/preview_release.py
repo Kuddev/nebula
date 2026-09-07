@@ -82,7 +82,7 @@ def validate_evidence(directory: Path, commit: str) -> None:
 
 def verify_release(metadata: dict, directory: Path, version: str, preview_id: str,
                    commit: str, tag_commit: str) -> None:
-    expected_title = f"Nebula Terminal {version} Preview {preview_id}"
+    expected_title = f"Pebrel {version} Preview {preview_id}"
     expected_tag = f"preview-v{version}-{preview_id}"
     if (metadata.get("name") != expected_title or metadata.get("tag_name") != expected_tag
             or metadata.get("prerelease") is not True or metadata.get("draft") is not False
@@ -141,7 +141,7 @@ def reviewed_notes(repo: Path, version: str, preview_id: str, macos_signing: str
     release = asset_version(version, preview_id)
     source = repo / "docs" / "release-notes" / f"v{release}.md"
     notes = source.read_text(encoding="utf-8").strip()
-    if not notes.startswith(f"# Nebula Terminal {version} Preview {preview_id}\n"):
+    if not notes.startswith(f"# Pebrel {version} Preview {preview_id}\n"):
         raise ManifestError("reviewed Preview notes have the wrong release title")
     for heading in ("## English", "## 中文", "## Contributors", "## SHA256"):
         if notes.splitlines().count(heading) != 1:
@@ -182,11 +182,11 @@ def reviewed_notes(repo: Path, version: str, preview_id: str, macos_signing: str
 def expected_asset_names(version: str, preview_id: str) -> tuple[str, ...]:
     release = asset_version(version, preview_id)
     return (
-        f"NebulaTerminal-v{release}-linux-x86_64.AppImage",
-        f"NebulaTerminal-v{release}-linux-x86_64.deb",
-        f"NebulaTerminal-v{release}-linux-x86_64.tar.gz",
-        f"NebulaTerminal-v{release}-macos-aarch64.dmg",
-        f"NebulaTerminal-v{release}-macos-x86_64.dmg",
+        f"Pebrel-v{release}-linux-x86_64.AppImage",
+        f"Pebrel-v{release}-linux-x86_64.deb",
+        f"Pebrel-v{release}-linux-x86_64.tar.gz",
+        f"Pebrel-v{release}-macos-aarch64.dmg",
+        f"Pebrel-v{release}-macos-x86_64.dmg",
     )
 
 
@@ -271,7 +271,7 @@ def preview_notes(
 ) -> str:
     short_commit = commit[:12]
     commit_url = f"https://github.com/{repository}/commit/{commit}"
-    title = f"Nebula Terminal {version} Preview {preview_id}"
+    title = f"Pebrel {version} Preview {preview_id}"
     signing_en = (
         "The macOS applications use ad-hoc signatures and are not Apple-notarized. Only open a verified, trusted download via System Settings > Privacy & Security > Open Anyway."
         if macos_signing == "adhoc" else

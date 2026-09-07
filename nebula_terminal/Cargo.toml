@@ -1,11 +1,11 @@
 [package]
 name = "nebula_terminal"
-version = "1.5.0"
+version = "1.6.0"
 license = "GPL-3.0-or-later"
 description = "Nebula terminal emulation core"
 readme = "../README.md"
-homepage = "https://github.com/Kuddev/nebula"
-repository = "https://github.com/Kuddev/nebula"
+homepage = "https://github.com/Kuddev/pebrel"
+repository = "https://github.com/Kuddev/pebrel"
 edition.workspace = true
 rust-version.workspace = true
 

@@ -1,4 +1,4 @@
-//! Logging for Nebula.
+//! Logging for Pebrel.
 //!
 //! The main executable is supposed to call `initialize()` exactly once during
 //! startup. All logging messages are written to stdout, given that their
@@ -26,7 +26,7 @@ use crate::message_bar::{Message, MessageType};
 pub const LOG_TARGET_IPC_CONFIG: &str = "nebula_log_window_config";
 
 /// Name for the environment variable containing the log file's path.
-const NEBULA_LOG_ENV: &str = "NEBULA_LOG";
+const LOG_PATH_ENV: &str = "PEBREL_LOG";
 
 /// Logging target for config error messages.
 pub const LOG_TARGET_CONFIG: &str = "nebula_config_derive";
@@ -37,14 +37,14 @@ pub const LOG_TARGET_WINIT: &str = "nebula_winit_event";
 /// Name for the environment variable containing extra logging targets.
 ///
 /// The targets are semicolon separated.
-const NEBULA_EXTRA_LOG_TARGETS_ENV: &str = "NEBULA_EXTRA_LOG_TARGETS";
+const EXTRA_LOG_TARGETS_ENV: &str = "PEBREL_EXTRA_LOG_TARGETS";
 
 pub(crate) fn debug_log(message: impl AsRef<str>) {
     use std::io::Write as _;
 
     static ENABLED: OnceLock<bool> = OnceLock::new();
     if !*ENABLED.get_or_init(|| {
-        env::var("NEBULA_DEBUG_LOG").is_ok_and(|value| {
+        env::var("PEBREL_DEBUG_LOG").or_else(|_| env::var("NEBULA_DEBUG_LOG")).is_ok_and(|value| {
             let value = value.trim();
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
@@ -56,7 +56,7 @@ pub(crate) fn debug_log(message: impl AsRef<str>) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| format!("{}.{:03}", duration.as_secs(), duration.subsec_millis()))
         .unwrap_or_else(|_| "0.000".to_owned());
-    let path = crate::platform::dirs::data_dir().join("nebula_debug.log");
+    let path = crate::platform::dirs::data_dir().join("pebrel_debug.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[{timestamp} pid={}] {}", process::id(), message.as_ref());
     }
@@ -67,12 +67,13 @@ fn extra_log_targets() -> &'static [String] {
     static EXTRA_LOG_TARGETS: OnceLock<Vec<String>> = OnceLock::new();
 
     EXTRA_LOG_TARGETS.get_or_init(|| {
-        env::var(NEBULA_EXTRA_LOG_TARGETS_ENV)
+        env::var(EXTRA_LOG_TARGETS_ENV)
+            .or_else(|_| env::var("NEBULA_EXTRA_LOG_TARGETS"))
             .map_or(Vec::new(), |targets| targets.split(';').map(ToString::to_string).collect())
     })
 }
 
-/// List of targets which will be logged by Nebula.
+/// List of targets which will be logged by Pebrel.
 const ALLOWED_TARGETS: &[&str] = &[
     LOG_TARGET_IPC_CONFIG,
     LOG_TARGET_CONFIG,
@@ -159,12 +160,12 @@ impl Logger {
         };
 
         // Show the variable in the reader's own shell syntax. On Windows the
-        // default shell is PowerShell, where cmd-style `%NEBULA_LOG%` does not
-        // expand (issue #36); use `$env:NEBULA_LOG` so a copy-paste resolves.
+        // default shell is PowerShell, where cmd-style `%PEBREL_LOG%` does not
+        // expand (issue #36); use `$env:PEBREL_LOG` so a copy-paste resolves.
         #[cfg(not(windows))]
-        let env_var = format!("${NEBULA_LOG_ENV}");
+        let env_var = format!("${LOG_PATH_ENV}");
         #[cfg(windows)]
-        let env_var = format!("$env:{NEBULA_LOG_ENV}");
+        let env_var = format!("$env:{LOG_PATH_ENV}");
 
         let message = format!(
             "[{}] {}\nSee log at {} ({})",
@@ -256,10 +257,13 @@ struct OnDemandLogFile {
 impl OnDemandLogFile {
     fn new() -> Self {
         let mut path = env::temp_dir();
-        path.push(format!("Nebula-{}.log", process::id()));
+        path.push(format!("Pebrel-{}.log", process::id()));
 
         // Set log path as an environment variable.
-        unsafe { env::set_var(NEBULA_LOG_ENV, path.as_os_str()) };
+        unsafe {
+            env::set_var(LOG_PATH_ENV, path.as_os_str());
+            env::set_var("NEBULA_LOG", path.as_os_str());
+        }
 
         OnDemandLogFile { path, file: None, created: Arc::new(AtomicBool::new(false)) }
     }

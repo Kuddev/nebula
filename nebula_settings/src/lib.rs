@@ -14,7 +14,6 @@
 //! - `follow_system_theme` 的系统外观联动暂未在此实现（消费方自行处理）。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 mod app_icon;
 pub use app_icon::{AppIconName, AppIconPalette};
@@ -22,50 +21,11 @@ mod language;
 pub use language::{LanguageInfo, LanguagePref};
 mod reset;
 pub use reset::restore_default_settings;
-
-/// Settings/data directory shared by every shell and renderer.
-///
-/// Resolution: `NEBULA_CONFIG_DIR` override, then `%APPDATA%\Nebula` on
-/// Windows, `~/Library/Application Support/Nebula` on macOS, and
-/// `$XDG_CONFIG_HOME/nebula` (or `~/.config/nebula`) on Linux. Relative XDG
-/// paths are ignored as required by the specification.
-pub fn settings_dir() -> PathBuf {
-    if let Some(path) = std::env::var_os("NEBULA_CONFIG_DIR").filter(|p| !p.is_empty()) {
-        return PathBuf::from(path);
-    }
-
-    #[cfg(windows)]
-    {
-        std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-            .unwrap_or_else(std::env::temp_dir)
-            .join("Nebula")
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join("Library").join("Application Support"))
-            .unwrap_or_else(std::env::temp_dir)
-            .join("Nebula")
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .unwrap_or_else(std::env::temp_dir)
-            .join("nebula")
-    }
-}
-
-pub fn settings_path() -> PathBuf {
-    settings_dir().join("nebula_settings.txt")
-}
+mod paths;
+pub use paths::{
+    canonical_data_file_name, is_migration_artifact, legacy_data_file_name, migrate_legacy_data,
+    settings_dir, settings_path,
+};
 
 /// `nebula_settings.txt` 的键值视图。行格式 `key=value`；键大小写不敏感，
 /// 值两端修剪；空值视为未设置。
@@ -1547,6 +1507,8 @@ mod tests {
 
     #[test]
     fn theme_names_roundtrip() {
+        assert_eq!(ThemeName::Nebula.prompt_name(), "Nebula");
+        assert_eq!(ThemeName::from_prompt_name("Nebula"), Some(ThemeName::Nebula));
         for theme in [
             ThemeName::Nebula,
             ThemeName::SilverLight,

@@ -17,7 +17,7 @@ use log::warn;
 
 /// 同步配置文件（位于 `nebula_data_dir()`）。独立于被同步的
 /// `nebula_settings.txt`——同步管道自身的配置不应被同步覆盖。
-const CONFIG_FILE: &str = "nebula_sync.txt";
+const CONFIG_FILE: &str = "pebrel_sync.txt";
 
 /// 封包魔数 + 版本。改格式必须换魔数，旧客户端读到新包要能干脆报错。
 const MAGIC: &[u8; 8] = b"NEBSYNC1";
@@ -316,7 +316,7 @@ fn seal(plaintext: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
 /// 封包 → 明文。口令错误与包损坏都表现为 GCM 认证失败，同一句人话。
 fn open_packet(packet: &[u8], passphrase: &str) -> Result<Vec<u8>, String> {
     if packet.len() < MAGIC.len() + SALT_LEN + NONCE_LEN || &packet[..MAGIC.len()] != MAGIC {
-        return Err("远端文件不是 Nebula 同步包（或版本不兼容）".to_owned());
+        return Err("远端文件不是 Pebrel 同步包（或版本不兼容）".to_owned());
     }
     let salt = &packet[MAGIC.len()..MAGIC.len() + SALT_LEN];
     let nonce = &packet[MAGIC.len() + SALT_LEN..MAGIC.len() + SALT_LEN + NONCE_LEN];
@@ -512,7 +512,7 @@ pub fn apply_to_settings_text(payload: &SyncPayload, current: &str) -> String {
 // ---- 本地文件 ----
 
 fn settings_file_path() -> PathBuf {
-    crate::display::nebula_data_dir().join("nebula_settings.txt")
+    nebula_settings::settings_path()
 }
 
 fn history_file_path(file_name: &str) -> PathBuf {
@@ -762,6 +762,7 @@ mod tests {
     #[test]
     fn seal_open_roundtrip_and_wrong_passphrase() {
         let packet = seal(b"hello nebula", "correct horse").unwrap();
+        assert_eq!(&packet[..8], b"NEBSYNC1");
         assert_eq!(open_packet(&packet, "correct horse").unwrap(), b"hello nebula");
         assert!(open_packet(&packet, "wrong").is_err());
         assert!(open_packet(b"garbage", "correct horse").is_err());

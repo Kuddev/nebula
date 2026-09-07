@@ -76,7 +76,7 @@ class GovernanceTests(unittest.TestCase):
             "nebula_app/i18n/fr-FR.json", "third_party/winit-0.30.13/Cargo.toml",
             "third_party/winit-0.30.13/src/lib.rs", "docs/screenshots/SHOTLIST.md",
             "docs/screenshots/hero.png", "docs/release-notes/v1.5.0.md",
-            "docs/skills/nebula-runtime/SKILL.md",
+            "docs/skills/pebrel-runtime/SKILL.md",
         )
         self.assertEqual(self.ignored_paths(paths), set())
 

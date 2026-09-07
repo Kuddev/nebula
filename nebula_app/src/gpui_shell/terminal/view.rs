@@ -2,6 +2,8 @@
 
 mod broadcast;
 mod confirmation;
+mod cwd_report;
+mod image_paste;
 mod notifications;
 mod pointer;
 mod runtime;
@@ -16,7 +18,7 @@ use gpui::{
     Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _,
     Styled as _, TextRun, UTF16Selection, Window, div, point, px,
 };
-use gpui_component::{Sizable as _, WindowExt as _, checkbox::Checkbox};
+use gpui_component::Sizable as _;
 use nebula_settings::CellWidthModeName;
 use nebula_terminal::event::{Event as TermEvent, Notify as _, OnResize as _, WindowSize};
 use nebula_terminal::event_loop::Msg;
@@ -37,7 +39,7 @@ use super::session::{self, TerminalSession};
 use super::suggest;
 use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
 use crate::gpui_shell::config::Settings;
-use crate::gpui_shell::prelude::{ActiveTheme as _, ButtonVariant, Colorize as _, confirm_dialog};
+use crate::gpui_shell::prelude::{ActiveTheme as _, Colorize as _};
 use crate::{config::UiConfig, font_install::REQUIRED_FONT_FAMILY};
 use futures::StreamExt as _;
 
@@ -337,6 +339,7 @@ pub struct TerminalView {
     /// OSC 1337 图片的串行后台解码队列和有界像素缓存。图片不进入字符网格，
     /// 只用事件携带的绝对行锚定到对应的 scrollback 位置。
     pub(super) inline_images: super::inline_image::InlineImageStore,
+    image_paste: image_paste::ImagePasteState,
     /// SSH 直连目的地（`user@host[:port]`）；本地会话为 None。
     pub ssh_destination: Option<String>,
     /// 创建本地 PTY 时冻结的受控环境，供独立 `pane.exec` child 复用。
@@ -833,6 +836,7 @@ impl TerminalView {
             agent_runtime_submit_pending: false,
             pending_runtime_submit: None,
             inline_images: super::inline_image::InlineImageStore::default(),
+            image_paste: image_paste::ImagePasteState::default(),
             ssh_destination,
             exec_context,
             ssh_stage: None,
@@ -900,6 +904,15 @@ impl TerminalView {
     }
 
     fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
+        let cwd_changed = cwd_report::apply(&mut self.cwd, &event);
+        // Both shell metadata channels update completion and directory history.
+        if cwd_changed
+            || (matches!(&event, TermEvent::Title(title) if title.starts_with("NEBULA|"))
+                && self.suggest.cwd != self.cwd)
+        {
+            self.suggest.cwd = self.cwd.clone();
+            super::suggest::record_directory(&self.cwd);
+        }
         match event {
             TermEvent::Wakeup => {
                 self.flush_pending_runtime_submit(cx);
@@ -915,16 +928,10 @@ impl TerminalView {
                 // 与 tab 标签，而不是真拿来当窗口标题。
                 if let Some(rest) = title.strip_prefix("NEBULA|") {
                     let mut parts = rest.splitn(3, '|');
-                    self.cwd = parts.next().unwrap_or("").trim().to_owned();
+                    parts.next();
                     self.branch = parts.next().unwrap_or("").trim().to_owned();
                     self.running_program =
                         parts.next().map(|p| p.trim().to_owned()).filter(|p| !p.is_empty());
-                    // 补全引擎的 cwd 与目录 frecency 同步吃 shell 的权威上报
-                    // （旧壳 nebula_record_directory 同径）。
-                    if self.suggest.cwd != self.cwd {
-                        self.suggest.cwd = self.cwd.clone();
-                        super::suggest::record_directory(&self.cwd);
-                    }
                     // 协议串不是窗口标题，更不是 tab 名。
                 } else {
                     self.title = title;
@@ -977,16 +984,12 @@ impl TerminalView {
             TermEvent::Exit => {
                 self.mark_exited(String::from("会话已结束"), cx);
             },
-            TermEvent::CwdReport(cwd) => {
+            TermEvent::CwdReport(_) => {
                 // 标准 OSC 7 / 9;9 的目录上报。只动 cwd，`NEBULA|` 标题带来的
                 // branch/program 保持不变——两条通道并存（旧壳 event.rs:3142
                 // 同合同）。少了这一条，只有自带 PowerShell prompt 的 tab 能被
                 // 目录树/git 跟随，bash/zsh/nu 一律跟不动。
-                let cwd = cwd.trim().to_owned();
-                if !cwd.is_empty() && self.cwd != cwd {
-                    self.cwd = cwd;
-                    self.suggest.cwd = self.cwd.clone();
-                    super::suggest::record_directory(&self.cwd);
+                if cwd_changed {
                     // GPUI 没有旧壳每次 chrome 刷新都 `sync_chrome_tabs()` 的
                     // 循环；侧栏标题画在 workspace 里，cwd 变了必须发
                     // TitleChanged，`on_terminal_event` 才会 `cx.notify()` 重绘。
@@ -1154,6 +1157,7 @@ impl TerminalView {
 
     /// 输入后回到底部并请求重绘。
     fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.image_paste.observe_input(&bytes);
         self.confirmation.observe_input(&bytes);
         self.awaiting_input = false;
         if let Some(session) = &self.session {
@@ -1561,7 +1565,7 @@ impl TerminalView {
     /// filesystem; a POSIX path belongs to the SSH endpoint.
     pub fn remote_cwd(&self) -> Option<String> {
         self.ssh_destination.as_ref()?;
-        let path = self.cwd.trim();
+        let path = self.cwd.as_str();
         (path.starts_with('/') && !path.chars().any(char::is_control)).then(|| path.to_owned())
     }
 
@@ -1605,98 +1609,6 @@ impl TerminalView {
             cx.notify();
         }
         true
-    }
-
-    /// 读剪贴板并粘贴。只有裸 shell 可能立即执行内容时才弹确认；支持
-    /// bracketed paste 的应用和全屏 TUI 一路直通，不给右键粘贴平添一层。
-    pub fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
-        let lines = paste_line_count(&text);
-        if nebula_settings::RuntimeSettings::load().multiline_paste_confirm
-            && paste_needs_confirmation(&text, self.term_mode())
-        {
-            self.confirm_paste(text, lines, window, cx);
-            return;
-        }
-        self.paste_now(&text, cx);
-    }
-
-    /// 风险粘贴的阻断式确认——提示三层里的「模态」：有待办动作、必须先决策。
-    ///
-    /// 粘贴内容随模态一起快照，确认时不再回读剪贴板：弹窗期间用户完全可能又
-    /// 复制了别的东西，回读会把「已经看过并确认的那一份」换成没人看过的内容。
-    fn confirm_paste(
-        &mut self,
-        text: String,
-        lines: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let language = ui_language();
-        // bracketed 的对端（codex/vim/PSReadLine）整块收下、自己决定怎么处理；
-        // 裸 shell 是换行落地即执行。风险不同，话就得说得不一样。
-        let runs_line_by_line = !self.term_mode().contains(TermMode::BRACKETED_PASTE);
-        let title: SharedString = language
-            .format(crate::i18n::Message::CommonPasteLines, &[("lines", &lines.to_string())])
-            .into();
-        let body: SharedString = if runs_line_by_line {
-            language.pick(
-                "shell 会把这些内容逐行执行。请确认来源可信。",
-                "The shell will run these lines one by one. Make sure you trust the source.",
-            )
-        } else {
-            language.pick(
-                "内容会作为一整块交给当前程序，不会逐行执行；但行数不少，请确认来源可信。",
-                "The app receives this as a single paste and will not run it line by line, but \
-                 it is a lot of text — make sure you trust the source.",
-            )
-        }
-        .into();
-        let ok_text: SharedString = language.pick("粘贴", "Paste").into();
-        let cancel_text: SharedString = language.pick("取消", "Cancel").into();
-
-        // builder 每帧重跑、`on_ok` 也是 `Fn`：文本与视图句柄都得可克隆共享。
-        // 视图用弱引用——模态活在窗口 `Root` 里，强引用会让「弹窗期间关掉这个
-        // pane」的 view 释放不掉。
-        let text = Arc::new(text);
-        let view = cx.entity().downgrade();
-        let never_ask_again = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        window.open_dialog(cx, move |dialog, window, _cx| {
-            let text = text.clone();
-            let view = view.clone();
-            let checked = never_ask_again.load(std::sync::atomic::Ordering::Relaxed);
-            let checkbox_state = never_ask_again.clone();
-            let persist_state = never_ask_again.clone();
-            confirm_dialog(
-                dialog,
-                window,
-                title.clone(),
-                body.clone(),
-                ok_text.clone(),
-                cancel_text.clone(),
-                ButtonVariant::Primary,
-            )
-            .child(
-                Checkbox::new("nebula-paste-never-ask")
-                    .label(language.pick("不再询问", "Don't ask again"))
-                    .checked(checked)
-                    .small()
-                    .on_click(move |checked, window, _| {
-                        checkbox_state.store(*checked, std::sync::atomic::Ordering::Relaxed);
-                        window.refresh();
-                    }),
-            )
-            .on_ok(move |_, _window, cx| {
-                if persist_state.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = nebula_settings::persist_keys(&[(
-                        "multiline_paste_confirm",
-                        "0".to_owned(),
-                    )]);
-                }
-                let _ = view.update(cx, |this, cx| this.paste_now(&text, cx));
-                true
-            })
-        });
     }
 
     fn paste_now(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -1894,6 +1806,7 @@ impl TerminalView {
     }
 
     fn track_encoded_key(&mut self, ks: &gpui::Keystroke, mode: &TermMode, cx: &mut Context<Self>) {
+        self.image_paste.observe_key(ks);
         if self.marked_text.is_some() || mode.contains(TermMode::ALT_SCREEN) {
             return;
         }

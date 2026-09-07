@@ -1,18 +1,19 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿[CmdletBinding()]
+param(
+    [string] $TargetDirectory
+)
+
+$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $packageScript = Join-Path $repo 'scripts\package-release.ps1'
-$output = Join-Path $repo 'target\package-script-test'
-$expectedRoot = [System.IO.Path]::GetFullPath((Join-Path $repo 'target'))
+$output = Join-Path $repo ("target\package-script-test-$PID-" + [guid]::NewGuid().ToString('N'))
+$expectedRoot = [System.IO.Path]::GetFullPath((Join-Path $repo 'target')).TrimEnd('\') + '\'
 $resolvedOutput = [System.IO.Path]::GetFullPath($output)
 
 if (-not $resolvedOutput.StartsWith($expectedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to use test output outside target: $resolvedOutput"
-}
-
-if (Test-Path -LiteralPath $resolvedOutput) {
-    Remove-Item -LiteralPath $resolvedOutput -Recurse -Force
 }
 
 try {
@@ -30,7 +31,7 @@ try {
     }
     $releaseBody = $releaseProfile.Groups['body'].Value
     if ($releaseBody -notmatch '(?m)^debug\s*=\s*0\s*$') {
-        throw 'Release builds must set debug = 0 so DWARF sections do not inflate nebula.exe'
+        throw 'Release builds must set debug = 0 so DWARF sections do not inflate pebrel.exe'
     }
     if ($releaseBody -notmatch '(?m)^strip\s*=\s*"symbols"\s*$') {
         throw 'Release builds must strip symbols before packaging (size budget: installer <30MB)'
@@ -38,7 +39,10 @@ try {
 
     $scriptBody = Get-Content -LiteralPath $packageScript -Raw -Encoding UTF8
     if ($scriptBody -notmatch '--features gpui-shell') {
-        throw 'Release packaging must rebuild nebula with --features gpui-shell so the zip ships the GPUI shell.'
+        throw 'Release packaging must rebuild Pebrel with --features gpui-shell so the zip ships the GPUI shell.'
+    }
+    if ($scriptBody -notmatch '--bin pebrel') {
+        throw 'Release packaging must build the Pebrel product executable.'
     }
     if ($scriptBody -notmatch '--exclude nebula') {
         throw 'Release packaging must exclude nebula from the workspace build so the default-feature binary cannot overwrite the GPUI shell.'
@@ -48,8 +52,8 @@ try {
         throw 'Release packaging must refuse stale binaries (freshness guard missing).'
     }
 
-    & $packageScript -Version 'unreleased' -SkipBuild -AllowStale -OutputDirectory $resolvedOutput
-    $zipPath = Join-Path $resolvedOutput 'NebulaTerminal-vunreleased-windows-x64.zip'
+    & $packageScript -Version 'unreleased' -SkipBuild -AllowStale -OutputDirectory $resolvedOutput -TargetDirectory $TargetDirectory
+    $zipPath = Join-Path $resolvedOutput 'Pebrel-vunreleased-windows-x64.zip'
     if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
         throw "Packaging script did not create $zipPath"
     }
@@ -76,12 +80,12 @@ try {
         'licenses/LICENSE-LUA'
         'licenses/LICENSE-MLUA'
         'licenses/THIRD-PARTY-NOTICES'
-        'nebula.exe'
+        'pebrel.exe'
         'runtime/OpenConsole.exe'
         'runtime/conpty.dll'
-        'runtime/nebula-hook.exe'
-        'skills/nebula-runtime/SKILL.md'
-        'skills/nebula-runtime/agents/openai.yaml'
+        'runtime/pebrel-hook.exe'
+        'skills/pebrel-runtime/SKILL.md'
+        'skills/pebrel-runtime/agents/openai.yaml'
     ) | Sort-Object
 
     $difference = @(Compare-Object -ReferenceObject $expected -DifferenceObject $actual)
@@ -90,23 +94,23 @@ try {
     }
 
     $rootFiles = @($actual | Where-Object { -not $_.Contains('/') })
-    if (@(Compare-Object -ReferenceObject @('README.md', 'nebula.exe') -DifferenceObject $rootFiles).Count -ne 0) {
-        throw "ZIP root must contain only README.md and nebula.exe"
+    if (@(Compare-Object -ReferenceObject @('README.md', 'pebrel.exe') -DifferenceObject $rootFiles).Count -ne 0) {
+        throw "ZIP root must contain only README.md and pebrel.exe"
     }
 
-    & $packageScript -Version 'unreleased' -PackageBrand Pebrel -SkipBuild -AllowStale -OutputDirectory $resolvedOutput
-    $pebrelPath = Join-Path $resolvedOutput 'Pebrel-vunreleased-windows-x64.zip'
-    $pebrelArchive = [System.IO.Compression.ZipFile]::OpenRead($pebrelPath)
+    & $packageScript -Version 'unreleased' -PackageBrand NebulaTerminal -SkipBuild -AllowStale -OutputDirectory $resolvedOutput -TargetDirectory $TargetDirectory
+    $legacyPath = Join-Path $resolvedOutput 'NebulaTerminal-vunreleased-windows-x64.zip'
+    $legacyArchive = [System.IO.Compression.ZipFile]::OpenRead($legacyPath)
     try {
-        $pebrelFiles = @($pebrelArchive.Entries |
+        $legacyFiles = @($legacyArchive.Entries |
             Where-Object { -not $_.FullName.EndsWith('/') } |
             ForEach-Object { $_.FullName.Replace('\', '/') } |
             Sort-Object)
-        if (@(Compare-Object -ReferenceObject $expected -DifferenceObject $pebrelFiles).Count -ne 0) {
-            throw 'Pebrel local packages must retain the compatible runtime layout.'
+        if (@(Compare-Object -ReferenceObject $expected -DifferenceObject $legacyFiles).Count -ne 0) {
+            throw 'Legacy asset names must contain the same Pebrel runtime layout.'
         }
     } finally {
-        $pebrelArchive.Dispose()
+        $legacyArchive.Dispose()
     }
 
     Write-Output "package-release.tests.ps1: PASS ($($actual.Count) files, both package brands)"

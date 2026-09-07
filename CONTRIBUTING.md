@@ -1,8 +1,9 @@
 # Contributing to Pebrel / 贡献指南
 
-Pebrel is the project name. The repository remains `Kuddev/nebula`; existing
-`nebula` CLI, configuration, installation and update identifiers are compatibility
-interfaces, not opportunities for search-and-replace renaming.
+Pebrel 1.6 uses the `pebrel` command, Pebrel installation directories, and
+`PEBREL_*` environment variables. Legacy configuration and integration identifiers
+remain compatibility inputs; follow the [identity migration decision](docs/architecture-decisions.md#adr-0003---pebrel-16-identity-migration)
+when changing them. Internal Rust crate and source-directory names remain stable.
 
 ## Required reading
 
@@ -35,13 +36,13 @@ native-language review and accessibility feedback also help the project.
 
 ## First code contribution
 
-1. Fork the existing `Kuddev/nebula` repository and create your work branch from the
+1. Fork the existing `Kuddev/pebrel` repository and create your work branch from the
    PR target branch. See [INSTALL.md](INSTALL.md) for environment prerequisites.
 2. Use the pinned Rust toolchain in `rust-toolchain.toml`. Build the actual GPUI
    product, not an accidentally substituted legacy executable:
 
    ```sh
-   cargo build --locked -p nebula --bin nebula --features gpui-shell
+   cargo build --locked -p nebula --bin pebrel --features gpui-shell
    ```
 
 3. Make the focused change, run the checks below, and open a PR against the agreed
@@ -95,7 +96,7 @@ cargo fmt --all -- --check
 Run affected behavior tests and the appropriate real product checks as well:
 
 ```sh
-cargo check -p nebula --bin nebula --features gpui-shell --tests --locked
+cargo check -p nebula --bin pebrel --features gpui-shell --tests --locked
 ```
 
 The isolated i18n test compiles production files, not copied implementations. It

@@ -13,14 +13,14 @@ param([switch]$Kill)
 $root = 'D:\temp_build\.probe-ssh'
 
 if ($Kill) {
-    Get-Process nebula -ErrorAction SilentlyContinue |
-        Where-Object { $_.Path -like '*\target\debug\nebula.exe' } |
+    Get-Process pebrel -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -like '*\target\debug\pebrel.exe' } |
         Stop-Process -Force
     return
 }
 
 Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path "$root\appdata\Nebula", "$root\home" | Out-Null
+New-Item -ItemType Directory -Force -Path "$root\appdata\Pebrel", "$root\home" | Out-Null
 
 # saved_hosts is what actually populates the sidebar list; pinned_hosts only
 # reorders it (see merge_ssh_hosts). Writing as ASCII on purpose: PS 5.1's
@@ -36,7 +36,7 @@ $settings = @(
     'pinned_hosts=root@192.0.2.1',
     'keep_session=false'
 ) -join [Environment]::NewLine
-Set-Content -Path "$root\appdata\Nebula\nebula_settings.txt" -Value $settings -Encoding ascii
+Set-Content -Path "$root\appdata\Pebrel\pebrel_settings.txt" -Value $settings -Encoding ascii
 
 $env:APPDATA = "$root\appdata"
 $env:USERPROFILE = "$root\home"
@@ -45,6 +45,6 @@ $env:CODEX_HOME = "$root\home\.codex"
 $env:XDG_CONFIG_HOME = "$root\home\.config"
 $env:NEBULA_DEBUG_LOG = '1'
 
-$exe = 'D:\temp_build\nebula\target\debug\nebula.exe'
+$exe = 'D:\temp_build\nebula\target\debug\pebrel.exe'
 $proc = Start-Process -FilePath $exe -PassThru
 Write-Output ("pid=" + $proc.Id)

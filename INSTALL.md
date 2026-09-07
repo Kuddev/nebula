@@ -1,8 +1,9 @@
 # Installing Pebrel
 
-Pebrel retains the `Kuddev/nebula` repository, `nebula` command, and existing
-package identifiers for compatibility. Historical download filenames below
-are unchanged; do not rename installed files or configuration directories.
+Pebrel 1.6 uses the `pebrel` command, `pebrel.exe`, and Pebrel package names.
+Older releases keep their original filenames. Use the new installer to migrate
+an existing Nebula installation; configuration migration is handled by the
+application at startup.
 
 ## Linux Preview
 
@@ -10,11 +11,11 @@ Cross-platform Preview runs provide three Linux x86_64 assets. They are test
 builds rather than stable releases.
 
 - Debian/Ubuntu: install
-  `NebulaTerminal-v<version>-preview.<id>-linux-x86_64.deb` with
-  `sudo apt install ./NebulaTerminal-v<version>-preview.<id>-linux-x86_64.deb`.
-  Remove it with `sudo apt remove nebula-terminal-preview`.
+  `Pebrel-v<version>-preview.<id>-linux-x86_64.deb` with
+  `sudo apt install ./Pebrel-v<version>-preview.<id>-linux-x86_64.deb`.
+  Remove it with `sudo apt remove pebrel-preview`.
 - AppImage: make
-  `NebulaTerminal-v<version>-preview.<id>-linux-x86_64.AppImage` executable and
+  `Pebrel-v<version>-preview.<id>-linux-x86_64.AppImage` executable and
   run it directly. It does not register itself with the system package manager.
 - Portable archive: extract the `tar.gz` and run its `AppRun` launcher. Keep
   the AppDir layout intact so bundled libraries are found correctly.
@@ -28,7 +29,7 @@ SSH password login works without a keyring. Saving SSH passwords or encrypted-ke
 passphrases requires `libsecret-tools` and an unlocked Secret Service keyring
 (for example GNOME Keyring or a compatible KWallet setup). The Debian package
 recommends these dependencies. If storage is unavailable, enter the secret for
-the current connection instead; Nebula does not silently claim to save it.
+the current connection instead; Pebrel does not silently claim to save it.
 
 ## macOS Preview
 
@@ -37,7 +38,7 @@ Download the DMG matching the Mac architecture:
 - `macos-aarch64.dmg` for Apple Silicon Macs.
 - `macos-x86_64.dmg` for Intel Macs.
 
-Open the DMG and drag **Nebula Terminal Preview** into Applications. These
+Open the DMG and drag **Pebrel Preview** into Applications. These
 Preview builds default to ad-hoc signing, without Apple notarization. For a
 download you have verified and trust, macOS may require **System Settings →
 Privacy & Security → Open Anyway** after an initial launch is blocked. Do not
@@ -65,41 +66,58 @@ user testing. The release procedure and acceptance checklist are in
 
 ## Windows installer (recommended)
 
-1. Download `NebulaTerminal-<version>-windows-x64-setup.exe` from the
-   [Releases](https://github.com/Kuddev/nebula/releases) page.
+1. Download `Pebrel-<version>-windows-x64-setup.exe` from the
+   [Releases](https://github.com/Kuddev/pebrel/releases/latest) page.
 2. Follow the wizard to choose the installation directory and optional desktop
    or Windows sign-in shortcuts. The default per-user installation does not
    require administrator rights.
-3. The installer installs the bundled Maple Mono font and can launch Nebula on
-   the final page.
+3. The installer offers system installation of the bundled Maple Mono font and
+   can launch Pebrel on the final page. The application also embeds the font.
 
-Uninstalling closes Nebula, runs `nebula setup-ai --remove` before deleting the
-program files, and removes Nebula's Claude, Codex, opencode, and Pi integration.
+### Upgrade an existing Nebula installation
+
+The installer keeps the existing application identity so Windows treats Pebrel
+as an upgrade. A registered installation ending in `Nebula Terminal` moves to
+the sibling `Pebrel` directory. For the old default installation, this changes
+`%LOCALAPPDATA%\Programs\Nebula Terminal` to
+`%LOCALAPPDATA%\Programs\Pebrel`. Other custom directory names are preserved,
+and an explicitly chosen installer directory takes precedence.
+
+Close the old application normally before installing. The installer updates its
+managed shortcuts and PATH entry, installs `pebrel.exe` and
+`runtime/pebrel-hook.exe`, and removes recognized old program files. Unknown
+files and user configuration remain in place. If cleanup fails after the new
+program is installed, the installer reports the failure and retains retry state.
+
+On startup, Pebrel copies old application data into `%APPDATA%\Pebrel` without
+overwriting newer files. The old data directory remains available for recovery
+and existing absolute configuration imports. See
+[Lua configuration and migration](docs/lua-configuration.md#existing-nebula-data)
+for discovery order and the `PEBREL_*` environment variables.
+
+Uninstalling closes Pebrel, runs `pebrel setup-ai --remove` before deleting the
+program files, and removes Pebrel's Claude, Codex, opencode, and Pi integration.
 Other user-owned hook and notifier entries are preserved.
 
 ## Portable archive
 
-1. Download `NebulaTerminal-<version>-windows-x64.zip` from the Releases page.
+1. Download `Pebrel-v<version>-windows-x64.zip` from the Releases page.
 2. Unzip it anywhere.
-3. **Install the font**: open `fonts`, double-click
-   `MapleMonoNormal-NF-CN-Regular.ttf`, and press
-   *Install*. Nebula embeds the same font as a runtime fallback, but the normal
-   system installation remains recommended. Nebula checks at every launch and
-   shows a dismissible reminder that can reopen the bundled `fonts` folder;
-   restart Nebula after installing to load the complete icon set.
-4. Run `nebula.exe`.
+3. Run `pebrel.exe`. The portable application includes its terminal font, so
+   no separate font installation is required. The installer offers optional
+   system font installation for use in other applications.
 
 Keep the extracted directory structure intact:
 
 | Path | Purpose |
 | --- | --- |
-| `nebula.exe` | the terminal |
+| `pebrel.exe` | the terminal |
 | `README.md` | overview and usage |
-| `runtime/nebula-hook.exe` | AI turn-notification bridge (Claude Code / Codex) |
+| `runtime/pebrel-hook.exe` | AI turn-notification bridge (Claude Code / Codex) |
 | `runtime/conpty.dll` + `runtime/OpenConsole.exe` | modern ConPTY host (correct resize, fast tab spawn) |
-| `fonts/MapleMonoNormal-NF-CN-Regular.ttf` | Nerd Font for powerline/icons — install once (SIL OFL 1.1) |
 | `docs/CHANGELOG.md` + `docs/INSTALL.md` + `docs/lua-configuration.md` | release changes, installation, and Lua configuration |
-| `licenses/` | Nebula and third-party license notices |
+| `skills/pebrel-runtime/` | instructions for controlling Pebrel through its Runtime API |
+| `licenses/` | Pebrel and third-party license notices |
 
 ## Build from source
 
@@ -107,9 +125,9 @@ Requirements: Windows 10 1809+ / 11 and [rustup](https://rustup.rs). The
 repository pins Rust 1.97.1 in `rust-toolchain.toml`.
 
 ```powershell
-git clone https://github.com/Kuddev/nebula
-cd nebula
-cargo build --release
+git clone https://github.com/Kuddev/pebrel
+cd pebrel
+cargo build --release --locked -p nebula --bin pebrel --features gpui-shell
 ```
 
 Build and assemble the portable archive with:
@@ -121,8 +139,8 @@ powershell -ExecutionPolicy Bypass -File scripts/package-release.ps1 `
 
 The script builds the release workspace, verifies every required input, stages
 the directory layout above, creates the ZIP, and prints its file count, packed
-and unpacked sizes, and SHA-256. Use `-SkipBuild` only when the release binaries
-have already been built and verified.
+and unpacked sizes, and SHA-256. Final releases must use a fresh build;
+`-SkipBuild` and `-AllowStale` are reserved for packaging-script tests.
 
 Build the wizard-based installer with Inno Setup 6.7.3:
 
@@ -137,15 +155,17 @@ directory.
 
 ## First run
 
-- Toast notifications register under the `Nebula` app identity automatically.
+- Toast notifications register under the `Pebrel` app identity automatically.
 - Claude Code / Codex turn notifications are wired on first boot
-  (`nebula setup-ai --remove` to undo; `nebula notify-test` to verify the
+  (`pebrel setup-ai --remove` to undo; `pebrel notify-test` to verify the
   toast pipeline).
-- New configuration uses `%APPDATA%\nebula\nebula.lua`. Run
-  `nebula config init --language system` to create an annotated template and
-  `nebula config check` to validate it. Existing `nebula.toml` remains
-  supported when no Lua configuration is present.
-- Linux uses `$XDG_CONFIG_HOME/nebula/nebula.lua` (normally
-  `~/.config/nebula/nebula.lua`) and supports both Wayland and X11. The initial
-  binary baseline is x86_64 glibc on Ubuntu 24.04, Debian 12, and Fedora 42.
+- New configuration uses `%APPDATA%\Pebrel\pebrel.lua`. Run
+  `pebrel config init --language system` to create an annotated template and
+  `pebrel config check` to validate it. Legacy Nebula configuration is supported
+  when no Pebrel configuration is present; see the discovery order in the
+  [Lua guide](docs/lua-configuration.md#discovery-order).
+- Linux uses `$XDG_CONFIG_HOME/pebrel/pebrel.lua` (normally
+  `~/.config/pebrel/pebrel.lua`); macOS uses
+  `~/Library/Application Support/Pebrel/pebrel.lua`. Native package and runtime
+  acceptance requirements are described in the Preview sections above.
 - Visual settings remain available in the in-app settings panel.

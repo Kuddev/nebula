@@ -1,13 +1,20 @@
-﻿$ErrorActionPreference = 'Stop'
+﻿[CmdletBinding()]
+param([string] $TargetDirectory)
+
+$ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $installerPath = Join-Path $repo 'scripts\installer.iss'
+$migrationPath = Join-Path $repo 'scripts\installer-migration.iss'
 $builderPath = Join-Path $repo 'scripts\build-installer.ps1'
 
 $installer = Get-Content -LiteralPath $installerPath -Raw -Encoding UTF8
+$migration = Get-Content -LiteralPath $migrationPath -Raw -Encoding UTF8
 $requiredPatterns = [ordered]@{
-    'per-user installation' = 'DefaultDirName=\{localappdata\}\\Programs\\Nebula Terminal'
+    'migration-aware installation directory' = 'DefaultDirName=\{code:DefaultInstallDir\}'
+    'explicit previous-directory migration' = 'UsePreviousAppDir=no'
+    'Pebrel start-menu group' = 'UsePreviousGroup=no'
     'non-admin installation' = 'PrivilegesRequired=lowest'
     'Windows 10 1809 floor' = 'MinVersion=10\.0\.17763'
     'application closing' = 'CloseApplications=yes'
@@ -16,34 +23,35 @@ $requiredPatterns = [ordered]@{
     'login startup task' = '\{userstartup\}\\Pebrel'
     'hook cleanup command' = 'Parameters: "setup-ai --remove"'
     'gpui start-menu shortcut' = 'Parameters: "--gpui"'
-    'idempotent cleanup entry' = 'RunOnceId: "RemoveNebulaAiHooks"'
-    'hook helper payload' = 'nebula-hook\.exe'
+    'idempotent cleanup entry' = 'RunOnceId: "RemovePebrelAiHooks"'
+    'hook helper payload' = 'pebrel-hook\.exe'
     'ConPTY payload' = 'conpty\.dll'
     'ConPTY host payload' = 'OpenConsole\.exe'
     'font payload' = 'MapleMonoNormal-NF-CN-Regular\.ttf'
     'optional font installation task' = 'Tasks: installfont'
     'pinned Chinese language file' = 'target\\installer-tools\\ChineseSimplified\.isl'
-    'localized context menu label' = 'english\.OpenInNebula=Open in Pebrel'
+    'localized context menu label' = 'english\.OpenInPebrel=Open in Pebrel'
     'Pebrel display name' = 'AppName=Pebrel'
     'compatible installer identity' = 'AppId=\{\{61022144-7D0A-4E54-94F2-C329A8F58656\}'
-    'compatible default asset name' = '#define PackageBrand "NebulaTerminal"'
+    'Pebrel default asset name' = '#define PackageBrand "Pebrel"'
     'explicit package brand' = 'OutputBaseFilename=\{#PackageBrand\}-\{#AppVersion\}-windows-x64-setup'
-    'localized Chinese context menu label' = 'chinesesimplified\.OpenInNebula=\S.+'
-    'directory background context menu' = 'Software\\Classes\\Directory\\Background\\shell\\NebulaTerminal'
-    'selected directory context menu' = 'Software\\Classes\\Directory\\shell\\NebulaTerminal'
-    'context menu executable icon' = 'ValueName: "Icon"; ValueData: "\{app\}\\nebula\.exe,0"'
+    'localized Chinese context menu label' = 'chinesesimplified\.OpenInPebrel=\S.+'
+    'directory background context menu' = 'Software\\Classes\\Directory\\Background\\shell\\Pebrel'
+    'selected directory context menu' = 'Software\\Classes\\Directory\\shell\\Pebrel'
+    'context menu executable icon' = 'ValueName: "Icon"; ValueData: "\{app\}\\pebrel\.exe,0"'
     'background working-directory command' = '--gpui --working-directory ""%V""'
     'selected directory working-directory command' = '--gpui --working-directory ""%1""'
     'PATH task' = 'Name: "addtopath"; Description: "\{cm:AddToPath\}"'
     'PATH registry entry' = 'Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"'
     'PATH ownership marker' = 'ValueName: "InstallerAddedToPath"'
-    'Win+R App Paths registration' = 'App Paths\\nebula\.exe'
+    'Win+R App Paths registration' = 'App Paths\\pebrel\.exe'
+    'notification identity on shortcuts' = 'AppUserModelID: "com\.pebrel\.terminal"'
     'environment change notification' = 'ChangesEnvironment=yes'
     'PATH uninstall cleanup' = 'CurUninstallStepChanged\(CurUninstallStep: TUninstallStep\)'
     'runtime control API documentation' = 'Source: "\{#RepoRoot\}\\docs\\runtime-control-api\.md"; DestDir: "\{app\}\\docs";'
     'runtime API schema' = 'Source: "\{#RepoRoot\}\\docs\\runtime-api-v1\.schema\.json"; DestDir: "\{app\}\\docs";'
-    'Nebula Runtime skill instructions' = 'Source: "\{#RepoRoot\}\\docs\\skills\\nebula-runtime\\SKILL\.md"; DestDir: "\{app\}\\skills\\nebula-runtime";'
-    'Nebula Runtime skill metadata' = 'Source: "\{#RepoRoot\}\\docs\\skills\\nebula-runtime\\agents\\openai\.yaml"; DestDir: "\{app\}\\skills\\nebula-runtime\\agents";'
+    'Pebrel Runtime skill instructions' = 'Source: "\{#RepoRoot\}\\docs\\skills\\pebrel-runtime\\SKILL\.md"; DestDir: "\{app\}\\skills\\pebrel-runtime";'
+    'Pebrel Runtime skill metadata' = 'Source: "\{#RepoRoot\}\\docs\\skills\\pebrel-runtime\\agents\\openai\.yaml"; DestDir: "\{app\}\\skills\\pebrel-runtime\\agents";'
 }
 
 foreach ($entry in $requiredPatterns.GetEnumerator()) {
@@ -59,8 +67,8 @@ if ($uninstallRun -lt 0 -or $cleanup -lt $uninstallRun) {
 }
 
 $contextMenuRoots = @(
-    'Software\Classes\Directory\Background\shell\NebulaTerminal'
-    'Software\Classes\Directory\shell\NebulaTerminal'
+    'Software\Classes\Directory\Background\shell\Pebrel'
+    'Software\Classes\Directory\shell\Pebrel'
 )
 foreach ($root in $contextMenuRoots) {
     $escapedRoot = [regex]::Escape($root)
@@ -69,7 +77,31 @@ foreach ($root in $contextMenuRoots) {
     }
 }
 
-& $builderPath -SkipBuild -AllowStale -ValidateOnly
+$migrationPatterns = [ordered]@{
+    'per-user Pebrel default' = '\{localappdata\}\\Programs\\Pebrel'
+    'registered previous installation' = 'Inno Setup: App Path'
+    'known previous directory rename' = "ExtractFileName\(Result\), 'Nebula Terminal'"
+    'running legacy executable detection' = 'IsExecutableRunning\(Executable\)'
+    'retryable migration record' = 'PendingLegacyInstallDir'
+    'visible migration failures' = "CustomMessage\('MigrationFailed'\)"
+    'nonzero migration failure exit' = 'GetCustomSetupExitCode'
+    'precise legacy payload cleanup' = 'RemoveLegacyPayload'
+    'linked path protection' = 'Attributes and \$400'
+}
+foreach ($entry in $migrationPatterns.GetEnumerator()) {
+    if ($migration -notmatch $entry.Value) {
+        throw "Installer migration is missing $($entry.Key): $($entry.Value)"
+    }
+}
+if ($migration -match 'DelTree\(|TerminateProcess\(|taskkill') {
+    throw 'Migration must not recursively delete user data or forcefully terminate applications.'
+}
+
+$validationArguments = @{ SkipBuild = $true; AllowStale = $true; ValidateOnly = $true }
+if (-not [string]::IsNullOrWhiteSpace($TargetDirectory)) {
+    $validationArguments.TargetDirectory = $TargetDirectory
+}
+& $builderPath @validationArguments
 
 $builder = Get-Content -LiteralPath $builderPath -Raw -Encoding UTF8
 if ($builder -notmatch 'Stale binary') {

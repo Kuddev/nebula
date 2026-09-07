@@ -141,7 +141,7 @@ fn directory_rows(language: crate::display::UiLanguage) -> Vec<WorkspacePaletteR
 
 fn ssh_rows(language: crate::display::UiLanguage) -> Vec<WorkspacePaletteRow> {
     let group = language.pick("SSH 主机", "SSH hosts");
-    let icons = ssh_host_icon_ids();
+    let icons = ssh_host_icon_ids(&crate::display::nebula_data_dir());
     crate::gpui_shell::ssh_hosts::SshHostLists::load()
         .merged()
         .into_iter()

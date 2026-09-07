@@ -64,7 +64,7 @@ fn invalid_proxy_endpoints_and_authentication_are_rejected() {
 fn proxy_credential_keys_are_stable_and_scoped_to_endpoint_and_target() {
     let options = proxy();
     let key = options.proxy_credential_target("root@host").unwrap();
-    assert!(key.starts_with("Nebula/SSH/Proxy/"));
+    assert!(key.starts_with("Pebrel/SSH/Proxy/"));
     assert!(!key.contains("alice"));
     assert!(!key.contains("proxy.internal"));
     assert_eq!(key, options.proxy_credential_target("root@host").unwrap());

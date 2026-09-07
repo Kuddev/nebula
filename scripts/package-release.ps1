@@ -7,7 +7,7 @@ param(
     [string] $Configuration = 'release',
 
     [ValidateSet('NebulaTerminal', 'Pebrel')]
-    [string] $PackageBrand = 'NebulaTerminal',
+    [string] $PackageBrand = 'Pebrel',
 
     [switch] $SkipBuild,
     # 与 -SkipBuild 联用：跳过「exe 必须比源码新」的陈旧检查。仅用于脚本
@@ -19,8 +19,8 @@ param(
     # Cargo target directory to build into and package from. Defaults to the
     # repo's own `target/`.
     #
-    # Windows refuses to overwrite a running exe, so packaging while a Nebula
-    # instance is live out of `target/release/nebula.exe` dies with a bare
+    # Windows refuses to overwrite a running exe, so packaging while a Pebrel
+    # instance is live out of `target/release/pebrel.exe` dies with a bare
     # "拒绝访问 (os error 5)" that names the linker, not the real cause. Point
     # this at a separate directory to build a package without touching — let
     # alone killing — the instance the user is working in.
@@ -49,12 +49,12 @@ $zipPath = Join-Path $outputRoot "$PackageBrand-v$Version-windows-x64.zip"
 $temporaryZip = Join-Path $outputRoot ".$PackageBrand-v$Version-windows-x64-$PID.tmp.zip"
 
 $manifest = [ordered]@{
-    'nebula.exe'                                     = Join-Path $targetRoot 'nebula.exe'
+    'pebrel.exe'                                     = Join-Path $targetRoot 'pebrel.exe'
     'README.md'                                      = Join-Path $repo 'README.md'
-    'runtime/nebula-hook.exe'                        = Join-Path $targetRoot 'nebula-hook.exe'
+    'runtime/pebrel-hook.exe'                        = Join-Path $targetRoot 'pebrel-hook.exe'
     'runtime/conpty.dll'                             = Join-Path $targetRoot 'conpty.dll'
     'runtime/OpenConsole.exe'                        = Join-Path $targetRoot 'OpenConsole.exe'
-    # 1.1.0 起 zip 不再附带 20MB 字体副本：nebula.exe 内嵌同一份字节，
+    # 1.1.0 起 zip 不再附带 20MB 字体副本：pebrel.exe 内嵌同一份字节，
     # 「安装字体」提示会把它落盘（font_install::ensure_bundled_font_on_disk）。
     # 安装包仍带 ttf——Inno 的 FontInstall 任务需要真实文件。
     'docs/CHANGELOG.md'                              = Join-Path $repo 'CHANGELOG.md'
@@ -62,8 +62,8 @@ $manifest = [ordered]@{
     'docs/lua-configuration.md'                      = Join-Path $repo 'docs\lua-configuration.md'
     'docs/runtime-control-api.md'                    = Join-Path $repo 'docs\runtime-control-api.md'
     'docs/runtime-api-v1.schema.json'                = Join-Path $repo 'docs\runtime-api-v1.schema.json'
-    'skills/nebula-runtime/SKILL.md'                 = Join-Path $repo 'docs\skills\nebula-runtime\SKILL.md'
-    'skills/nebula-runtime/agents/openai.yaml'       = Join-Path $repo 'docs\skills\nebula-runtime\agents\openai.yaml'
+    'skills/pebrel-runtime/SKILL.md'                 = Join-Path $repo 'docs\skills\pebrel-runtime\SKILL.md'
+    'skills/pebrel-runtime/agents/openai.yaml'       = Join-Path $repo 'docs\skills\pebrel-runtime\agents\openai.yaml'
     'licenses/LICENSE'                               = Join-Path $repo 'LICENSE'
     'licenses/LICENSE-LUA'                           = Join-Path $repo 'licenses\LICENSE-LUA'
     'licenses/LICENSE-MLUA'                          = Join-Path $repo 'licenses\LICENSE-MLUA'
@@ -130,8 +130,8 @@ function Assert-FreshBinaries {
         (Join-Path $repo '..\gpui-component-fork\crates')
     )
     $checks = @(
-        @{ Binary = $manifest['nebula.exe']; Newest = Get-NewestSourceTime $appSources },
-        @{ Binary = $manifest['runtime/nebula-hook.exe']; Newest = Get-NewestSourceTime @(
+        @{ Binary = $manifest['pebrel.exe']; Newest = Get-NewestSourceTime $appSources },
+        @{ Binary = $manifest['runtime/pebrel-hook.exe']; Newest = Get-NewestSourceTime @(
             (Join-Path $repo 'nebula_hook'), (Join-Path $repo 'Cargo.toml')) }
     )
     foreach ($check in $checks) {
@@ -151,17 +151,17 @@ if (-not $SkipBuild) {
         # binary overwrites the product exe with the legacy winit shell.
         # Exclude nebula from the workspace build, then link GPUI last.
         if ($Configuration -eq 'release') {
-            & cargo build --workspace --release --exclude nebula
+            & cargo build --workspace --release --exclude nebula --locked
             if ($LASTEXITCODE -ne 0) {
                 throw "Cargo workspace build failed with exit code $LASTEXITCODE"
             }
-            & cargo build -p nebula --bin nebula --release --features gpui-shell
+            & cargo build -p nebula --bin pebrel --release --features gpui-shell --locked
         } else {
-            & cargo build --workspace --exclude nebula
+            & cargo build --workspace --exclude nebula --locked
             if ($LASTEXITCODE -ne 0) {
                 throw "Cargo workspace build failed with exit code $LASTEXITCODE"
             }
-            & cargo build -p nebula --bin nebula --features gpui-shell
+            & cargo build -p nebula --bin pebrel --features gpui-shell --locked
         }
         if ($LASTEXITCODE -ne 0) {
             throw "Cargo gpui-shell build failed with exit code $LASTEXITCODE"
@@ -179,19 +179,19 @@ if ($missing.Count -ne 0) {
     throw "Required package files are missing:`n$($missing -join "`n")"
 }
 
-$packagedExe = $manifest['nebula.exe']
+$packagedExe = $manifest['pebrel.exe']
 Assert-FreshBinaries
 if ($PackageBrand -eq 'Pebrel' -and (Get-Item -LiteralPath $packagedExe).VersionInfo.ProductName -ne 'Pebrel') {
     throw 'Pebrel packages require a freshly built Pebrel executable, not renamed Nebula binaries.'
 }
 $helpText = & $packagedExe --help 2>&1 | Out-String
 if ($helpText -notmatch '--gpui') {
-    throw "nebula.exe at $packagedExe is the legacy shell (no --gpui in --help). Rebuild with --features gpui-shell; do not package a workspace-default binary."
+    throw "pebrel.exe at $packagedExe is the legacy shell (no --gpui in --help). Rebuild with --features gpui-shell; do not package a workspace-default binary."
 }
 if ($Version -ne 'unreleased') {
     $versionText = & $packagedExe --version 2>&1 | Out-String
     if ($versionText -notmatch [regex]::Escape($Version)) {
-        throw "nebula.exe reports `"$($versionText.Trim())`" but the package version is $Version. The staged exe does not match this release."
+        throw "pebrel.exe reports `"$($versionText.Trim())`" but the package version is $Version. The staged exe does not match this release."
     }
 }
 

@@ -1,4 +1,4 @@
-_nebula() {
+_pebrel() {
     local i cur prev opts cmd
     COMPREPLY=()
     if [[ "${BASH_VERSINFO[0]}" -ge 4 ]]; then
@@ -14,565 +14,565 @@ _nebula() {
     do
         case "${cmd},${i}" in
             ",$1")
-                cmd="nebula"
+                cmd="pebrel"
                 ;;
-            nebula,agent)
-                cmd="nebula__agent"
+            pebrel,agent)
+                cmd="pebrel__agent"
                 ;;
-            nebula,config)
-                cmd="nebula__config"
+            pebrel,config)
+                cmd="pebrel__config"
                 ;;
-            nebula,ctl)
-                cmd="nebula__ctl"
+            pebrel,ctl)
+                cmd="pebrel__ctl"
                 ;;
-            nebula,env)
-                cmd="nebula__env"
+            pebrel,env)
+                cmd="pebrel__env"
                 ;;
-            nebula,help)
-                cmd="nebula__help"
+            pebrel,help)
+                cmd="pebrel__help"
                 ;;
-            nebula,migrate)
-                cmd="nebula__migrate"
+            pebrel,migrate)
+                cmd="pebrel__migrate"
                 ;;
-            nebula,pane)
-                cmd="nebula__pane"
+            pebrel,pane)
+                cmd="pebrel__pane"
                 ;;
-            nebula,tab)
-                cmd="nebula__tab"
+            pebrel,tab)
+                cmd="pebrel__tab"
                 ;;
-            nebula,window)
-                cmd="nebula__window"
+            pebrel,window)
+                cmd="pebrel__window"
                 ;;
-            nebula__agent,delegate)
-                cmd="nebula__agent__delegate"
+            pebrel__agent,delegate)
+                cmd="pebrel__agent__delegate"
                 ;;
-            nebula__agent,help)
-                cmd="nebula__agent__help"
+            pebrel__agent,help)
+                cmd="pebrel__agent__help"
                 ;;
-            nebula__agent,list)
-                cmd="nebula__agent__list"
+            pebrel__agent,list)
+                cmd="pebrel__agent__list"
                 ;;
-            nebula__agent,paste)
-                cmd="nebula__agent__paste"
+            pebrel__agent,paste)
+                cmd="pebrel__agent__paste"
                 ;;
-            nebula__agent,read)
-                cmd="nebula__agent__read"
+            pebrel__agent,read)
+                cmd="pebrel__agent__read"
                 ;;
-            nebula__agent,send)
-                cmd="nebula__agent__send"
+            pebrel__agent,send)
+                cmd="pebrel__agent__send"
                 ;;
-            nebula__agent,wait)
-                cmd="nebula__agent__wait"
+            pebrel__agent,wait)
+                cmd="pebrel__agent__wait"
                 ;;
-            nebula__agent__help,delegate)
-                cmd="nebula__agent__help__delegate"
+            pebrel__agent__help,delegate)
+                cmd="pebrel__agent__help__delegate"
                 ;;
-            nebula__agent__help,help)
-                cmd="nebula__agent__help__help"
+            pebrel__agent__help,help)
+                cmd="pebrel__agent__help__help"
                 ;;
-            nebula__agent__help,list)
-                cmd="nebula__agent__help__list"
+            pebrel__agent__help,list)
+                cmd="pebrel__agent__help__list"
                 ;;
-            nebula__agent__help,paste)
-                cmd="nebula__agent__help__paste"
+            pebrel__agent__help,paste)
+                cmd="pebrel__agent__help__paste"
                 ;;
-            nebula__agent__help,read)
-                cmd="nebula__agent__help__read"
+            pebrel__agent__help,read)
+                cmd="pebrel__agent__help__read"
                 ;;
-            nebula__agent__help,send)
-                cmd="nebula__agent__help__send"
+            pebrel__agent__help,send)
+                cmd="pebrel__agent__help__send"
                 ;;
-            nebula__agent__help,wait)
-                cmd="nebula__agent__help__wait"
+            pebrel__agent__help,wait)
+                cmd="pebrel__agent__help__wait"
                 ;;
-            nebula__config,check)
-                cmd="nebula__config__check"
+            pebrel__config,check)
+                cmd="pebrel__config__check"
                 ;;
-            nebula__config,help)
-                cmd="nebula__config__help"
+            pebrel__config,help)
+                cmd="pebrel__config__help"
                 ;;
-            nebula__config,init)
-                cmd="nebula__config__init"
+            pebrel__config,init)
+                cmd="pebrel__config__init"
                 ;;
-            nebula__config__help,check)
-                cmd="nebula__config__help__check"
+            pebrel__config__help,check)
+                cmd="pebrel__config__help__check"
                 ;;
-            nebula__config__help,help)
-                cmd="nebula__config__help__help"
+            pebrel__config__help,help)
+                cmd="pebrel__config__help__help"
                 ;;
-            nebula__config__help,init)
-                cmd="nebula__config__help__init"
+            pebrel__config__help,init)
+                cmd="pebrel__config__help__init"
                 ;;
-            nebula__ctl,agent-fork)
-                cmd="nebula__ctl__agent__fork"
+            pebrel__ctl,agent-fork)
+                cmd="pebrel__ctl__agent__fork"
                 ;;
-            nebula__ctl,agent-get)
-                cmd="nebula__ctl__agent__get"
+            pebrel__ctl,agent-get)
+                cmd="pebrel__ctl__agent__get"
                 ;;
-            nebula__ctl,agent-paste)
-                cmd="nebula__ctl__agent__paste"
+            pebrel__ctl,agent-paste)
+                cmd="pebrel__ctl__agent__paste"
                 ;;
-            nebula__ctl,agent-prompt)
-                cmd="nebula__ctl__agent__prompt"
+            pebrel__ctl,agent-prompt)
+                cmd="pebrel__ctl__agent__prompt"
                 ;;
-            nebula__ctl,agent-read)
-                cmd="nebula__ctl__agent__read"
+            pebrel__ctl,agent-read)
+                cmd="pebrel__ctl__agent__read"
                 ;;
-            nebula__ctl,agent-start)
-                cmd="nebula__ctl__agent__start"
+            pebrel__ctl,agent-start)
+                cmd="pebrel__ctl__agent__start"
                 ;;
-            nebula__ctl,agent-wait)
-                cmd="nebula__ctl__agent__wait"
+            pebrel__ctl,agent-wait)
+                cmd="pebrel__ctl__agent__wait"
                 ;;
-            nebula__ctl,agents)
-                cmd="nebula__ctl__agents"
+            pebrel__ctl,agents)
+                cmd="pebrel__ctl__agents"
                 ;;
-            nebula__ctl,close-pane)
-                cmd="nebula__ctl__close__pane"
+            pebrel__ctl,close-pane)
+                cmd="pebrel__ctl__close__pane"
                 ;;
-            nebula__ctl,close-tab)
-                cmd="nebula__ctl__close__tab"
+            pebrel__ctl,close-tab)
+                cmd="pebrel__ctl__close__tab"
                 ;;
-            nebula__ctl,close-window)
-                cmd="nebula__ctl__close__window"
+            pebrel__ctl,close-window)
+                cmd="pebrel__ctl__close__window"
                 ;;
-            nebula__ctl,describe)
-                cmd="nebula__ctl__describe"
+            pebrel__ctl,describe)
+                cmd="pebrel__ctl__describe"
                 ;;
-            nebula__ctl,exec-pane)
-                cmd="nebula__ctl__exec__pane"
+            pebrel__ctl,exec-pane)
+                cmd="pebrel__ctl__exec__pane"
                 ;;
-            nebula__ctl,focus)
-                cmd="nebula__ctl__focus"
+            pebrel__ctl,focus)
+                cmd="pebrel__ctl__focus"
                 ;;
-            nebula__ctl,help)
-                cmd="nebula__ctl__help"
+            pebrel__ctl,help)
+                cmd="pebrel__ctl__help"
                 ;;
-            nebula__ctl,move-tab)
-                cmd="nebula__ctl__move__tab"
+            pebrel__ctl,move-tab)
+                cmd="pebrel__ctl__move__tab"
                 ;;
-            nebula__ctl,new-tab)
-                cmd="nebula__ctl__new__tab"
+            pebrel__ctl,new-tab)
+                cmd="pebrel__ctl__new__tab"
                 ;;
-            nebula__ctl,new-window)
-                cmd="nebula__ctl__new__window"
+            pebrel__ctl,new-window)
+                cmd="pebrel__ctl__new__window"
                 ;;
-            nebula__ctl,orchestrate)
-                cmd="nebula__ctl__orchestrate"
+            pebrel__ctl,orchestrate)
+                cmd="pebrel__ctl__orchestrate"
                 ;;
-            nebula__ctl,paste)
-                cmd="nebula__ctl__paste"
+            pebrel__ctl,paste)
+                cmd="pebrel__ctl__paste"
                 ;;
-            nebula__ctl,procs)
-                cmd="nebula__ctl__procs"
+            pebrel__ctl,procs)
+                cmd="pebrel__ctl__procs"
                 ;;
-            nebula__ctl,prompt)
-                cmd="nebula__ctl__prompt"
+            pebrel__ctl,prompt)
+                cmd="pebrel__ctl__prompt"
                 ;;
-            nebula__ctl,read)
-                cmd="nebula__ctl__read"
+            pebrel__ctl,read)
+                cmd="pebrel__ctl__read"
                 ;;
-            nebula__ctl,rename-tab)
-                cmd="nebula__ctl__rename__tab"
+            pebrel__ctl,rename-tab)
+                cmd="pebrel__ctl__rename__tab"
                 ;;
-            nebula__ctl,resize-pane)
-                cmd="nebula__ctl__resize__pane"
+            pebrel__ctl,resize-pane)
+                cmd="pebrel__ctl__resize__pane"
                 ;;
-            nebula__ctl,run)
-                cmd="nebula__ctl__run"
+            pebrel__ctl,run)
+                cmd="pebrel__ctl__run"
                 ;;
-            nebula__ctl,send-key)
-                cmd="nebula__ctl__send__key"
+            pebrel__ctl,send-key)
+                cmd="pebrel__ctl__send__key"
                 ;;
-            nebula__ctl,snapshot)
-                cmd="nebula__ctl__snapshot"
+            pebrel__ctl,snapshot)
+                cmd="pebrel__ctl__snapshot"
                 ;;
-            nebula__ctl,split)
-                cmd="nebula__ctl__split"
+            pebrel__ctl,split)
+                cmd="pebrel__ctl__split"
                 ;;
-            nebula__ctl,subscribe)
-                cmd="nebula__ctl__subscribe"
+            pebrel__ctl,subscribe)
+                cmd="pebrel__ctl__subscribe"
                 ;;
-            nebula__ctl,wait)
-                cmd="nebula__ctl__wait"
+            pebrel__ctl,wait)
+                cmd="pebrel__ctl__wait"
                 ;;
-            nebula__ctl,zoom-pane)
-                cmd="nebula__ctl__zoom__pane"
+            pebrel__ctl,zoom-pane)
+                cmd="pebrel__ctl__zoom__pane"
                 ;;
-            nebula__ctl__help,agent-fork)
-                cmd="nebula__ctl__help__agent__fork"
+            pebrel__ctl__help,agent-fork)
+                cmd="pebrel__ctl__help__agent__fork"
                 ;;
-            nebula__ctl__help,agent-get)
-                cmd="nebula__ctl__help__agent__get"
+            pebrel__ctl__help,agent-get)
+                cmd="pebrel__ctl__help__agent__get"
                 ;;
-            nebula__ctl__help,agent-paste)
-                cmd="nebula__ctl__help__agent__paste"
+            pebrel__ctl__help,agent-paste)
+                cmd="pebrel__ctl__help__agent__paste"
                 ;;
-            nebula__ctl__help,agent-prompt)
-                cmd="nebula__ctl__help__agent__prompt"
+            pebrel__ctl__help,agent-prompt)
+                cmd="pebrel__ctl__help__agent__prompt"
                 ;;
-            nebula__ctl__help,agent-read)
-                cmd="nebula__ctl__help__agent__read"
+            pebrel__ctl__help,agent-read)
+                cmd="pebrel__ctl__help__agent__read"
                 ;;
-            nebula__ctl__help,agent-start)
-                cmd="nebula__ctl__help__agent__start"
+            pebrel__ctl__help,agent-start)
+                cmd="pebrel__ctl__help__agent__start"
                 ;;
-            nebula__ctl__help,agent-wait)
-                cmd="nebula__ctl__help__agent__wait"
+            pebrel__ctl__help,agent-wait)
+                cmd="pebrel__ctl__help__agent__wait"
                 ;;
-            nebula__ctl__help,agents)
-                cmd="nebula__ctl__help__agents"
+            pebrel__ctl__help,agents)
+                cmd="pebrel__ctl__help__agents"
                 ;;
-            nebula__ctl__help,close-pane)
-                cmd="nebula__ctl__help__close__pane"
+            pebrel__ctl__help,close-pane)
+                cmd="pebrel__ctl__help__close__pane"
                 ;;
-            nebula__ctl__help,close-tab)
-                cmd="nebula__ctl__help__close__tab"
+            pebrel__ctl__help,close-tab)
+                cmd="pebrel__ctl__help__close__tab"
                 ;;
-            nebula__ctl__help,close-window)
-                cmd="nebula__ctl__help__close__window"
+            pebrel__ctl__help,close-window)
+                cmd="pebrel__ctl__help__close__window"
                 ;;
-            nebula__ctl__help,describe)
-                cmd="nebula__ctl__help__describe"
+            pebrel__ctl__help,describe)
+                cmd="pebrel__ctl__help__describe"
                 ;;
-            nebula__ctl__help,exec-pane)
-                cmd="nebula__ctl__help__exec__pane"
+            pebrel__ctl__help,exec-pane)
+                cmd="pebrel__ctl__help__exec__pane"
                 ;;
-            nebula__ctl__help,focus)
-                cmd="nebula__ctl__help__focus"
+            pebrel__ctl__help,focus)
+                cmd="pebrel__ctl__help__focus"
                 ;;
-            nebula__ctl__help,help)
-                cmd="nebula__ctl__help__help"
+            pebrel__ctl__help,help)
+                cmd="pebrel__ctl__help__help"
                 ;;
-            nebula__ctl__help,move-tab)
-                cmd="nebula__ctl__help__move__tab"
+            pebrel__ctl__help,move-tab)
+                cmd="pebrel__ctl__help__move__tab"
                 ;;
-            nebula__ctl__help,new-tab)
-                cmd="nebula__ctl__help__new__tab"
+            pebrel__ctl__help,new-tab)
+                cmd="pebrel__ctl__help__new__tab"
                 ;;
-            nebula__ctl__help,new-window)
-                cmd="nebula__ctl__help__new__window"
+            pebrel__ctl__help,new-window)
+                cmd="pebrel__ctl__help__new__window"
                 ;;
-            nebula__ctl__help,orchestrate)
-                cmd="nebula__ctl__help__orchestrate"
+            pebrel__ctl__help,orchestrate)
+                cmd="pebrel__ctl__help__orchestrate"
                 ;;
-            nebula__ctl__help,paste)
-                cmd="nebula__ctl__help__paste"
+            pebrel__ctl__help,paste)
+                cmd="pebrel__ctl__help__paste"
                 ;;
-            nebula__ctl__help,procs)
-                cmd="nebula__ctl__help__procs"
+            pebrel__ctl__help,procs)
+                cmd="pebrel__ctl__help__procs"
                 ;;
-            nebula__ctl__help,prompt)
-                cmd="nebula__ctl__help__prompt"
+            pebrel__ctl__help,prompt)
+                cmd="pebrel__ctl__help__prompt"
                 ;;
-            nebula__ctl__help,read)
-                cmd="nebula__ctl__help__read"
+            pebrel__ctl__help,read)
+                cmd="pebrel__ctl__help__read"
                 ;;
-            nebula__ctl__help,rename-tab)
-                cmd="nebula__ctl__help__rename__tab"
+            pebrel__ctl__help,rename-tab)
+                cmd="pebrel__ctl__help__rename__tab"
                 ;;
-            nebula__ctl__help,resize-pane)
-                cmd="nebula__ctl__help__resize__pane"
+            pebrel__ctl__help,resize-pane)
+                cmd="pebrel__ctl__help__resize__pane"
                 ;;
-            nebula__ctl__help,run)
-                cmd="nebula__ctl__help__run"
+            pebrel__ctl__help,run)
+                cmd="pebrel__ctl__help__run"
                 ;;
-            nebula__ctl__help,send-key)
-                cmd="nebula__ctl__help__send__key"
+            pebrel__ctl__help,send-key)
+                cmd="pebrel__ctl__help__send__key"
                 ;;
-            nebula__ctl__help,snapshot)
-                cmd="nebula__ctl__help__snapshot"
+            pebrel__ctl__help,snapshot)
+                cmd="pebrel__ctl__help__snapshot"
                 ;;
-            nebula__ctl__help,split)
-                cmd="nebula__ctl__help__split"
+            pebrel__ctl__help,split)
+                cmd="pebrel__ctl__help__split"
                 ;;
-            nebula__ctl__help,subscribe)
-                cmd="nebula__ctl__help__subscribe"
+            pebrel__ctl__help,subscribe)
+                cmd="pebrel__ctl__help__subscribe"
                 ;;
-            nebula__ctl__help,wait)
-                cmd="nebula__ctl__help__wait"
+            pebrel__ctl__help,wait)
+                cmd="pebrel__ctl__help__wait"
                 ;;
-            nebula__ctl__help,zoom-pane)
-                cmd="nebula__ctl__help__zoom__pane"
+            pebrel__ctl__help,zoom-pane)
+                cmd="pebrel__ctl__help__zoom__pane"
                 ;;
-            nebula__help,agent)
-                cmd="nebula__help__agent"
+            pebrel__help,agent)
+                cmd="pebrel__help__agent"
                 ;;
-            nebula__help,config)
-                cmd="nebula__help__config"
+            pebrel__help,config)
+                cmd="pebrel__help__config"
                 ;;
-            nebula__help,ctl)
-                cmd="nebula__help__ctl"
+            pebrel__help,ctl)
+                cmd="pebrel__help__ctl"
                 ;;
-            nebula__help,env)
-                cmd="nebula__help__env"
+            pebrel__help,env)
+                cmd="pebrel__help__env"
                 ;;
-            nebula__help,help)
-                cmd="nebula__help__help"
+            pebrel__help,help)
+                cmd="pebrel__help__help"
                 ;;
-            nebula__help,migrate)
-                cmd="nebula__help__migrate"
+            pebrel__help,migrate)
+                cmd="pebrel__help__migrate"
                 ;;
-            nebula__help,pane)
-                cmd="nebula__help__pane"
+            pebrel__help,pane)
+                cmd="pebrel__help__pane"
                 ;;
-            nebula__help,tab)
-                cmd="nebula__help__tab"
+            pebrel__help,tab)
+                cmd="pebrel__help__tab"
                 ;;
-            nebula__help,window)
-                cmd="nebula__help__window"
+            pebrel__help,window)
+                cmd="pebrel__help__window"
                 ;;
-            nebula__help__agent,delegate)
-                cmd="nebula__help__agent__delegate"
+            pebrel__help__agent,delegate)
+                cmd="pebrel__help__agent__delegate"
                 ;;
-            nebula__help__agent,list)
-                cmd="nebula__help__agent__list"
+            pebrel__help__agent,list)
+                cmd="pebrel__help__agent__list"
                 ;;
-            nebula__help__agent,paste)
-                cmd="nebula__help__agent__paste"
+            pebrel__help__agent,paste)
+                cmd="pebrel__help__agent__paste"
                 ;;
-            nebula__help__agent,read)
-                cmd="nebula__help__agent__read"
+            pebrel__help__agent,read)
+                cmd="pebrel__help__agent__read"
                 ;;
-            nebula__help__agent,send)
-                cmd="nebula__help__agent__send"
+            pebrel__help__agent,send)
+                cmd="pebrel__help__agent__send"
                 ;;
-            nebula__help__agent,wait)
-                cmd="nebula__help__agent__wait"
+            pebrel__help__agent,wait)
+                cmd="pebrel__help__agent__wait"
                 ;;
-            nebula__help__config,check)
-                cmd="nebula__help__config__check"
+            pebrel__help__config,check)
+                cmd="pebrel__help__config__check"
                 ;;
-            nebula__help__config,init)
-                cmd="nebula__help__config__init"
+            pebrel__help__config,init)
+                cmd="pebrel__help__config__init"
                 ;;
-            nebula__help__ctl,agent-fork)
-                cmd="nebula__help__ctl__agent__fork"
+            pebrel__help__ctl,agent-fork)
+                cmd="pebrel__help__ctl__agent__fork"
                 ;;
-            nebula__help__ctl,agent-get)
-                cmd="nebula__help__ctl__agent__get"
+            pebrel__help__ctl,agent-get)
+                cmd="pebrel__help__ctl__agent__get"
                 ;;
-            nebula__help__ctl,agent-paste)
-                cmd="nebula__help__ctl__agent__paste"
+            pebrel__help__ctl,agent-paste)
+                cmd="pebrel__help__ctl__agent__paste"
                 ;;
-            nebula__help__ctl,agent-prompt)
-                cmd="nebula__help__ctl__agent__prompt"
+            pebrel__help__ctl,agent-prompt)
+                cmd="pebrel__help__ctl__agent__prompt"
                 ;;
-            nebula__help__ctl,agent-read)
-                cmd="nebula__help__ctl__agent__read"
+            pebrel__help__ctl,agent-read)
+                cmd="pebrel__help__ctl__agent__read"
                 ;;
-            nebula__help__ctl,agent-start)
-                cmd="nebula__help__ctl__agent__start"
+            pebrel__help__ctl,agent-start)
+                cmd="pebrel__help__ctl__agent__start"
                 ;;
-            nebula__help__ctl,agent-wait)
-                cmd="nebula__help__ctl__agent__wait"
+            pebrel__help__ctl,agent-wait)
+                cmd="pebrel__help__ctl__agent__wait"
                 ;;
-            nebula__help__ctl,agents)
-                cmd="nebula__help__ctl__agents"
+            pebrel__help__ctl,agents)
+                cmd="pebrel__help__ctl__agents"
                 ;;
-            nebula__help__ctl,close-pane)
-                cmd="nebula__help__ctl__close__pane"
+            pebrel__help__ctl,close-pane)
+                cmd="pebrel__help__ctl__close__pane"
                 ;;
-            nebula__help__ctl,close-tab)
-                cmd="nebula__help__ctl__close__tab"
+            pebrel__help__ctl,close-tab)
+                cmd="pebrel__help__ctl__close__tab"
                 ;;
-            nebula__help__ctl,close-window)
-                cmd="nebula__help__ctl__close__window"
+            pebrel__help__ctl,close-window)
+                cmd="pebrel__help__ctl__close__window"
                 ;;
-            nebula__help__ctl,describe)
-                cmd="nebula__help__ctl__describe"
+            pebrel__help__ctl,describe)
+                cmd="pebrel__help__ctl__describe"
                 ;;
-            nebula__help__ctl,exec-pane)
-                cmd="nebula__help__ctl__exec__pane"
+            pebrel__help__ctl,exec-pane)
+                cmd="pebrel__help__ctl__exec__pane"
                 ;;
-            nebula__help__ctl,focus)
-                cmd="nebula__help__ctl__focus"
+            pebrel__help__ctl,focus)
+                cmd="pebrel__help__ctl__focus"
                 ;;
-            nebula__help__ctl,move-tab)
-                cmd="nebula__help__ctl__move__tab"
+            pebrel__help__ctl,move-tab)
+                cmd="pebrel__help__ctl__move__tab"
                 ;;
-            nebula__help__ctl,new-tab)
-                cmd="nebula__help__ctl__new__tab"
+            pebrel__help__ctl,new-tab)
+                cmd="pebrel__help__ctl__new__tab"
                 ;;
-            nebula__help__ctl,new-window)
-                cmd="nebula__help__ctl__new__window"
+            pebrel__help__ctl,new-window)
+                cmd="pebrel__help__ctl__new__window"
                 ;;
-            nebula__help__ctl,orchestrate)
-                cmd="nebula__help__ctl__orchestrate"
+            pebrel__help__ctl,orchestrate)
+                cmd="pebrel__help__ctl__orchestrate"
                 ;;
-            nebula__help__ctl,paste)
-                cmd="nebula__help__ctl__paste"
+            pebrel__help__ctl,paste)
+                cmd="pebrel__help__ctl__paste"
                 ;;
-            nebula__help__ctl,procs)
-                cmd="nebula__help__ctl__procs"
+            pebrel__help__ctl,procs)
+                cmd="pebrel__help__ctl__procs"
                 ;;
-            nebula__help__ctl,prompt)
-                cmd="nebula__help__ctl__prompt"
+            pebrel__help__ctl,prompt)
+                cmd="pebrel__help__ctl__prompt"
                 ;;
-            nebula__help__ctl,read)
-                cmd="nebula__help__ctl__read"
+            pebrel__help__ctl,read)
+                cmd="pebrel__help__ctl__read"
                 ;;
-            nebula__help__ctl,rename-tab)
-                cmd="nebula__help__ctl__rename__tab"
+            pebrel__help__ctl,rename-tab)
+                cmd="pebrel__help__ctl__rename__tab"
                 ;;
-            nebula__help__ctl,resize-pane)
-                cmd="nebula__help__ctl__resize__pane"
+            pebrel__help__ctl,resize-pane)
+                cmd="pebrel__help__ctl__resize__pane"
                 ;;
-            nebula__help__ctl,run)
-                cmd="nebula__help__ctl__run"
+            pebrel__help__ctl,run)
+                cmd="pebrel__help__ctl__run"
                 ;;
-            nebula__help__ctl,send-key)
-                cmd="nebula__help__ctl__send__key"
+            pebrel__help__ctl,send-key)
+                cmd="pebrel__help__ctl__send__key"
                 ;;
-            nebula__help__ctl,snapshot)
-                cmd="nebula__help__ctl__snapshot"
+            pebrel__help__ctl,snapshot)
+                cmd="pebrel__help__ctl__snapshot"
                 ;;
-            nebula__help__ctl,split)
-                cmd="nebula__help__ctl__split"
+            pebrel__help__ctl,split)
+                cmd="pebrel__help__ctl__split"
                 ;;
-            nebula__help__ctl,subscribe)
-                cmd="nebula__help__ctl__subscribe"
+            pebrel__help__ctl,subscribe)
+                cmd="pebrel__help__ctl__subscribe"
                 ;;
-            nebula__help__ctl,wait)
-                cmd="nebula__help__ctl__wait"
+            pebrel__help__ctl,wait)
+                cmd="pebrel__help__ctl__wait"
                 ;;
-            nebula__help__ctl,zoom-pane)
-                cmd="nebula__help__ctl__zoom__pane"
+            pebrel__help__ctl,zoom-pane)
+                cmd="pebrel__help__ctl__zoom__pane"
                 ;;
-            nebula__help__pane,close)
-                cmd="nebula__help__pane__close"
+            pebrel__help__pane,close)
+                cmd="pebrel__help__pane__close"
                 ;;
-            nebula__help__pane,exec)
-                cmd="nebula__help__pane__exec"
+            pebrel__help__pane,exec)
+                cmd="pebrel__help__pane__exec"
                 ;;
-            nebula__help__pane,list)
-                cmd="nebula__help__pane__list"
+            pebrel__help__pane,list)
+                cmd="pebrel__help__pane__list"
                 ;;
-            nebula__help__pane,paste)
-                cmd="nebula__help__pane__paste"
+            pebrel__help__pane,paste)
+                cmd="pebrel__help__pane__paste"
                 ;;
-            nebula__help__pane,read)
-                cmd="nebula__help__pane__read"
+            pebrel__help__pane,read)
+                cmd="pebrel__help__pane__read"
                 ;;
-            nebula__help__pane,resize)
-                cmd="nebula__help__pane__resize"
+            pebrel__help__pane,resize)
+                cmd="pebrel__help__pane__resize"
                 ;;
-            nebula__help__pane,send)
-                cmd="nebula__help__pane__send"
+            pebrel__help__pane,send)
+                cmd="pebrel__help__pane__send"
                 ;;
-            nebula__help__pane,wait)
-                cmd="nebula__help__pane__wait"
+            pebrel__help__pane,wait)
+                cmd="pebrel__help__pane__wait"
                 ;;
-            nebula__help__pane,zoom)
-                cmd="nebula__help__pane__zoom"
+            pebrel__help__pane,zoom)
+                cmd="pebrel__help__pane__zoom"
                 ;;
-            nebula__help__tab,close)
-                cmd="nebula__help__tab__close"
+            pebrel__help__tab,close)
+                cmd="pebrel__help__tab__close"
                 ;;
-            nebula__help__tab,move)
-                cmd="nebula__help__tab__move"
+            pebrel__help__tab,move)
+                cmd="pebrel__help__tab__move"
                 ;;
-            nebula__help__tab,rename)
-                cmd="nebula__help__tab__rename"
+            pebrel__help__tab,rename)
+                cmd="pebrel__help__tab__rename"
                 ;;
-            nebula__help__window,close)
-                cmd="nebula__help__window__close"
+            pebrel__help__window,close)
+                cmd="pebrel__help__window__close"
                 ;;
-            nebula__pane,close)
-                cmd="nebula__pane__close"
+            pebrel__pane,close)
+                cmd="pebrel__pane__close"
                 ;;
-            nebula__pane,exec)
-                cmd="nebula__pane__exec"
+            pebrel__pane,exec)
+                cmd="pebrel__pane__exec"
                 ;;
-            nebula__pane,help)
-                cmd="nebula__pane__help"
+            pebrel__pane,help)
+                cmd="pebrel__pane__help"
                 ;;
-            nebula__pane,list)
-                cmd="nebula__pane__list"
+            pebrel__pane,list)
+                cmd="pebrel__pane__list"
                 ;;
-            nebula__pane,paste)
-                cmd="nebula__pane__paste"
+            pebrel__pane,paste)
+                cmd="pebrel__pane__paste"
                 ;;
-            nebula__pane,read)
-                cmd="nebula__pane__read"
+            pebrel__pane,read)
+                cmd="pebrel__pane__read"
                 ;;
-            nebula__pane,resize)
-                cmd="nebula__pane__resize"
+            pebrel__pane,resize)
+                cmd="pebrel__pane__resize"
                 ;;
-            nebula__pane,send)
-                cmd="nebula__pane__send"
+            pebrel__pane,send)
+                cmd="pebrel__pane__send"
                 ;;
-            nebula__pane,wait)
-                cmd="nebula__pane__wait"
+            pebrel__pane,wait)
+                cmd="pebrel__pane__wait"
                 ;;
-            nebula__pane,zoom)
-                cmd="nebula__pane__zoom"
+            pebrel__pane,zoom)
+                cmd="pebrel__pane__zoom"
                 ;;
-            nebula__pane__help,close)
-                cmd="nebula__pane__help__close"
+            pebrel__pane__help,close)
+                cmd="pebrel__pane__help__close"
                 ;;
-            nebula__pane__help,exec)
-                cmd="nebula__pane__help__exec"
+            pebrel__pane__help,exec)
+                cmd="pebrel__pane__help__exec"
                 ;;
-            nebula__pane__help,help)
-                cmd="nebula__pane__help__help"
+            pebrel__pane__help,help)
+                cmd="pebrel__pane__help__help"
                 ;;
-            nebula__pane__help,list)
-                cmd="nebula__pane__help__list"
+            pebrel__pane__help,list)
+                cmd="pebrel__pane__help__list"
                 ;;
-            nebula__pane__help,paste)
-                cmd="nebula__pane__help__paste"
+            pebrel__pane__help,paste)
+                cmd="pebrel__pane__help__paste"
                 ;;
-            nebula__pane__help,read)
-                cmd="nebula__pane__help__read"
+            pebrel__pane__help,read)
+                cmd="pebrel__pane__help__read"
                 ;;
-            nebula__pane__help,resize)
-                cmd="nebula__pane__help__resize"
+            pebrel__pane__help,resize)
+                cmd="pebrel__pane__help__resize"
                 ;;
-            nebula__pane__help,send)
-                cmd="nebula__pane__help__send"
+            pebrel__pane__help,send)
+                cmd="pebrel__pane__help__send"
                 ;;
-            nebula__pane__help,wait)
-                cmd="nebula__pane__help__wait"
+            pebrel__pane__help,wait)
+                cmd="pebrel__pane__help__wait"
                 ;;
-            nebula__pane__help,zoom)
-                cmd="nebula__pane__help__zoom"
+            pebrel__pane__help,zoom)
+                cmd="pebrel__pane__help__zoom"
                 ;;
-            nebula__tab,close)
-                cmd="nebula__tab__close"
+            pebrel__tab,close)
+                cmd="pebrel__tab__close"
                 ;;
-            nebula__tab,help)
-                cmd="nebula__tab__help"
+            pebrel__tab,help)
+                cmd="pebrel__tab__help"
                 ;;
-            nebula__tab,move)
-                cmd="nebula__tab__move"
+            pebrel__tab,move)
+                cmd="pebrel__tab__move"
                 ;;
-            nebula__tab,rename)
-                cmd="nebula__tab__rename"
+            pebrel__tab,rename)
+                cmd="pebrel__tab__rename"
                 ;;
-            nebula__tab__help,close)
-                cmd="nebula__tab__help__close"
+            pebrel__tab__help,close)
+                cmd="pebrel__tab__help__close"
                 ;;
-            nebula__tab__help,help)
-                cmd="nebula__tab__help__help"
+            pebrel__tab__help,help)
+                cmd="pebrel__tab__help__help"
                 ;;
-            nebula__tab__help,move)
-                cmd="nebula__tab__help__move"
+            pebrel__tab__help,move)
+                cmd="pebrel__tab__help__move"
                 ;;
-            nebula__tab__help,rename)
-                cmd="nebula__tab__help__rename"
+            pebrel__tab__help,rename)
+                cmd="pebrel__tab__help__rename"
                 ;;
-            nebula__window,close)
-                cmd="nebula__window__close"
+            pebrel__window,close)
+                cmd="pebrel__window__close"
                 ;;
-            nebula__window,help)
-                cmd="nebula__window__help"
+            pebrel__window,help)
+                cmd="pebrel__window__help"
                 ;;
-            nebula__window__help,close)
-                cmd="nebula__window__help__close"
+            pebrel__window__help,close)
+                cmd="pebrel__window__help__close"
                 ;;
-            nebula__window__help,help)
-                cmd="nebula__window__help__help"
+            pebrel__window__help,help)
+                cmd="pebrel__window__help__help"
                 ;;
             *)
                 ;;
@@ -580,7 +580,7 @@ _nebula() {
     done
 
     case "${cmd}" in
-        nebula)
+        pebrel)
             opts="-q -v -e -T -o -h -V --print-events --ref-test --embed --gpui --config-file --socket --daemon --working-directory --hold --command --title --class --option --help --version ctl env window tab pane agent migrate config help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -671,7 +671,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent)
+        pebrel__agent)
             opts="-h --help list send delegate paste read wait help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -685,7 +685,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__delegate)
+        pebrel__agent__delegate)
             opts="-h --generation --pretty --timeout-ms --help <AGENT> <TEXT>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -707,7 +707,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help)
+        pebrel__agent__help)
             opts="list send delegate paste read wait help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -721,7 +721,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help__delegate)
+        pebrel__agent__help__delegate)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -735,7 +735,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help__help)
+        pebrel__agent__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -749,7 +749,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help__list)
+        pebrel__agent__help__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -763,7 +763,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help__paste)
+        pebrel__agent__help__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -777,7 +777,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help__read)
+        pebrel__agent__help__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -791,7 +791,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help__send)
+        pebrel__agent__help__send)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -805,7 +805,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__help__wait)
+        pebrel__agent__help__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -819,7 +819,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__list)
+        pebrel__agent__list)
             opts="-h --pretty --window --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -841,7 +841,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__paste)
+        pebrel__agent__paste)
             opts="-h --stdin --from-file --no-submit --wait --wait-timeout-ms --generation --pretty --timeout-ms --help <AGENT> [TEXT]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -882,7 +882,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__read)
+        pebrel__agent__read)
             opts="-h --lines --generation --pretty --timeout-ms --help <AGENT>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -908,7 +908,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__send)
+        pebrel__agent__send)
             opts="-h --no-submit --wait --wait-timeout-ms --generation --pretty --timeout-ms --help <AGENT> <TEXT>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -934,7 +934,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__agent__wait)
+        pebrel__agent__wait)
             opts="-h --state --after-seq --generation --pretty --timeout-ms --help <AGENT>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -964,7 +964,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__config)
+        pebrel__config)
             opts="-h --help check init help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -978,7 +978,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__config__check)
+        pebrel__config__check)
             opts="-h --config-file --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1007,7 +1007,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__config__help)
+        pebrel__config__help)
             opts="check init help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1021,7 +1021,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__config__help__check)
+        pebrel__config__help__check)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1035,7 +1035,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__config__help__help)
+        pebrel__config__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1049,7 +1049,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__config__help__init)
+        pebrel__config__help__init)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1063,7 +1063,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__config__init)
+        pebrel__config__init)
             opts="-h --config-file --language --force --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1096,7 +1096,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl)
+        pebrel__ctl)
             opts="-h --pretty --timeout-ms --help describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-paste agent-read agent-wait subscribe new-window close-window focus new-tab close-tab rename-tab move-tab split close-pane zoom-pane resize-pane prompt paste read procs send-key run exec-pane wait help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1114,7 +1114,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agent__fork)
+        pebrel__ctl__agent__fork)
             opts="-h --window --source-pane --source-cwd --name --kind --resume-session-id --branch --base --path --allow-dirty-source --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1168,7 +1168,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agent__get)
+        pebrel__ctl__agent__get)
             opts="-h --agent --generation --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1194,7 +1194,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agent__paste)
+        pebrel__ctl__agent__paste)
             opts="-h --agent --generation --text --no-submit --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1224,7 +1224,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agent__prompt)
+        pebrel__ctl__agent__prompt)
             opts="-h --agent --generation --text --no-submit --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1254,7 +1254,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agent__read)
+        pebrel__ctl__agent__read)
             opts="-h --agent --generation --lines --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1284,7 +1284,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agent__start)
+        pebrel__ctl__agent__start)
             opts="-h --window --name --kind --cwd --resume-session-id --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1322,7 +1322,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agent__wait)
+        pebrel__ctl__agent__wait)
             opts="-h --agent --generation --state --after-seq --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1356,7 +1356,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__agents)
+        pebrel__ctl__agents)
             opts="-h --window --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1378,7 +1378,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__close__pane)
+        pebrel__ctl__close__pane)
             opts="-h --window --pane --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1404,7 +1404,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__close__tab)
+        pebrel__ctl__close__tab)
             opts="-h --window --tab --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1430,7 +1430,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__close__window)
+        pebrel__ctl__close__window)
             opts="-h --window --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1452,7 +1452,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__describe)
+        pebrel__ctl__describe)
             opts="-h --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1470,7 +1470,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__exec__pane)
+        pebrel__ctl__exec__pane)
             opts="-h --window --pane --max-output-bytes --pretty --timeout-ms --help <ARGV>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1500,7 +1500,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__focus)
+        pebrel__ctl__focus)
             opts="-h --window --pane --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1526,7 +1526,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help)
+        pebrel__ctl__help)
             opts="describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-paste agent-read agent-wait subscribe new-window close-window focus new-tab close-tab rename-tab move-tab split close-pane zoom-pane resize-pane prompt paste read procs send-key run exec-pane wait help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1540,7 +1540,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agent__fork)
+        pebrel__ctl__help__agent__fork)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1554,7 +1554,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agent__get)
+        pebrel__ctl__help__agent__get)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1568,7 +1568,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agent__paste)
+        pebrel__ctl__help__agent__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1582,7 +1582,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agent__prompt)
+        pebrel__ctl__help__agent__prompt)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1596,7 +1596,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agent__read)
+        pebrel__ctl__help__agent__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1610,7 +1610,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agent__start)
+        pebrel__ctl__help__agent__start)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1624,7 +1624,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agent__wait)
+        pebrel__ctl__help__agent__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1638,7 +1638,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__agents)
+        pebrel__ctl__help__agents)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1652,7 +1652,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__close__pane)
+        pebrel__ctl__help__close__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1666,7 +1666,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__close__tab)
+        pebrel__ctl__help__close__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1680,7 +1680,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__close__window)
+        pebrel__ctl__help__close__window)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1694,7 +1694,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__describe)
+        pebrel__ctl__help__describe)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1708,7 +1708,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__exec__pane)
+        pebrel__ctl__help__exec__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1722,7 +1722,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__focus)
+        pebrel__ctl__help__focus)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1736,7 +1736,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__help)
+        pebrel__ctl__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1750,7 +1750,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__move__tab)
+        pebrel__ctl__help__move__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1764,7 +1764,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__new__tab)
+        pebrel__ctl__help__new__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1778,7 +1778,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__new__window)
+        pebrel__ctl__help__new__window)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1792,7 +1792,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__orchestrate)
+        pebrel__ctl__help__orchestrate)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1806,7 +1806,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__paste)
+        pebrel__ctl__help__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1820,7 +1820,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__procs)
+        pebrel__ctl__help__procs)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1834,7 +1834,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__prompt)
+        pebrel__ctl__help__prompt)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1848,7 +1848,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__read)
+        pebrel__ctl__help__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1862,7 +1862,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__rename__tab)
+        pebrel__ctl__help__rename__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1876,7 +1876,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__resize__pane)
+        pebrel__ctl__help__resize__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1890,7 +1890,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__run)
+        pebrel__ctl__help__run)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1904,7 +1904,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__send__key)
+        pebrel__ctl__help__send__key)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1918,7 +1918,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__snapshot)
+        pebrel__ctl__help__snapshot)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1932,7 +1932,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__split)
+        pebrel__ctl__help__split)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1946,7 +1946,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__subscribe)
+        pebrel__ctl__help__subscribe)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1960,7 +1960,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__wait)
+        pebrel__ctl__help__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1974,7 +1974,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__help__zoom__pane)
+        pebrel__ctl__help__zoom__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1988,7 +1988,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__move__tab)
+        pebrel__ctl__move__tab)
             opts="-h --window --tab --to --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2018,7 +2018,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__new__tab)
+        pebrel__ctl__new__tab)
             opts="-h --window --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2040,7 +2040,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__new__window)
+        pebrel__ctl__new__window)
             opts="-h --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2058,7 +2058,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__orchestrate)
+        pebrel__ctl__orchestrate)
             opts="-h --spec --file --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2095,7 +2095,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__paste)
+        pebrel__ctl__paste)
             opts="-h --window --pane --text --no-submit --wait --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2129,7 +2129,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__procs)
+        pebrel__ctl__procs)
             opts="-h --window --pane --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2155,7 +2155,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__prompt)
+        pebrel__ctl__prompt)
             opts="-h --window --pane --text --no-submit --wait --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2189,7 +2189,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__read)
+        pebrel__ctl__read)
             opts="-h --window --pane --lines --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2219,7 +2219,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__rename__tab)
+        pebrel__ctl__rename__tab)
             opts="-h --window --tab --name --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2249,7 +2249,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__resize__pane)
+        pebrel__ctl__resize__pane)
             opts="-h --window --pane --ratio --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2279,7 +2279,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__run)
+        pebrel__ctl__run)
             opts="-h --window --pane --command --no-wait --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2309,7 +2309,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__send__key)
+        pebrel__ctl__send__key)
             opts="-h --window --pane --key --shift --alt --control --repeat --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2343,7 +2343,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__snapshot)
+        pebrel__ctl__snapshot)
             opts="-h --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2361,7 +2361,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__split)
+        pebrel__ctl__split)
             opts="-h --window --pane --direction --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2391,7 +2391,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__subscribe)
+        pebrel__ctl__subscribe)
             opts="-h --since --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2413,7 +2413,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__wait)
+        pebrel__ctl__wait)
             opts="-h --window --pane --state --after-seq --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2447,7 +2447,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__ctl__zoom__pane)
+        pebrel__ctl__zoom__pane)
             opts="-h --window --pane --zoomed --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2477,7 +2477,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__env)
+        pebrel__env)
             opts="-h --pretty --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2495,7 +2495,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help)
+        pebrel__help)
             opts="ctl env window tab pane agent migrate config help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2509,7 +2509,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__agent)
+        pebrel__help__agent)
             opts="list send delegate paste read wait"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2523,7 +2523,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__agent__delegate)
+        pebrel__help__agent__delegate)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2537,7 +2537,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__agent__list)
+        pebrel__help__agent__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2551,7 +2551,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__agent__paste)
+        pebrel__help__agent__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2565,7 +2565,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__agent__read)
+        pebrel__help__agent__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2579,7 +2579,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__agent__send)
+        pebrel__help__agent__send)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2593,7 +2593,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__agent__wait)
+        pebrel__help__agent__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2607,7 +2607,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__config)
+        pebrel__help__config)
             opts="check init"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2621,7 +2621,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__config__check)
+        pebrel__help__config__check)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2635,7 +2635,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__config__init)
+        pebrel__help__config__init)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2649,7 +2649,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl)
+        pebrel__help__ctl)
             opts="describe snapshot orchestrate agents agent-start agent-fork agent-get agent-prompt agent-paste agent-read agent-wait subscribe new-window close-window focus new-tab close-tab rename-tab move-tab split close-pane zoom-pane resize-pane prompt paste read procs send-key run exec-pane wait"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2663,7 +2663,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agent__fork)
+        pebrel__help__ctl__agent__fork)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2677,7 +2677,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agent__get)
+        pebrel__help__ctl__agent__get)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2691,7 +2691,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agent__paste)
+        pebrel__help__ctl__agent__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2705,7 +2705,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agent__prompt)
+        pebrel__help__ctl__agent__prompt)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2719,7 +2719,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agent__read)
+        pebrel__help__ctl__agent__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2733,7 +2733,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agent__start)
+        pebrel__help__ctl__agent__start)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2747,7 +2747,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agent__wait)
+        pebrel__help__ctl__agent__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2761,7 +2761,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__agents)
+        pebrel__help__ctl__agents)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2775,7 +2775,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__close__pane)
+        pebrel__help__ctl__close__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2789,7 +2789,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__close__tab)
+        pebrel__help__ctl__close__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2803,7 +2803,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__close__window)
+        pebrel__help__ctl__close__window)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2817,7 +2817,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__describe)
+        pebrel__help__ctl__describe)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2831,7 +2831,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__exec__pane)
+        pebrel__help__ctl__exec__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2845,7 +2845,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__focus)
+        pebrel__help__ctl__focus)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2859,7 +2859,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__move__tab)
+        pebrel__help__ctl__move__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2873,7 +2873,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__new__tab)
+        pebrel__help__ctl__new__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2887,7 +2887,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__new__window)
+        pebrel__help__ctl__new__window)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2901,7 +2901,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__orchestrate)
+        pebrel__help__ctl__orchestrate)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2915,7 +2915,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__paste)
+        pebrel__help__ctl__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2929,7 +2929,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__procs)
+        pebrel__help__ctl__procs)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2943,7 +2943,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__prompt)
+        pebrel__help__ctl__prompt)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2957,7 +2957,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__read)
+        pebrel__help__ctl__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2971,7 +2971,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__rename__tab)
+        pebrel__help__ctl__rename__tab)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2985,7 +2985,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__resize__pane)
+        pebrel__help__ctl__resize__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -2999,7 +2999,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__run)
+        pebrel__help__ctl__run)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3013,7 +3013,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__send__key)
+        pebrel__help__ctl__send__key)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3027,7 +3027,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__snapshot)
+        pebrel__help__ctl__snapshot)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3041,7 +3041,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__split)
+        pebrel__help__ctl__split)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3055,7 +3055,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__subscribe)
+        pebrel__help__ctl__subscribe)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3069,7 +3069,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__wait)
+        pebrel__help__ctl__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3083,7 +3083,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__ctl__zoom__pane)
+        pebrel__help__ctl__zoom__pane)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3097,7 +3097,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__env)
+        pebrel__help__env)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3111,7 +3111,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__help)
+        pebrel__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3125,7 +3125,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__migrate)
+        pebrel__help__migrate)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3139,7 +3139,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane)
+        pebrel__help__pane)
             opts="list read send paste wait exec close zoom resize"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3153,7 +3153,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__close)
+        pebrel__help__pane__close)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3167,7 +3167,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__exec)
+        pebrel__help__pane__exec)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3181,7 +3181,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__list)
+        pebrel__help__pane__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3195,7 +3195,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__paste)
+        pebrel__help__pane__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3209,7 +3209,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__read)
+        pebrel__help__pane__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3223,7 +3223,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__resize)
+        pebrel__help__pane__resize)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3237,7 +3237,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__send)
+        pebrel__help__pane__send)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3251,7 +3251,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__wait)
+        pebrel__help__pane__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3265,7 +3265,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__pane__zoom)
+        pebrel__help__pane__zoom)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3279,7 +3279,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__tab)
+        pebrel__help__tab)
             opts="close rename move"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3293,7 +3293,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__tab__close)
+        pebrel__help__tab__close)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3307,7 +3307,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__tab__move)
+        pebrel__help__tab__move)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3321,7 +3321,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__tab__rename)
+        pebrel__help__tab__rename)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3335,7 +3335,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__window)
+        pebrel__help__window)
             opts="close"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3349,7 +3349,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__help__window__close)
+        pebrel__help__window__close)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3363,7 +3363,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__migrate)
+        pebrel__migrate)
             opts="-c -d -i -s -h --config-file --dry-run --skip-imports --skip-renames --silent --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3407,7 +3407,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane)
+        pebrel__pane)
             opts="-h --help list read send paste wait exec close zoom resize help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3421,7 +3421,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__close)
+        pebrel__pane__close)
             opts="-h --window --pretty --timeout-ms --help <PANE>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3443,7 +3443,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__exec)
+        pebrel__pane__exec)
             opts="-h --window --max-output-bytes --pretty --timeout-ms --help <PANE> <ARGV>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3469,7 +3469,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help)
+        pebrel__pane__help)
             opts="list read send paste wait exec close zoom resize help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3483,7 +3483,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__close)
+        pebrel__pane__help__close)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3497,7 +3497,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__exec)
+        pebrel__pane__help__exec)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3511,7 +3511,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__help)
+        pebrel__pane__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3525,7 +3525,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__list)
+        pebrel__pane__help__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3539,7 +3539,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__paste)
+        pebrel__pane__help__paste)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3553,7 +3553,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__read)
+        pebrel__pane__help__read)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3567,7 +3567,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__resize)
+        pebrel__pane__help__resize)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3581,7 +3581,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__send)
+        pebrel__pane__help__send)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3595,7 +3595,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__wait)
+        pebrel__pane__help__wait)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3609,7 +3609,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__help__zoom)
+        pebrel__pane__help__zoom)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3623,7 +3623,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__list)
+        pebrel__pane__list)
             opts="-h --pretty --window --timeout-ms --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3645,7 +3645,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__paste)
+        pebrel__pane__paste)
             opts="-h --stdin --from-file --no-submit --wait --wait-timeout-ms --window --pretty --timeout-ms --help <PANE> [TEXT]..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3686,7 +3686,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__read)
+        pebrel__pane__read)
             opts="-h --lines --window --pretty --timeout-ms --help <PANE>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3712,7 +3712,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__resize)
+        pebrel__pane__resize)
             opts="-h --window --pretty --timeout-ms --help <PANE> <RATIO>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3734,7 +3734,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__send)
+        pebrel__pane__send)
             opts="-h --no-submit --wait --wait-timeout-ms --window --pretty --timeout-ms --help <PANE> <TEXT>..."
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3760,7 +3760,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__wait)
+        pebrel__pane__wait)
             opts="-h --state --after-seq --window --pretty --timeout-ms --help <PANE>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3790,7 +3790,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__pane__zoom)
+        pebrel__pane__zoom)
             opts="-h --zoomed --window --pretty --timeout-ms --help <PANE>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3816,7 +3816,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab)
+        pebrel__tab)
             opts="-h --help close rename move help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3830,7 +3830,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__close)
+        pebrel__tab__close)
             opts="-h --window --pretty --timeout-ms --help <TAB>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3852,7 +3852,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__help)
+        pebrel__tab__help)
             opts="close rename move help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3866,7 +3866,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__help__close)
+        pebrel__tab__help__close)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3880,7 +3880,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__help__help)
+        pebrel__tab__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3894,7 +3894,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__help__move)
+        pebrel__tab__help__move)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3908,7 +3908,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__help__rename)
+        pebrel__tab__help__rename)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3922,7 +3922,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__move)
+        pebrel__tab__move)
             opts="-h --window --pretty --timeout-ms --help <TAB> <TO>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3944,7 +3944,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__tab__rename)
+        pebrel__tab__rename)
             opts="-h --window --pretty --timeout-ms --help <TAB> <NAME>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3966,7 +3966,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__window)
+        pebrel__window)
             opts="-h --help close help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3980,7 +3980,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__window__close)
+        pebrel__window__close)
             opts="-h --pretty --timeout-ms --help <WINDOW>"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3998,7 +3998,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__window__help)
+        pebrel__window__help)
             opts="close help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -4012,7 +4012,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__window__help__close)
+        pebrel__window__help__close)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -4026,7 +4026,7 @@ _nebula() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        nebula__window__help__help)
+        pebrel__window__help__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -4044,7 +4044,7 @@ _nebula() {
 }
 
 if [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 4 || "${BASH_VERSINFO[0]}" -gt 4 ]]; then
-    complete -F _nebula -o nosort -o bashdefault -o default nebula
+    complete -F _pebrel -o nosort -o bashdefault -o default pebrel
 else
-    complete -F _nebula -o bashdefault -o default nebula
+    complete -F _pebrel -o bashdefault -o default pebrel
 fi

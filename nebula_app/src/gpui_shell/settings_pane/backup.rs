@@ -64,7 +64,7 @@ impl SettingsPane {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let picked =
-            cx.prompt_for_new_path(&start_dir, Some(&format!("nebula-{stamp}.nebula-backup")));
+            cx.prompt_for_new_path(&start_dir, Some(&format!("pebrel-{stamp}.pebrel-backup")));
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(path))) = picked.await else { return };
             let _ = this.update(cx, |pane, cx| {

@@ -2,12 +2,15 @@
 
 ## Scope / 范围
 
-The project uses the Pebrel name while retaining the `Kuddev/nebula` GitHub
-repository and existing CLI, configuration, installer, and update identifiers.
-Renaming those compatibility interfaces is a separate migration, not a text replacement.
+Pebrel 1.6 uses Pebrel names for the application, commands, installed files, and
+new configuration. Legacy names remain accepted where the
+[identity migration](architecture-decisions.md#adr-0003---pebrel-16-identity-migration)
+requires compatibility. Translate product text using Pebrel; do not rewrite old
+configuration keys, wire protocols, historical release notes, or Rust crate names.
 
-项目名称采用 Pebrel，GitHub 仓库保留 `Kuddev/nebula`。CLI、配置、安装及更新标识
-属于兼容接口，不随展示名称机械替换。
+Pebrel 1.6 的应用、命令、安装文件与新配置统一使用 Pebrel 名称。旧名称按
+[身份迁移决策](architecture-decisions.md#adr-0003---pebrel-16-identity-migration) 保留兼容读取。
+翻译产品文案时使用 Pebrel，不机械修改旧配置键、通信协议、历史发布说明或 Rust crate 名。
 
 The first language set is English, Simplified Chinese, Traditional Chinese,
 French, German, Spanish, Brazilian Portuguese, Italian, Russian, Japanese, and
@@ -92,8 +95,8 @@ translation of every screen, configuration template, or installer language.
 cargo test -p nebula-settings
 cargo test --manifest-path tools/i18n-contract/Cargo.toml --locked
 cargo test -p nebula --test i18n_contract
-cargo test -p nebula --bin nebula --features gpui-shell i18n::
-cargo test -p nebula --bin nebula --features gpui-shell gpui_shell::settings_pane::tests::
+cargo test -p nebula --bin pebrel --features gpui-shell i18n::
+cargo test -p nebula --bin pebrel --features gpui-shell gpui_shell::settings_pane::tests::
 cargo test -p nebula --test file_line_budget
 cargo test -p nebula --test i18n_contract --release -- --ignored --nocapture
 ```

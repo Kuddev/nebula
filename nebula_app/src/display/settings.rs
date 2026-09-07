@@ -826,7 +826,7 @@ pub(super) struct NebulaRuntimeSettings {
 /// absent. Format is one `key=value` per line so power users can edit it while
 /// the graphical settings page catches up.
 pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
-    let path = nebula_data_dir().join("nebula_settings.txt");
+    let path = nebula_settings::settings_path();
     let mut settings = NebulaRuntimeSettings {
         language: LanguagePreference::System,
         ghost: true,
@@ -1159,9 +1159,7 @@ fn background_image_alignment_label(
 }
 
 pub(super) fn nebula_settings_mtime() -> Option<std::time::SystemTime> {
-    std::fs::metadata(nebula_data_dir().join("nebula_settings.txt"))
-        .and_then(|meta| meta.modified())
-        .ok()
+    std::fs::metadata(nebula_settings::settings_path()).and_then(|meta| meta.modified()).ok()
 }
 
 /// Persist runtime settings next to the history file.
@@ -1184,7 +1182,7 @@ pub(super) fn nebula_settings_write(settings: &NebulaRuntimeSettings) {
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
     let theme = settings.theme.prompt_name();
-    let path = nebula_data_dir().join("nebula_settings.txt");
+    let path = nebula_settings::settings_path();
     let pinned_hosts = settings.pinned_hosts.join(",");
     let saved_hosts = settings.saved_hosts.join(",");
     let hidden_hosts = settings.hidden_hosts.join(",");

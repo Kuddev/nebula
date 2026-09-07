@@ -117,8 +117,8 @@ impl Settings {
                     format!(
                         "{}: {err}",
                         ui_language.pick(
-                            "nebula.toml 字段解析失败",
-                            "Failed to parse nebula.toml fields",
+                            "pebrel.toml 字段解析失败",
+                            "Failed to parse pebrel.toml fields",
                         )
                     )
                 });
@@ -296,40 +296,15 @@ fn default_font_family() -> &'static str {
 /// `NEBULA_GPUI_CONFIG` 用于隔离测试：绝不能往用户真实配置目录写测试文件，
 /// 正式版 Nebula 正在监视它做热重载。
 fn find_config_file() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("NEBULA_GPUI_CONFIG") {
+    if let Some(explicit) = ["PEBREL_GPUI_CONFIG", "NEBULA_GPUI_CONFIG"]
+        .into_iter()
+        .find_map(|name| std::env::var_os(name).filter(|value| !value.is_empty()))
+    {
         let path = PathBuf::from(explicit);
         return path.exists().then_some(path);
     }
 
-    #[cfg(windows)]
-    {
-        dirs::config_dir().map(|p| p.join("nebula").join("nebula.toml")).filter(|p| p.exists())
-    }
-
-    #[cfg(not(windows))]
-    {
-        let file_name = "nebula.toml";
-        if let Ok(xdg_home) = std::env::var("XDG_CONFIG_HOME") {
-            let base = PathBuf::from(xdg_home);
-            for candidate in [base.join("nebula").join(file_name), base.join(file_name)] {
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            let home = PathBuf::from(home);
-            for candidate in
-                [home.join(".config/nebula").join(file_name), home.join(format!(".{file_name}"))]
-            {
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-        let etc = PathBuf::from("/etc/nebula").join(file_name);
-        etc.exists().then_some(etc)
-    }
+    crate::config::source::discover_toml()
 }
 
 /// 读取主文件并按主应用语义合并 imports：imports 先加载，主文件最后覆盖。
@@ -353,7 +328,7 @@ fn load_merged_toml(path: &Path, notice: &mut Option<String>, language: UiLangua
             merged = merge_values(merged, read_toml(&import_path, notice, language));
         } else {
             super::try_write_stderr(format_args!(
-                "[nebula:gpui] config import not found: {}",
+                "[pebrel:gpui] config import not found: {}",
                 import_path.display()
             ));
         }
@@ -366,7 +341,7 @@ fn read_toml(path: &Path, notice: &mut Option<String>, language: UiLanguage) -> 
         Ok(text) => text,
         Err(err) => {
             super::try_write_stderr(format_args!(
-                "[nebula:gpui] failed to read config {}: {err}",
+                "[pebrel:gpui] failed to read config {}: {err}",
                 path.display()
             ));
             notice.get_or_insert_with(|| {
@@ -384,7 +359,7 @@ fn read_toml(path: &Path, notice: &mut Option<String>, language: UiLanguage) -> 
         Ok(table) => toml::Value::Table(table),
         Err(err) => {
             super::try_write_stderr(format_args!(
-                "[nebula:gpui] failed to parse config {}: {err}",
+                "[pebrel:gpui] failed to parse config {}: {err}",
                 path.display()
             ));
             let first_line = err

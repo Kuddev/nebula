@@ -19,11 +19,12 @@ use log::warn;
 
 /// 远程备份配置文件（位于 `nebula_data_dir()`），独立于 `nebula_sync.txt`：
 /// 备份管道自身的配置不该被备份恢复覆盖到不可用。
-const CONFIG_FILE: &str = "nebula_backup.txt";
+const CONFIG_FILE: &str = "pebrel_backup.txt";
 
-/// 归档文件名：`nebula-backup-YYYYMMDD-HHMMSS.nbk`（UTC）。前后缀是列表
+/// 归档文件名：`pebrel-backup-YYYYMMDD-HHMMSS.nbk`（UTC）。前后缀是列表
 /// 过滤的安全边界——清理绝不会碰远端目录里不带这两段的文件。
-const ARCHIVE_PREFIX: &str = "nebula-backup-";
+const ARCHIVE_PREFIX: &str = "pebrel-backup-";
+const LEGACY_ARCHIVE_PREFIX: &str = "nebula-backup-";
 const ARCHIVE_SUFFIX: &str = ".nbk";
 
 /// 每个远端保留的归档份数。
@@ -230,18 +231,20 @@ pub fn store_s3_secret(access_key: &str, secret: &str) -> Result<(), String> {
 
 #[cfg(not(windows))]
 pub fn store_webdav_password(_username: &str, _secret: &str) -> Result<(), String> {
-    Err("此平台请设环境变量 NEBULA_BACKUP_WEBDAV_PASSWORD".to_owned())
+    Err("此平台请设环境变量 PEBREL_BACKUP_WEBDAV_PASSWORD".to_owned())
 }
 
 #[cfg(not(windows))]
 pub fn store_s3_secret(_access_key: &str, _secret: &str) -> Result<(), String> {
-    Err("此平台请设环境变量 NEBULA_BACKUP_S3_SECRET".to_owned())
+    Err("此平台请设环境变量 PEBREL_BACKUP_S3_SECRET".to_owned())
 }
 
 fn webdav_password() -> Option<String> {
-    if let Ok(password) = std::env::var("NEBULA_BACKUP_WEBDAV_PASSWORD") {
-        if !password.trim().is_empty() {
-            return Some(password.trim().to_owned());
+    for name in ["PEBREL_BACKUP_WEBDAV_PASSWORD", "NEBULA_BACKUP_WEBDAV_PASSWORD"] {
+        if let Ok(password) = std::env::var(name) {
+            if !password.trim().is_empty() {
+                return Some(password.trim().to_owned());
+            }
         }
     }
     #[cfg(windows)]
@@ -254,9 +257,11 @@ fn webdav_password() -> Option<String> {
 }
 
 fn s3_secret() -> Option<String> {
-    if let Ok(secret) = std::env::var("NEBULA_BACKUP_S3_SECRET") {
-        if !secret.trim().is_empty() {
-            return Some(secret.trim().to_owned());
+    for name in ["PEBREL_BACKUP_S3_SECRET", "NEBULA_BACKUP_S3_SECRET"] {
+        if let Ok(secret) = std::env::var(name) {
+            if !secret.trim().is_empty() {
+                return Some(secret.trim().to_owned());
+            }
         }
     }
     #[cfg(windows)]
@@ -315,9 +320,26 @@ fn archive_name(secs: u64) -> String {
 /// 只认我们自己的归档名（前后缀精确匹配）。列表、恢复与清理共用这一道
 /// 过滤，远端目录里的其他文件对备份管道不可见。
 fn is_archive_name(name: &str) -> bool {
-    name.starts_with(ARCHIVE_PREFIX)
-        && name.ends_with(ARCHIVE_SUFFIX)
-        && name.len() > ARCHIVE_PREFIX.len() + ARCHIVE_SUFFIX.len()
+    archive_timestamp(name).is_some()
+}
+
+fn archive_timestamp(name: &str) -> Option<&str> {
+    let timestamp = name
+        .strip_prefix(ARCHIVE_PREFIX)
+        .or_else(|| name.strip_prefix(LEGACY_ARCHIVE_PREFIX))?
+        .strip_suffix(ARCHIVE_SUFFIX)?;
+    (timestamp.len() == 15
+        && timestamp
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| if index == 8 { byte == b'-' } else { byte.is_ascii_digit() }))
+    .then_some(timestamp)
+}
+
+fn sort_archives(names: &mut [String]) {
+    names.sort_by(|left, right| {
+        archive_timestamp(left).cmp(&archive_timestamp(right)).then_with(|| left.cmp(right))
+    });
 }
 
 // ---- 协议后端抽象 ----
@@ -351,7 +373,7 @@ fn backend(cfg: &BackupRemoteConfig) -> Result<Box<dyn Backend>, String> {
             }
             if !url.starts_with("https://") && !cfg.allow_http {
                 return Err(
-                    "已拒绝：WebDAV URL 不是 HTTPS（自建内网服务可在 nebula_backup.txt 写 allow_http=1 豁免）"
+                    "已拒绝：WebDAV URL 不是 HTTPS（自建内网服务可在 pebrel_backup.txt 写 allow_http=1 豁免）"
                         .to_owned(),
                 );
             }
@@ -360,7 +382,7 @@ fn backend(cfg: &BackupRemoteConfig) -> Result<Box<dyn Backend>, String> {
                 return Err("未配置 WebDAV 用户名".to_owned());
             }
             let password = webdav_password()
-                .ok_or("缺少 WebDAV 密码：在设置里输入或设 NEBULA_BACKUP_WEBDAV_PASSWORD")?;
+                .ok_or("缺少 WebDAV 密码：在设置里输入或设 PEBREL_BACKUP_WEBDAV_PASSWORD")?;
             Ok(Box::new(WebDavBackend { url, username, password }))
         },
         BackupProtocol::S3 => {
@@ -370,7 +392,7 @@ fn backend(cfg: &BackupRemoteConfig) -> Result<Box<dyn Backend>, String> {
             }
             if !endpoint.starts_with("https://") && !cfg.allow_http {
                 return Err(
-                    "已拒绝：S3 Endpoint 不是 HTTPS（自建内网服务可在 nebula_backup.txt 写 allow_http=1 豁免）"
+                    "已拒绝：S3 Endpoint 不是 HTTPS（自建内网服务可在 pebrel_backup.txt 写 allow_http=1 豁免）"
                         .to_owned(),
                 );
             }
@@ -391,7 +413,7 @@ fn backend(cfg: &BackupRemoteConfig) -> Result<Box<dyn Backend>, String> {
                 return Err("未配置 S3 Access Key".to_owned());
             }
             let secret_key = s3_secret()
-                .ok_or("缺少 S3 Secret Key：在设置里输入或设 NEBULA_BACKUP_S3_SECRET")?;
+                .ok_or("缺少 S3 Secret Key：在设置里输入或设 PEBREL_BACKUP_S3_SECRET")?;
             Ok(Box::new(S3Backend { endpoint, region, bucket, prefix, access_key, secret_key }))
         },
         BackupProtocol::Sftp => {
@@ -444,9 +466,9 @@ pub fn pull_latest() -> Result<(String, Vec<u8>), String> {
     let backend = backend(&cfg)?;
     let mut names: Vec<String> =
         backend.list()?.into_iter().filter(|name| is_archive_name(name)).collect();
-    names.sort();
+    sort_archives(&mut names);
     let Some(latest) = names.pop() else {
-        return Err(format!("{}上没有 Nebula 备份归档", backend.describe()));
+        return Err(format!("{}上没有 Pebrel 备份归档", backend.describe()));
     };
     let bytes = backend.get(&latest)?;
     Ok((latest, bytes))
@@ -456,7 +478,7 @@ pub fn pull_latest() -> Result<(String, Vec<u8>), String> {
 fn prune(backend: &dyn Backend) -> Result<usize, String> {
     let mut names: Vec<String> =
         backend.list()?.into_iter().filter(|name| is_archive_name(name)).collect();
-    names.sort();
+    sort_archives(&mut names);
     let excess = names.len().saturating_sub(KEEP_ARCHIVES);
     for name in &names[..excess] {
         backend.delete(name)?;
@@ -763,27 +785,29 @@ impl Backend for S3Backend {
     }
 
     fn list(&self) -> Result<Vec<String>, String> {
-        let prefix = self.key(ARCHIVE_PREFIX);
         let path = format!("/{}/", self.bucket);
-        let (status, body) =
-            self.request("GET", &path, &[("list-type", "2"), ("prefix", &prefix)], &[])?;
-        match status {
-            200 => {},
-            403 => return Err("认证失败：检查 S3 Access Key / Secret Key / 区域".to_owned()),
-            _ => return Err(format!("列出远端失败：{}", Self::explain(status, &body))),
-        }
-        let text = String::from_utf8_lossy(&body);
         let mut names = Vec::new();
-        let mut rest: &str = &text;
-        while let Some(open) = rest.find("<Key>") {
-            rest = &rest[open + "<Key>".len()..];
-            let Some(close) = rest.find("</Key>") else { break };
-            let key = &rest[..close];
-            let name = key.rsplit('/').next().unwrap_or_default();
-            if is_archive_name(name) {
-                names.push(name.to_owned());
+        for prefix in [ARCHIVE_PREFIX, LEGACY_ARCHIVE_PREFIX] {
+            let prefix = self.key(prefix);
+            let (status, body) =
+                self.request("GET", &path, &[("list-type", "2"), ("prefix", &prefix)], &[])?;
+            match status {
+                200 => {},
+                403 => return Err("认证失败：检查 S3 Access Key / Secret Key / 区域".to_owned()),
+                _ => return Err(format!("列出远端失败：{}", Self::explain(status, &body))),
             }
-            rest = &rest[close..];
+            let text = String::from_utf8_lossy(&body);
+            let mut rest: &str = &text;
+            while let Some(open) = rest.find("<Key>") {
+                rest = &rest[open + "<Key>".len()..];
+                let Some(close) = rest.find("</Key>") else { break };
+                let key = &rest[..close];
+                let name = key.rsplit('/').next().unwrap_or_default();
+                if is_archive_name(name) && !names.iter().any(|seen| seen == name) {
+                    names.push(name.to_owned());
+                }
+                rest = &rest[close..];
+            }
         }
         Ok(names)
     }
@@ -994,10 +1018,10 @@ mod tests {
     #[test]
     fn archive_names_are_utc_stamped_and_sort_chronologically() {
         // 2026-08-13 05:19:00 UTC。
-        assert_eq!(archive_name(1_786_598_340), "nebula-backup-20260813-051900.nbk");
+        assert_eq!(archive_name(1_786_598_340), "pebrel-backup-20260813-051900.nbk");
         // Unix 纪元与闰日。
-        assert_eq!(archive_name(0), "nebula-backup-19700101-000000.nbk");
-        assert_eq!(archive_name(1_582_934_400), "nebula-backup-20200229-000000.nbk");
+        assert_eq!(archive_name(0), "pebrel-backup-19700101-000000.nbk");
+        assert_eq!(archive_name(1_582_934_400), "pebrel-backup-20200229-000000.nbk");
         let older = archive_name(1_700_000_000);
         let newer = archive_name(1_800_000_000);
         assert!(newer > older, "时间戳命名必须让字典序等于时间序");
@@ -1006,10 +1030,24 @@ mod tests {
     #[test]
     fn archive_filter_rejects_foreign_files() {
         assert!(is_archive_name("nebula-backup-20260813-051900.nbk"));
+        assert!(is_archive_name("pebrel-backup-20260813-051900.nbk"));
         assert!(!is_archive_name("nebula-backup-.nbk"));
         assert!(!is_archive_name("photo.png"));
         assert!(!is_archive_name("nebula-backup-20260813-051900.nbk.tmp"));
         assert!(!is_archive_name("other-backup-20260813.nbk"));
+        assert!(!is_archive_name("pebrel-backup-../keep.nbk"));
+    }
+
+    #[test]
+    fn mixed_brand_archives_are_ordered_by_timestamp_for_restore_and_retention() {
+        let mut names = vec![
+            "pebrel-backup-20260810-010000.nbk".to_owned(),
+            "nebula-backup-20260813-010000.nbk".to_owned(),
+            "pebrel-backup-20260812-010000.nbk".to_owned(),
+        ];
+        sort_archives(&mut names);
+        assert_eq!(names[0], "pebrel-backup-20260810-010000.nbk");
+        assert_eq!(names[2], "nebula-backup-20260813-010000.nbk");
     }
 
     #[test]

@@ -18,14 +18,17 @@ pub fn prepare() {
 pub fn show(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     if !MACOS_READY.get().copied().unwrap_or(false) {
-        log::warn!("System notifications require a registered Nebula application bundle");
+        log::warn!("System notifications require a registered Pebrel application bundle");
         return;
     }
     let title = title.to_owned();
     let body = body.to_owned();
-    let _ = std::thread::Builder::new().name("nebula-notify".into()).spawn(move || {
-        if let Err(error) =
-            notify_rust::Notification::new().appname("Nebula").summary(&title).body(&body).show()
+    let _ = std::thread::Builder::new().name("pebrel-notify".into()).spawn(move || {
+        if let Err(error) = notify_rust::Notification::new()
+            .appname(crate::brand::NAME)
+            .summary(&title)
+            .body(&body)
+            .show()
         {
             log::warn!("System notification unavailable: {error}");
         }

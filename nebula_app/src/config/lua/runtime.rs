@@ -133,13 +133,14 @@ impl LuaRuntime {
             module.set(
                 name,
                 self.lua.create_function(move |_, message: String| {
-                    log::log!(target: "nebula_lua", level, "{message}");
+                    log::log!(target: "pebrel_lua", level, "{message}");
                     Ok(())
                 })?,
             )?;
         }
 
         module.set("config_builder", self.lua.create_function(create_config_builder)?)?;
+        loaded.set("pebrel", module.clone())?;
         loaded.set("nebula", module)?;
 
         let current_path: String = package.get("path")?;
@@ -154,13 +155,13 @@ impl LuaRuntime {
                 package.searchers[2] = function(name)
                     local path = package.searchpath(name, package.path)
                     if path then
-                        package.loaded.nebula.add_to_config_reload_watch_list(path)
+                        package.loaded.pebrel.add_to_config_reload_watch_list(path)
                     end
                     return original(name)
                 end
                 "#,
             )
-            .set_name("=nebula-module-watcher")
+            .set_name("=pebrel-module-watcher")
             .exec()?;
 
         Ok(())
@@ -286,6 +287,28 @@ mod tests {
         assert!(!values.1.is_empty());
         assert!(values.2);
         assert!(values.3);
+        assert!(reload.take());
+    }
+
+    #[test]
+    fn pebrel_and_legacy_require_share_the_same_api_and_reload_state() {
+        let reload = ReloadSignal::default();
+        let runtime = LuaRuntime::new(Path::new("pebrel.lua"), reload.clone()).unwrap();
+        let same: bool = runtime
+            .lua()
+            .load(
+                r#"
+            local pebrel = require 'pebrel'
+            local legacy = require 'nebula'
+            pebrel.reload_configuration()
+            local config = legacy.config_builder()
+            config.profiles = pebrel.array()
+            return rawequal(pebrel, legacy) and getmetatable(config.profiles).__nebula_array
+        "#,
+            )
+            .eval()
+            .unwrap();
+        assert!(same);
         assert!(reload.take());
     }
 }

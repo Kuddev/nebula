@@ -5,17 +5,17 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>Nebula Terminal Preview</string>
+  <string>Pebrel Preview</string>
   <key>CFBundleExecutable</key>
-  <string>nebula</string>
+  <string>pebrel</string>
   <key>CFBundleIconFile</key>
-  <string>nebula.icns</string>
+  <string>pebrel.icns</string>
   <key>CFBundleIdentifier</key>
-  <string>io.github.kuddev.nebula.preview</string>
+  <string>io.github.kuddev.pebrel.preview</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>Nebula Terminal Preview</string>
+  <string>Pebrel Preview</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
@@ -23,7 +23,7 @@
   <key>CFBundleVersion</key>
   <string>1</string>
   <key>CFBundleGetInfoString</key>
-  <string>Nebula Terminal Preview</string>
+  <string>Pebrel Preview</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.utilities</string>
   <key>LSMinimumSystemVersion</key>

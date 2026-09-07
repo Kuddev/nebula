@@ -104,7 +104,7 @@ impl WorktreeTransaction {
         )?;
 
         let slug = worktree_slug(&request.agent_name);
-        let branch = request.branch.unwrap_or_else(|| format!("nebula/{slug}"));
+        let branch = request.branch.unwrap_or_else(|| format!("pebrel/{slug}"));
         validate_branch(&branch)?;
         ensure_branch_absent(&source_root, &branch)?;
 
@@ -456,6 +456,7 @@ mod tests {
         })
         .expect("worktree should be created");
         assert!(target.join("tracked.txt").is_file());
+        assert_eq!(transaction.provenance().branch, "nebula/test-reviewer");
         transaction.rollback().expect("owned worktree should roll back");
         assert!(!target.exists());
         assert!(
@@ -466,6 +467,22 @@ mod tests {
             .status
             .success()
         );
+    }
+
+    #[test]
+    fn default_branch_uses_pebrel_prefix() {
+        let repository = test_repository();
+        let transaction = WorktreeTransaction::prepare(WorktreeRequest {
+            source_cwd: repository.path().to_path_buf(),
+            agent_name: "reviewer".into(),
+            branch: None,
+            base: None,
+            path: Some(repository.path().join("worktrees").join("reviewer")),
+            allow_dirty_source: false,
+        })
+        .expect("default worktree should be created");
+        assert_eq!(transaction.provenance().branch, "pebrel/reviewer");
+        transaction.rollback().expect("owned worktree should roll back");
     }
 
     #[test]

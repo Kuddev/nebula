@@ -13,7 +13,7 @@ pub(super) const THEME_VALUES: [&str; 9] = [
     "Paper",
 ];
 
-pub(super) const REPOSITORY_URL: &str = "https://github.com/Kuddev/nebula";
+pub(super) const REPOSITORY_URL: &str = "https://github.com/Kuddev/pebrel";
 pub(super) const BUG_REPORT_TEMPLATE: &str = "bug_report.yml";
 
 /// 左侧分区的稳定路由表。2026-08-28 产品裁定：默认 GPUI 导航收敛为常用项，

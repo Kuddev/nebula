@@ -4,11 +4,12 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
-## Unreleased
+## 1.6.0 - 2026-09-07
 
 ### English
 
 #### Added
+- Clipboard images can be pasted into local, WSL, and SSH terminal sessions as PNG file paths. WSL paths are translated and SSH images are uploaded before insertion; failures are visible, and late results are discarded after input submission, interruption, or a session change.
 - Added an application icon picker with 25 color palettes and light/dark previews.
 - Added an opt-in terminal network proxy setting. On Windows, new local sessions inherit the system HTTP/HTTPS proxy when enabled; existing sessions keep their environment.
 - Added per-host SSH proxy and jump-host options, with separate proxy credentials and a connection-route preview.
@@ -27,29 +28,30 @@ Every release entry is provided in English and Simplified Chinese.
 - Improved Antigravity activity and permission detection so old spinner output and ordinary prose mentioning approval do not keep an idle session marked as running or waiting for permission.
 - Closing the last regular window and then quitting no longer replaces saved tabs and AI session identities with an empty snapshot. Closing all tabs explicitly still starts an empty workspace next time, and failed session writes are retried.
 - SSH startup now waits for PTY and shell confirmation before showing Ready, supports cancellation during connection setup, and stops stalled startup stages within a bounded timeout. Unexpected disconnects retain the pane and its failure state; explicit shell exits still close normally.
-- Duplicated SSH tabs retain the known remote working directory and quote it when starting the new remote shell.
+- Duplicated WSL tabs retain the current guest directory and selected distribution. Duplicated SSH tabs retain the known remote working directory and quote it when starting the new remote shell.
+- Fixed Windows native SSH sessions consuming a remote application's first device-attributes response during local console startup, which could leave the application waiting with a blank screen.
 - Modified Enter and ASCII shortcuts retain their negotiated keyboard-protocol modifiers, including Shift+Enter, Ctrl+Enter, and Alt+V. Keyboard-mode queries now report the active flags after a protocol reset.
 - Runtime CLI responses and event subscriptions stop cleanly when the program reading their output closes its pipe, instead of opening a panic dialog. Other output errors are still reported.
 
 #### Improved
 - Made Titanium the default application icon and adjusted small-size proportions, prompt strokes, and transparent edges.
-- Adopted Pebrel as the display name in the application, notifications, and installer. Local Pebrel-named packages retain `nebula.exe`, existing configuration paths, installer identity, and the Nebula update feed; this is not a new published release.
+- Unified the application, command, executable, helper, package, and managed integration names under Pebrel. New local sessions expose `PEBREL_*` environment variables alongside legacy aliases.
+- The Windows installer migrates registered `Nebula Terminal` installation directories to a sibling `Pebrel` directory, updates its shortcuts and PATH entry, and preserves custom directory names and unknown files. Cleanup failures are reported and can be retried.
+- Existing application data is copied into the Pebrel data directory without overwriting newer files or removing the old directory. New configuration names take precedence, while old environment variables and `require 'nebula'` Lua configurations remain compatible.
+- The project repository is now `Kuddev/pebrel`. Existing `Kuddev/nebula` repository and Git URLs redirect to it; historical release asset filenames remain unchanged.
 - File-name indexing applies incremental updates and recovers from watcher queue overflow with a rescan; editing a file's contents alone no longer rebuilds its name entry.
 - Improved terminal formula parsing and rendering for streamed agent output, while preserving the original text when a formula cannot be rendered.
-- Added native platform adapters and preview packaging instructions for Linux and macOS. Native build, test and package validation remains a separate requirement before publishing those previews.
-- Updated the public project and installation guides to use Pebrel consistently, while retaining the existing repository, command, configuration, and download identifiers.
-- Added contribution, architecture, and translation guides with explicit compatibility and review requirements. GitHub branch protection still requires separate server-side setup and verification.
 - Made the settings navigation more compact, kept Application first, labeled terminal options more clearly, and added matching navigation icons. Appearance settings now show font, cursor, interface, and background controls in groups with expandable help.
 - Reduced the intensity of hover and selected backgrounds in light themes.
 - Settings now appears as a selectable, closable item in the top tab layout. Switching tab layouts while Settings is open preserves the sidebar state, and closing the last terminal tab keeps Settings available until it is closed.
 - SSH editing now offers common usernames alongside recent entries, keeps manual usernames available, and makes host icons and pin controls clearer. Connection screens show completed stages and failures more accurately.
 - Terminal completion lists now scroll to reveal keyboard selections, support wheel scrolling and hover feedback, and clear stale list positions when the query changes.
 - Completion, bell, and Agent attention notifications now follow their source pane, including after a tab moves to another window. Clicking a notification focuses that pane, and activity in one pane no longer suppresses another pane's notification.
-- Contributors can run the shared source-size, dependency-direction, translation, and branding checks locally and in the architecture workflow. Cross-platform metadata checks are documented separately from native build and UI validation.
 
-### 简体中文
+### 中文
 
 #### 新增
+- 新增把剪贴板图片转换为 PNG 文件路径后粘贴到本地、WSL 与 SSH 终端会话；WSL 会转换路径，SSH 会先上传图片。失败会明确提示，提交输入、中断或会话变化后到达的结果会被丢弃。
 - 新增应用图标选择器，提供 25 款配色及浅色、深色背景预览。
 - 新增默认关闭的终端网络代理设置。Windows 下启用后，新建本地会话继承系统 HTTP/HTTPS 代理；现有会话保留原有环境。
 - SSH 主机新增独立的代理与跳板配置，支持单独保存代理凭据并预览连接路线。
@@ -68,25 +70,25 @@ Every release entry is provided in English and Simplified Chinese.
 - 改进 Antigravity 的活动与权限提示识别，避免历史转圈输出或普通正文中提到审批时，把空闲会话误标为运行中或等待授权。
 - 关闭最后一个普通窗口后再退出，不再用空快照覆盖已保存标签与 AI 会话身份；明确关闭全部标签后，下次仍从空工作区开始，保存失败会重试。
 - SSH 启动现在等待 PTY 与 shell 确认后才显示就绪，连接准备期间可取消，停滞的启动阶段会在限定时间内结束；意外断连会保留 pane 与失败状态，明确退出 shell 时仍正常关闭。
-- 复制 SSH 标签时保留已知远端工作目录，并在启动新远端 shell 时正确引用该路径。
+- 复制 WSL 标签时保留当前来宾目录与所选发行版；复制 SSH 标签时保留已知远端工作目录，并在启动新远端 shell 时正确引用该路径。
+- 修复 Windows 原生 SSH 会话在本地控制台启动时消耗远端应用首个设备属性应答的问题；该问题可能导致远端应用停留在空白画面等待应答。
 - 带修饰键的回车与 ASCII 快捷键会保留协商键盘协议中的修饰信息，包括 Shift+Enter、Ctrl+Enter 和 Alt+V；协议重置后的键盘模式查询现在返回实际生效的标志。
 - 读取输出的程序关闭管道后，Runtime CLI 响应与事件订阅会正常结束，不再弹出 panic 对话框；其他输出错误仍会报告。
 
 #### 改进
 - 将钛银设为默认应用图标，并调整小尺寸比例、提示符笔画与透明边缘。
-- 应用、通知和安装器采用 Pebrel 展示名称。本地 Pebrel 命名包保留 `nebula.exe`、现有配置路径、安装标识及 Nebula 更新源；这不代表新的已发布版本。
+- 应用、命令、可执行文件、辅助程序、安装包与受管理的集成统一使用 Pebrel 名称。新建本地会话同时提供 `PEBREL_*` 环境变量和旧版兼容别名。
+- Windows 安装器会把已注册的 `Nebula Terminal` 安装目录迁到同级 `Pebrel`，更新其快捷方式与 PATH 项，并保留自定义目录名称和未知文件；清理失败时会明确报告并支持重试。
+- 既有应用数据会复制到 Pebrel 数据目录，不覆盖较新的文件，也不删除旧目录。新配置名称优先，旧环境变量与 `require 'nebula'` Lua 配置继续兼容。
+- 项目仓库现为 `Kuddev/pebrel`，已有的 `Kuddev/nebula` 仓库及 Git 地址会重定向到新地址；历史发布资产文件名保持不变。
 - 文件名索引采用增量更新，监听队列溢出时通过重新扫描恢复；仅编辑文件内容不再重建对应名称条目。
 - 改进流式 Agent 输出中的终端公式解析与绘制，无法渲染时保留原始文本。
-- 新增 Linux 和 macOS 原生平台适配及预览打包说明；发布这些预览前仍需单独完成原生构建、测试和打包验证。
-- 公开项目说明与安装指南统一采用 Pebrel 名称，同时保留现有仓库、命令、配置与下载标识。
-- 新增贡献、架构和翻译指南，明确兼容性与审查要求；GitHub 分支保护仍需单独在服务端配置并核验。
 - 设置导航更紧凑，“应用”保持首项，终端选项名称更清晰，并配有含义匹配的图标；外观设置按字体、光标、界面和背景分组，提供可展开的详细说明。
 - 降低浅色主题中悬停与选中背景的色彩强度。
 - 顶部标签布局中，设置现在作为可选择、可关闭的标签显示；打开设置时切换标签布局会保留侧栏状态，关闭最后一个终端标签后仍可继续使用设置，直到关闭设置页。
 - SSH 编辑器在最近使用项之外提供常用用户名，保留手动输入，并改进主机图标与置顶控件；连接界面更准确地显示已完成阶段和失败状态。
 - 终端补全列表现在会滚动到键盘选中项，支持滚轮浏览与悬停反馈，并在查询变化后清除过期列表位置。
 - 命令完成、响铃和 Agent 待处理通知现在跟随来源 pane，即使标签已移动到另一个窗口；点击通知会聚焦来源 pane，一个 pane 的活动不再抑制另一个 pane 的通知。
-- 贡献者可在本地及架构工作流中运行统一的源码规模、依赖方向、翻译和品牌检查；跨平台元数据检查与原生构建、界面验证的边界分别说明。
 
 ### Contributors
 - [@Sakyvo](https://github.com/Sakyvo): terminal network proxy, conditional `Ctrl+C` copy, and word deletion with `Ctrl+Backspace` / 终端网络代理、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除。

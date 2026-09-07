@@ -1,4 +1,4 @@
-"""Standard-library-only harness for Nebula's public Runtime API."""
+"""Standard-library-only harness for Pebrel's public Runtime API."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import fnmatch
 import glob
 import json
 import os
+import plistlib
 import re
 import shutil
 import socket
@@ -142,11 +143,14 @@ class ResolvedApp:
 
     def _resolve(self, source: Path) -> Path:
         if source.is_dir() and source.suffix.lower() == ".app":
-            executable = source / "Contents" / "MacOS" / "nebula"
+            with (source / "Contents" / "Info.plist").open("rb") as stream:
+                name = plistlib.load(stream).get("CFBundleExecutable")
+            require(name in {"pebrel", "nebula"}, f"unexpected app executable: {name}")
+            executable = source / "Contents" / "MacOS" / name
             require(executable.is_file(), f"app bundle has no executable: {executable}")
             return executable
         if source.is_file() and source.suffix.lower() == ".zip":
-            self._temporary = tempfile.TemporaryDirectory(prefix="nebula-conformance-app-")
+            self._temporary = tempfile.TemporaryDirectory(prefix="pebrel-conformance-app-")
             root = Path(self._temporary.name).resolve()
             try:
                 with zipfile.ZipFile(source) as archive:
@@ -160,11 +164,11 @@ class ResolvedApp:
                 candidates = [
                     path
                     for path in root.rglob("*")
-                    if path.is_file() and path.name.lower() in {"nebula", "nebula.exe"}
+                    if path.is_file() and path.name.lower() in {"pebrel", "pebrel.exe", "nebula", "nebula.exe"}
                 ]
                 require(
                     len(candidates) == 1,
-                    f"archive contains {len(candidates)} Nebula executables",
+                    f"archive contains {len(candidates)} product executables",
                 )
                 return candidates[0]
             except Exception:
@@ -174,9 +178,9 @@ class ResolvedApp:
             candidates = [
                 path
                 for path in source.rglob("*")
-                if path.is_file() and path.name.lower() in {"nebula", "nebula.exe"}
+                if path.is_file() and path.name.lower() in {"pebrel", "pebrel.exe", "nebula", "nebula.exe"}
             ]
-            require(len(candidates) == 1, f"directory contains {len(candidates)} Nebula executables")
+            require(len(candidates) == 1, f"directory contains {len(candidates)} product executables")
             return candidates[0]
         require(source.is_file(), f"application path does not exist: {source}")
         return source
@@ -297,16 +301,17 @@ class ConformanceContext:
                 "",
             ]
         )
-        (self.config_dir / "nebula_settings.txt").write_text(
+        (self.config_dir / "pebrel_settings.txt").write_text(
             settings, encoding="utf-8", newline="\n"
         )
 
     def start(self, *, explicit_working_directory: bool = True) -> None:
-        require(self.process is None, "Nebula is already running in this context")
+        require(self.process is None, "Pebrel is already running in this context")
         self._launch_number += 1
-        log_path = self.artifact_dir / f"nebula-{self._launch_number}.log"
+        log_path = self.artifact_dir / f"pebrel-{self._launch_number}.log"
         self._log_handle = log_path.open("wb")
         env = os.environ.copy()
+        env["PEBREL_CONFIG_DIR"] = os.fspath(self.config_dir)
         env["NEBULA_CONFIG_DIR"] = os.fspath(self.config_dir)
         env["RUST_BACKTRACE"] = "1"
         if self.app.executable.suffix.lower() == ".appimage":

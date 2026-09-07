@@ -1,7 +1,7 @@
-local nebula = require 'nebula'
-local config = nebula.config_builder()
+local pebrel = require 'pebrel'
+local config = pebrel.config_builder()
 
--- Nebula Lua configuration. Run `nebula config check` after editing to validate syntax and fields.
+-- Pebrel Lua configuration. Run `pebrel config check` after editing to validate syntax and fields.
 -- Field names and enum values use stable English identifiers; comments explain safe edits.
 
 -- Number of scrollback lines to retain. Larger values consume more memory.
@@ -41,7 +41,7 @@ config.scrolling = {
 -- }
 
 -- Linux example: select a shell for the current platform while sharing this file with Windows.
--- if nebula.platform.os == 'linux' then
+-- if pebrel.platform.os == 'linux' then
 --     config.terminal = { shell = '/bin/bash' }
 -- end
 
@@ -50,8 +50,8 @@ config.scrolling = {
 --     EDITOR = 'nvim',
 -- }
 
--- Quick-launch profiles. An empty list must use nebula.array(), not a plain empty table {}.
--- config.profiles = nebula.array {
+-- Quick-launch profiles. An empty list must use pebrel.array(), not a plain empty table {}.
+-- config.profiles = pebrel.array {
 --     { name = 'Production SSH', command = 'ssh', args = { 'user@server' } },
 --     { name = 'Project', command = 'pwsh.exe', args = { '-NoLogo' }, cwd = 'D:/src/project' },
 -- }

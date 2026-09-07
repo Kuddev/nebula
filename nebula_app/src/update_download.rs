@@ -16,7 +16,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::update_check::UpdateAsset;
 
-const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Kuddev/nebula/releases/download/";
+const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Kuddev/pebrel/releases/download/";
+const LEGACY_RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/Kuddev/nebula/releases/download/";
 const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
 const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -127,7 +128,7 @@ fn download_and_verify(asset: &UpdateAsset) -> Result<(PathBuf, u64), String> {
     let (partial_path, final_path) = download_paths(asset)?;
     let _download_lock = crate::atomic_file::try_lifetime_lock(&final_path)
         .map_err(|error| format!("无法锁定更新下载目录：{error}"))?
-        .ok_or_else(|| "另一个 Nebula 进程正在下载这项更新".to_owned())?;
+        .ok_or_else(|| "另一个 Pebrel 进程正在下载这项更新".to_owned())?;
 
     if final_path.is_file()
         && let Ok(bytes) = verify_file(&final_path, asset)
@@ -153,7 +154,7 @@ fn download_to_partial(asset: &UpdateAsset, partial_path: &Path) -> Result<u64, 
         .new_agent();
     let mut response = agent
         .get(&asset.download_url)
-        .header("User-Agent", "nebula-terminal-updater")
+        .header("User-Agent", "pebrel-updater")
         .header("Accept", "application/octet-stream")
         .header("Accept-Encoding", "identity")
         .call()
@@ -286,14 +287,14 @@ fn validate_windows_asset_contract(asset: &UpdateAsset) -> Result<(), String> {
     {
         return Err("release 版本号不符合安装包命名规则".to_owned());
     }
-    let expected_name = format!("NebulaTerminal-{}-windows-x64-setup.exe", asset.version);
-    if asset.name != expected_name {
+    if !crate::update_check::windows_x64_installer_names(&asset.version).contains(&asset.name) {
         return Err("release 资产不是当前平台的精确安装包".to_owned());
     }
-    if !asset.download_url.starts_with(RELEASE_DOWNLOAD_PREFIX)
-        || !asset.download_url.ends_with(&format!("/{expected_name}"))
-    {
-        return Err("release 安装包 URL 不属于 Nebula 官方仓库".to_owned());
+    let trusted_url = [RELEASE_DOWNLOAD_PREFIX, LEGACY_RELEASE_DOWNLOAD_PREFIX]
+        .iter()
+        .any(|prefix| asset.download_url == format!("{prefix}v{}/{}", asset.version, asset.name));
+    if !trusted_url {
+        return Err("release 安装包 URL 不属于 Pebrel 官方仓库".to_owned());
     }
     if asset.size.is_some_and(|bytes| bytes == 0 || bytes > MAX_INSTALLER_BYTES) {
         return Err("release 安装包大小无效".to_owned());
@@ -309,7 +310,12 @@ fn validate_windows_asset_contract(asset: &UpdateAsset) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateAsset, validate_windows_asset_contract};
+    use sha2::{Digest as _, Sha256};
+
+    use super::{
+        LEGACY_RELEASE_DOWNLOAD_PREFIX, MAX_INSTALLER_BYTES, RELEASE_DOWNLOAD_PREFIX, UpdateAsset,
+        validate_windows_asset_contract, verify_download,
+    };
 
     fn asset(url: &str, sha256: Option<&str>) -> UpdateAsset {
         UpdateAsset {
@@ -336,5 +342,92 @@ mod tests {
 
         assert!(validate_windows_asset_contract(&asset(untrusted, Some(hash.as_str()))).is_err());
         assert!(validate_windows_asset_contract(&asset(official, None)).is_err());
+    }
+
+    fn branded_asset(brand: &str) -> UpdateAsset {
+        let name = format!("{brand}-1.6.0-windows-x64-setup.exe");
+        UpdateAsset {
+            version: "1.6.0".to_owned(),
+            download_url: format!("{RELEASE_DOWNLOAD_PREFIX}v1.6.0/{name}"),
+            name,
+            size: Some(42),
+            sha256: Some("b".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn both_brand_names_require_the_same_exact_version_and_url_contract() {
+        for brand in ["Pebrel", "NebulaTerminal"] {
+            let original = branded_asset(brand);
+            assert!(validate_windows_asset_contract(&original).is_ok());
+            let mut legacy_url = original.clone();
+            legacy_url.download_url =
+                format!("{LEGACY_RELEASE_DOWNLOAD_PREFIX}v{}/{}", original.version, original.name);
+            assert!(validate_windows_asset_contract(&legacy_url).is_ok());
+            for url in [
+                original.download_url.replace("/v1.6.0/", "/v1.5.0/"),
+                original.download_url.replace("/v1.6.0/", "/v1.6.0/extra/"),
+                original.download_url.replace("github.com/", "github.com.evil.invalid/"),
+                original.download_url.replace("https://", "http://"),
+                format!("{}?download=1", original.download_url),
+                original.download_url.replace("Kuddev/pebrel/", "elsewhere/pebrel/"),
+            ] {
+                let mut candidate = original.clone();
+                candidate.download_url = url;
+                assert!(validate_windows_asset_contract(&candidate).is_err(), "{candidate:?}");
+            }
+            let mut candidate = original;
+            candidate.version = "1.5.0".to_owned();
+            assert!(validate_windows_asset_contract(&candidate).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_non_windows_x64_names_invalid_versions_sizes_and_hashes() {
+        for name in [
+            "Pebrel-1.6.0-windows-arm64-setup.exe",
+            "Pebrel-v1.6.0-windows-x64.zip",
+            "Pebrel-v1.6.0-linux-x86_64.AppImage",
+            "../Pebrel-1.6.0-windows-x64-setup.exe",
+        ] {
+            let mut candidate = branded_asset("Pebrel");
+            candidate.name = name.to_owned();
+            assert!(validate_windows_asset_contract(&candidate).is_err());
+        }
+        for version in ["", "../1.6.0", "1.6.0?download=1", "1.6.0\n"] {
+            let mut candidate = branded_asset("Pebrel");
+            candidate.version = version.to_owned();
+            assert!(validate_windows_asset_contract(&candidate).is_err());
+        }
+        for size in [0, MAX_INSTALLER_BYTES + 1] {
+            let mut candidate = branded_asset("Pebrel");
+            candidate.size = Some(size);
+            assert!(validate_windows_asset_contract(&candidate).is_err());
+        }
+        for hash in [None, Some("a".repeat(63)), Some("g".repeat(64))] {
+            let mut candidate = branded_asset("Pebrel");
+            candidate.sha256 = hash;
+            assert!(validate_windows_asset_contract(&candidate).is_err());
+        }
+    }
+
+    #[test]
+    fn both_brands_reject_corrupt_or_non_executable_downloads() {
+        let bytes = b"MZinstaller fixture";
+        let digest = Sha256::digest(bytes);
+        let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        for brand in ["Pebrel", "NebulaTerminal"] {
+            let mut candidate = branded_asset(brand);
+            candidate.size = Some(bytes.len() as u64);
+            candidate.sha256 = Some(hash.clone());
+            assert!(verify_download(bytes.len() as u64, b"MZ", digest, &candidate).is_ok());
+            assert!(verify_download(0, b"MZ", digest, &candidate).is_err());
+            assert!(verify_download(bytes.len() as u64 - 1, b"MZ", digest, &candidate).is_err());
+            assert!(verify_download(bytes.len() as u64, b"<!", digest, &candidate).is_err());
+            assert!(
+                verify_download(bytes.len() as u64, b"MZ", Sha256::digest(b"changed"), &candidate)
+                    .is_err()
+            );
+        }
     }
 }

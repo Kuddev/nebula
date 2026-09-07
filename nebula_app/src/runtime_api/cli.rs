@@ -23,7 +23,7 @@ pub(super) fn request_once(
     timeout: Duration,
 ) -> Result<ApiResponse, Box<dyn Error>> {
     let endpoint = read_endpoint()
-        .ok_or_else(|| CliError::new("runtime_unavailable", "no resident Nebula runtime found"))?;
+        .ok_or_else(|| CliError::new("runtime_unavailable", "no resident Pebrel runtime found"))?;
     let request = ApiRequest::new(endpoint.token.clone(), method, params);
     let stream = client_stream(&endpoint, &request, Some(timeout))?;
     let mut line = String::new();
@@ -479,7 +479,7 @@ pub(super) fn wait_state_name(state: ControlWaitState) -> &'static str {
 
 fn subscribe_cli(since: Option<u64>, timeout: Duration) -> Result<(), Box<dyn Error>> {
     let endpoint = read_endpoint()
-        .ok_or_else(|| CliError::new("runtime_unavailable", "no resident Nebula runtime found"))?;
+        .ok_or_else(|| CliError::new("runtime_unavailable", "no resident Pebrel runtime found"))?;
     let request = ApiRequest::new(
         endpoint.token.clone(),
         "events.subscribe",

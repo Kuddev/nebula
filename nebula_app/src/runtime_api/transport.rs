@@ -198,7 +198,7 @@ pub(super) fn runtime_description() -> Value {
         ],
         // 环境契约：pane 里的进程靠这些变量发现自己和控制面，不必扫进程或猜
         // 端口。写进 describe 是为了让外部客户端能**探测**契约而不是硬编码变量
-        // 名——旧版本没有这一段，客户端据此回落到 `nebula ctl` 即可。
+        // 名——旧版本没有这一段，客户端据此回落到 `pebrel ctl` 即可。
         // 实现见 `crate::agent_env`。
         "env": {
             "term_program": crate::agent_env::TERM_PROGRAM,
@@ -472,7 +472,7 @@ pub(super) fn dispatch_runtime_command(
     let (dispatch, receiver) = RuntimeDispatch::new(command);
     if !sink.emit_control(dispatch) {
         return Err(agent_api::rollback_prepared_worktree(
-            ApiError::new("runtime_unavailable", "Nebula's event loop is not available"),
+            ApiError::new("runtime_unavailable", "Pebrel's event loop is not available"),
             worktree_transaction.take(),
         ));
     }
@@ -516,7 +516,7 @@ pub(super) fn dispatch_runtime_command(
                 error.details = Some(json!({
                     "worktree": provenance,
                     "cleanup_deferred": true,
-                    "reason": "the UI outcome is unknown; Nebula did not remove the worktree"
+                    "reason": "the UI outcome is unknown; Pebrel did not remove the worktree"
                 }));
             }
             Err(error)

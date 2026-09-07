@@ -9,7 +9,7 @@ Usage: scripts/package-linux.sh --binary PATH --version VERSION --preview-id ID
        [--output-directory DIR] [--linuxdeploy PATH] [--force]
 
 Builds a Linux x86_64 Preview AppImage, portable tar.gz, and Debian package
-from one fresh Nebula release binary. linuxdeploy must be supplied explicitly
+from one fresh Pebrel release binary. linuxdeploy must be supplied explicitly
 or through LINUXDEPLOY; the CI workflow downloads a pinned, SHA-verified copy.
 EOF
 }
@@ -84,7 +84,7 @@ for command in appstreamcli convert desktop-file-validate dpkg dpkg-deb \
   fi
 done
 if [[ ! -f "$binary" || ! -x "$binary" ]]; then
-  echo "Nebula binary is missing or not executable: $binary" >&2
+  echo "Pebrel binary is missing or not executable: $binary" >&2
   exit 1
 fi
 if [[ ! -f "$linuxdeploy" || ! -x "$linuxdeploy" ]]; then
@@ -100,17 +100,17 @@ linuxdeploy="$(cd "$(dirname "$linuxdeploy")" && pwd -P)/$(basename "$linuxdeplo
 mkdir -p "$output_directory"
 output_directory="$(cd "$output_directory" && pwd -P)"
 
-desktop_source="$repo/packaging/linux/io.github.kuddev.nebula.preview.desktop"
-metainfo_source="$repo/packaging/linux/io.github.kuddev.nebula.preview.metainfo.xml"
+desktop_source="$repo/packaging/linux/io.github.kuddev.pebrel.preview.desktop"
+metainfo_source="$repo/packaging/linux/io.github.kuddev.pebrel.preview.metainfo.xml"
 icon_source="$repo/extra/logo/nebula.png"
 for required in "$desktop_source" "$metainfo_source" "$icon_source" \
   "$repo/README.md" "$repo/CHANGELOG.md" "$repo/INSTALL.md" \
   "$repo/LICENSE" "$repo/THIRD-PARTY-NOTICES" \
   "$repo/licenses/LICENSE-LUA" "$repo/licenses/LICENSE-MLUA" \
   "$repo/licenses/LICENSE-LATIN-MODERN-MATH" \
-  "$repo/extra/completions/nebula.bash" \
-  "$repo/extra/completions/nebula.fish" \
-  "$repo/extra/completions/_nebula"; do
+  "$repo/extra/completions/pebrel.bash" \
+  "$repo/extra/completions/pebrel.fish" \
+  "$repo/extra/completions/_pebrel"; do
   if [[ ! -f "$required" ]]; then
     echo "required package input is missing: $required" >&2
     exit 1
@@ -119,7 +119,7 @@ done
 
 help_text="$("$binary" --help 2>&1)"
 if [[ "$help_text" != *"--gpui"* ]]; then
-  echo "refusing to package a non-GPUI Nebula binary" >&2
+  echo "refusing to package a non-GPUI Pebrel binary" >&2
   exit 1
 fi
 version_text="$("$binary" --version 2>&1)"
@@ -128,12 +128,12 @@ if [[ "$version_text" != *"$version"* ]]; then
   exit 1
 fi
 if ! readelf -h "$binary" | grep -Fq "Advanced Micro Devices X86-64"; then
-  echo "Nebula binary is not an x86_64 ELF executable" >&2
+  echo "Pebrel binary is not an x86_64 ELF executable" >&2
   exit 1
 fi
 ldd_output="$(ldd "$binary")"
 if grep -Fq "not found" <<<"$ldd_output"; then
-  echo "Nebula has unresolved native dependencies:" >&2
+  echo "Pebrel has unresolved native dependencies:" >&2
   echo "$ldd_output" >&2
   exit 1
 fi
@@ -144,19 +144,19 @@ mapfile -t glibc_versions < <(
     sort -Vu
 )
 if [[ ${#glibc_versions[@]} -eq 0 ]]; then
-  echo "could not determine Nebula's required GLIBC version" >&2
+  echo "could not determine Pebrel's required GLIBC version" >&2
   exit 1
 fi
 required_glibc="${glibc_versions[${#glibc_versions[@]} - 1]}"
 if dpkg --compare-versions "$required_glibc" gt "2.35"; then
-  echo "Nebula requires GLIBC_$required_glibc; Preview baseline is at most GLIBC_2.35" >&2
+  echo "Pebrel requires GLIBC_$required_glibc; Preview baseline is at most GLIBC_2.35" >&2
   exit 1
 fi
 
 release="$version-preview.$preview_id"
-appimage_path="$output_directory/NebulaTerminal-v$release-linux-x86_64.AppImage"
-tar_path="$output_directory/NebulaTerminal-v$release-linux-x86_64.tar.gz"
-deb_path="$output_directory/NebulaTerminal-v$release-linux-x86_64.deb"
+appimage_path="$output_directory/Pebrel-v$release-linux-x86_64.AppImage"
+tar_path="$output_directory/Pebrel-v$release-linux-x86_64.tar.gz"
+deb_path="$output_directory/Pebrel-v$release-linux-x86_64.deb"
 outputs=("$appimage_path" "$tar_path" "$deb_path")
 for output in "${outputs[@]}"; do
   if [[ -e "$output" && $force -ne 1 ]]; then
@@ -168,7 +168,7 @@ if [[ $force -eq 1 ]]; then
   rm -f -- "${outputs[@]}"
 fi
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/nebula-linux-package.XXXXXX")"
+work="$(mktemp -d "${TMPDIR:-/tmp}/pebrel-linux-package.XXXXXX")"
 cleanup() {
   if [[ -n "${work:-}" && -d "$work" ]]; then
     rm -rf -- "$work"
@@ -177,49 +177,49 @@ cleanup() {
 trap cleanup EXIT
 
 common_root="$work/common"
-appdir="$work/Nebula.AppDir"
-deb_root="$work/debian/nebula-terminal-preview"
+appdir="$work/Pebrel.AppDir"
+deb_root="$work/debian/pebrel-preview"
 mkdir -p \
   "$common_root/usr/bin" \
   "$common_root/usr/share/applications" \
   "$common_root/usr/share/icons/hicolor/256x256/apps" \
   "$common_root/usr/share/metainfo" \
-  "$common_root/usr/share/doc/nebula-terminal-preview/licenses" \
+  "$common_root/usr/share/doc/pebrel-preview/licenses" \
   "$common_root/usr/share/bash-completion/completions" \
   "$common_root/usr/share/fish/vendor_completions.d" \
   "$common_root/usr/share/zsh/vendor-completions"
 
-install -m 0755 "$binary" "$common_root/usr/bin/nebula"
+install -m 0755 "$binary" "$common_root/usr/bin/pebrel"
 install -m 0644 "$desktop_source" \
-  "$common_root/usr/share/applications/io.github.kuddev.nebula.preview.desktop"
+  "$common_root/usr/share/applications/io.github.kuddev.pebrel.preview.desktop"
 install -m 0644 "$metainfo_source" \
-  "$common_root/usr/share/metainfo/io.github.kuddev.nebula.preview.metainfo.xml"
+  "$common_root/usr/share/metainfo/io.github.kuddev.pebrel.preview.metainfo.xml"
 convert "$icon_source" -resize 256x256 \
-  "$common_root/usr/share/icons/hicolor/256x256/apps/io.github.kuddev.nebula.preview.png"
-install -m 0644 "$repo/README.md" "$common_root/usr/share/doc/nebula-terminal-preview/README.md"
-install -m 0644 "$repo/CHANGELOG.md" "$common_root/usr/share/doc/nebula-terminal-preview/CHANGELOG.md"
-install -m 0644 "$repo/INSTALL.md" "$common_root/usr/share/doc/nebula-terminal-preview/INSTALL.md"
-install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/nebula-terminal-preview/licenses/LICENSE"
-install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/nebula-terminal-preview/copyright"
+  "$common_root/usr/share/icons/hicolor/256x256/apps/io.github.kuddev.pebrel.preview.png"
+install -m 0644 "$repo/README.md" "$common_root/usr/share/doc/pebrel-preview/README.md"
+install -m 0644 "$repo/CHANGELOG.md" "$common_root/usr/share/doc/pebrel-preview/CHANGELOG.md"
+install -m 0644 "$repo/INSTALL.md" "$common_root/usr/share/doc/pebrel-preview/INSTALL.md"
+install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE"
+install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/pebrel-preview/copyright"
 install -m 0644 "$repo/THIRD-PARTY-NOTICES" \
-  "$common_root/usr/share/doc/nebula-terminal-preview/licenses/THIRD-PARTY-NOTICES"
+  "$common_root/usr/share/doc/pebrel-preview/licenses/THIRD-PARTY-NOTICES"
 install -m 0644 "$repo/licenses/LICENSE-LUA" \
-  "$common_root/usr/share/doc/nebula-terminal-preview/licenses/LICENSE-LUA"
+  "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE-LUA"
 install -m 0644 "$repo/licenses/LICENSE-MLUA" \
-  "$common_root/usr/share/doc/nebula-terminal-preview/licenses/LICENSE-MLUA"
+  "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE-MLUA"
 install -m 0644 "$repo/licenses/LICENSE-LATIN-MODERN-MATH" \
-  "$common_root/usr/share/doc/nebula-terminal-preview/licenses/LICENSE-LATIN-MODERN-MATH"
-install -m 0644 "$repo/extra/completions/nebula.bash" \
-  "$common_root/usr/share/bash-completion/completions/nebula"
-install -m 0644 "$repo/extra/completions/nebula.fish" \
-  "$common_root/usr/share/fish/vendor_completions.d/nebula.fish"
-install -m 0644 "$repo/extra/completions/_nebula" \
-  "$common_root/usr/share/zsh/vendor-completions/_nebula"
+  "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE-LATIN-MODERN-MATH"
+install -m 0644 "$repo/extra/completions/pebrel.bash" \
+  "$common_root/usr/share/bash-completion/completions/pebrel"
+install -m 0644 "$repo/extra/completions/pebrel.fish" \
+  "$common_root/usr/share/fish/vendor_completions.d/pebrel.fish"
+install -m 0644 "$repo/extra/completions/_pebrel" \
+  "$common_root/usr/share/zsh/vendor-completions/_pebrel"
 
 desktop-file-validate \
-  "$common_root/usr/share/applications/io.github.kuddev.nebula.preview.desktop"
+  "$common_root/usr/share/applications/io.github.kuddev.pebrel.preview.desktop"
 appstreamcli validate --no-net \
-  "$common_root/usr/share/metainfo/io.github.kuddev.nebula.preview.metainfo.xml"
+  "$common_root/usr/share/metainfo/io.github.kuddev.pebrel.preview.metainfo.xml"
 
 cp -a "$common_root/." "$appdir/"
 tool_output="$work/linuxdeploy-output"
@@ -231,9 +231,9 @@ mkdir -p "$tool_output"
   NO_STRIP=1 \
     "$linuxdeploy" \
       --appdir "$appdir" \
-      --executable "$appdir/usr/bin/nebula" \
-      --desktop-file "$appdir/usr/share/applications/io.github.kuddev.nebula.preview.desktop" \
-      --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/io.github.kuddev.nebula.preview.png" \
+      --executable "$appdir/usr/bin/pebrel" \
+      --desktop-file "$appdir/usr/share/applications/io.github.kuddev.pebrel.preview.desktop" \
+      --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/io.github.kuddev.pebrel.preview.png" \
       --output appimage
 )
 mapfile -t generated_appimages < <(find "$tool_output" -maxdepth 1 -type f -name '*.AppImage' -print)
@@ -255,34 +255,34 @@ if [[ ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
   echo "SOURCE_DATE_EPOCH must be an integer" >&2
   exit 1
 fi
-archive_root="NebulaTerminal-v$release-linux-x86_64"
+archive_root="Pebrel-v$release-linux-x86_64"
 tar \
   --sort=name \
   --mtime="@$source_date_epoch" \
   --owner=0 \
   --group=0 \
   --numeric-owner \
-  --transform="s|^Nebula.AppDir|$archive_root|" \
+  --transform="s|^Pebrel.AppDir|$archive_root|" \
   -C "$work" \
-  -cf - Nebula.AppDir | gzip -n >"$tar_path"
+  -cf - Pebrel.AppDir | gzip -n >"$tar_path"
 
 mkdir -p "$deb_root"
 cp -a "$common_root/." "$deb_root/"
 cat >"$work/debian/control" <<EOF
-Source: nebula-terminal-preview
+Source: pebrel-preview
 Section: utils
 Priority: optional
 Maintainer: Kuddev <Kuddev@users.noreply.github.com>
 Standards-Version: 4.6.2
 
-Package: nebula-terminal-preview
+Package: pebrel-preview
 Architecture: any
-Description: Nebula Terminal cross-platform Preview
+Description: Pebrel cross-platform Preview
  GPU-accelerated terminal for local and remote workflows.
 EOF
 dependency_line="$(
   cd "$work"
-  dpkg-shlibdeps -O -e"$deb_root/usr/bin/nebula"
+  dpkg-shlibdeps -O -e"$deb_root/usr/bin/pebrel"
 )"
 if [[ "$dependency_line" != shlibs:Depends=* ]]; then
   echo "dpkg-shlibdeps returned an unexpected value: $dependency_line" >&2
@@ -292,7 +292,7 @@ dependencies="${dependency_line#shlibs:Depends=}"
 installed_size="$(du -sk "$deb_root/usr" | awk '{print $1}')"
 mkdir -p "$deb_root/DEBIAN"
 cat >"$deb_root/DEBIAN/control" <<EOF
-Package: nebula-terminal-preview
+Package: pebrel-preview
 Version: $version~preview.$preview_id
 Section: utils
 Priority: optional
@@ -301,8 +301,8 @@ Maintainer: Kuddev <Kuddev@users.noreply.github.com>
 Installed-Size: $installed_size
 Depends: $dependencies
 Recommends: libsecret-tools, gnome-keyring
-Homepage: https://github.com/Kuddev/nebula
-Description: Nebula Terminal cross-platform Preview
+Homepage: https://github.com/Kuddev/pebrel
+Description: Pebrel cross-platform Preview
  GPU-accelerated terminal for local and remote workflows.
  This package is a Preview build and is not a stable release.
 EOF
@@ -310,7 +310,7 @@ chmod 0755 "$deb_root/DEBIAN"
 chmod 0644 "$deb_root/DEBIAN/control"
 dpkg-deb --root-owner-group --build "$deb_root" "$deb_path"
 
-if [[ "$(dpkg-deb --field "$deb_path" Package)" != "nebula-terminal-preview" ]]; then
+if [[ "$(dpkg-deb --field "$deb_path" Package)" != "pebrel-preview" ]]; then
   echo "Debian package identity verification failed" >&2
   exit 1
 fi

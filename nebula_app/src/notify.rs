@@ -1,4 +1,4 @@
-//! Nebula's notification center.
+//! Pebrel's notification center.
 //!
 //! One funnel for everything that may deserve the user's attention —
 //! terminal bells (Claude Code / Codex ring one when a turn finishes),
@@ -9,12 +9,12 @@
 //!
 //! Delivery on Windows is a real WinRT toast (system tray / notification
 //! center), on top of the taskbar flash. Unlike launchers that ask the user to
-//! hand-edit hook scripts into each CLI's config — Nebula needs ZERO user
+//! hand-edit hook scripts into each CLI's config — Pebrel needs ZERO user
 //! setup: AI CLIs already ring BEL when a turn ends, so the toast fires off
-//! that signal out of the box. Toast identity comes from a "Nebula" AUMID
+//! that signal out of the box. Toast identity comes from a "Pebrel" AUMID
 //! registered under `HKCU\Software\Classes\AppUserModelId` (the documented
 //! registry route for unpackaged apps — no COM, no Start-menu shortcut, no
-//! installer), so banners read "Nebula" instead of "Windows PowerShell".
+//! installer), so banners read "Pebrel" instead of "Windows PowerShell".
 //!
 //! Delivery discipline: the toast RPC runs on a throwaway thread so a slow or
 //! faulty notification stack can never stall the winit event loop — and a
@@ -96,9 +96,9 @@ pub enum Notification {
     /// Free-text notification from a program (OSC 9, iTerm style). Claude
     /// Code emits these (with the turn's actual message) when its notif
     /// channel is `iterm2`/`iterm2_with_bell`. Carries the tracked program
-    /// name so the toast is titled "claude" instead of "Nebula".
+    /// name so the toast is titled "claude" instead of "Pebrel".
     Text { body: String, program: Option<String> },
-    /// Typed AI-CLI turn event delivered through the `nebula-hook` pipe
+    /// Typed AI-CLI turn event delivered through the `pebrel-hook` pipe
     /// (claude hooks / codex notify — see `ai_hook`). `attention` means the
     /// CLI needs the user NOW (permission prompt / idle reminder) rather
     /// than "turn finished".
@@ -106,7 +106,7 @@ pub enum Notification {
 }
 
 impl Notification {
-    /// Toast title + body. Title names the source ("Nebula" or the program);
+    /// Toast title + body. Title names the source ("Pebrel" or the program);
     /// body carries the human detail.
     pub(crate) fn toast_text(&self) -> (String, String) {
         match self {
@@ -251,7 +251,7 @@ pub(crate) fn toast(title: &str, body: &str) {
 
 fn spawn_toast(title: String, body: String, activation: Option<ToastActivation>) {
     if let Err(error) = std::thread::Builder::new()
-        .name("nebula-toast".into())
+        .name("pebrel-toast".into())
         .spawn(move || toast_clickable(&title, &body, activation))
     {
         log::warn!("notify: failed to spawn toast thread: {error}");
@@ -261,13 +261,13 @@ fn spawn_toast(title: String, body: String, activation: Option<ToastActivation>)
 /// [`toast`], optionally wired for click-to-focus: activating the banner (or
 /// its Action Center entry) surfaces `window` and, when a pane is named, its
 /// tab. Uses the in-process WinRT Activated handler — no COM server, no
-/// protocol registration. The one trade-off: clicks after Nebula exited do
+/// protocol registration. The one trade-off: clicks after Pebrel exited do
 /// nothing, which is exactly right (there is nothing left to focus).
 #[cfg(windows)]
 fn toast_clickable(title: &str, body: &str, activation: Option<ToastActivation>) {
     use tauri_winrt_notification::{IconCrop, Toast};
 
-    // Attribute the toast to the Nebula AUMID so it reads "Nebula" instead of
+    // Attribute the toast to the Pebrel AUMID so it reads "Pebrel" instead of
     // "Windows PowerShell". One registry write, cached per process.
     win::ensure_aumid();
 
@@ -277,7 +277,7 @@ fn toast_clickable(title: &str, body: &str, activation: Option<ToastActivation>)
         .duration(tauri_winrt_notification::Duration::Short);
     // Belt and braces: besides the AUMID IconUri (which some Windows builds
     // cache stale), embed the logo per-toast as appLogoOverride so the banner
-    // always carries the Nebula mark next to the message.
+    // always carries the Pebrel mark next to the message.
     if let Some(icon) = win::icon_path() {
         toast = toast.icon(&icon, IconCrop::Square, crate::brand::NAME);
     }
@@ -299,7 +299,7 @@ fn toast_clickable(title: &str, body: &str, activation: Option<ToastActivation>)
     #[cfg(target_os = "macos")]
     {
         if objc2_foundation::NSBundle::mainBundle().bundleIdentifier().is_none() {
-            log::warn!("System notifications require a registered Nebula application bundle");
+            log::warn!("System notifications require a registered Pebrel application bundle");
             return;
         }
         crate::platform::notifications::prepare();
@@ -307,7 +307,11 @@ fn toast_clickable(title: &str, body: &str, activation: Option<ToastActivation>)
     let mut notification = notify_rust::Notification::new();
     notification.appname(crate::brand::NAME).summary(title).body(body);
     if activation.is_some() {
-        notification.action("default", "Open Nebula");
+        let language = crate::i18n::LanguagePreference::from(
+            nebula_settings::RuntimeSettings::load().language,
+        )
+        .resolved();
+        notification.action("default", language.text(crate::i18n::Message::CommonOpen));
     }
     match notification.show() {
         Ok(handle) => {
@@ -394,7 +398,7 @@ mod delivery_tests {
     }
 }
 
-/// `nebula notify-test` entrypoint: run the full toast pipeline synchronously
+/// `pebrel notify-test` entrypoint: run the full toast pipeline synchronously
 /// (registration + show), printing per-step diagnostics to the console. Skips
 /// the focus policy and throttle on purpose — the tester is looking at the
 /// screen. Returns a process exit code.
@@ -418,7 +422,7 @@ pub fn notify_test() -> i32 {
     println!("[2/2] Showing toast ...");
     let mut toast = tauri_winrt_notification::Toast::new(win::AUMID)
         .title(crate::brand::NAME)
-        .text1("通知链路正常：nebula notify-test")
+        .text1("通知链路正常：pebrel notify-test")
         .duration(tauri_winrt_notification::Duration::Short);
     if let Some(icon) = win::icon_path() {
         toast = toast.icon(&icon, tauri_winrt_notification::IconCrop::Square, crate::brand::NAME);
@@ -447,7 +451,7 @@ pub fn notify_test() -> i32 {
     0
 }
 
-/// Windows-only: the Nebula AppUserModelID and its registration.
+/// Windows-only: the Pebrel AppUserModelID and its registration.
 ///
 /// A WinRT toast must be attributed to an AUMID that Windows can resolve to
 /// an app identity, or it silently refuses to show. For an unpackaged app the
@@ -464,9 +468,9 @@ mod win {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
 
-    /// AppUserModelID for Nebula. Toast notifications fire under this identity
-    /// so the system shows "Nebula" instead of "PowerShell" / "cmd.exe".
-    pub const AUMID: &str = "com.nebula.terminal";
+    /// AppUserModelID for Pebrel. Toast notifications fire under this identity
+    /// so the system shows "Pebrel" instead of "PowerShell" / "cmd.exe".
+    pub const AUMID: &str = "com.pebrel.terminal";
 
     /// Ensure the AUMID is registered. Best-effort, cached per process: the
     /// write itself is a few syscalls, there is just no point repeating them
@@ -501,7 +505,7 @@ mod win {
         Ok(())
     }
 
-    /// The materialized icon path, for diagnostics (`nebula notify-test`).
+    /// The materialized icon path, for diagnostics (`pebrel notify-test`).
     pub fn icon_path() -> Option<PathBuf> {
         ensure_icon_file(crate::app_icon::selected())
     }

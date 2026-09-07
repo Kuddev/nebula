@@ -34,6 +34,14 @@ pub(crate) struct PaneExecContext {
 }
 
 impl PaneExecContext {
+    /// Distinguish a host process from WSL, including its default distribution.
+    pub(crate) fn wsl_distribution(&self) -> Option<Option<&str>> {
+        match &self.location {
+            ExecLocation::Host => None,
+            ExecLocation::Wsl { distro } => Some(distro.as_deref()),
+        }
+    }
+
     pub(crate) fn from_pty_options(options: &nebula_terminal::tty::Options) -> Self {
         let location = options
             .shell
@@ -435,6 +443,22 @@ impl Drop for ProcessGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_location_distinguishes_host_default_wsl_and_named_wsl() {
+        let mut options = nebula_terminal::tty::Options::default();
+        assert_eq!(PaneExecContext::from_pty_options(&options).wsl_distribution(), None);
+        options.shell = Some(nebula_terminal::tty::Shell::new("wsl.exe".into(), Vec::new()));
+        assert_eq!(PaneExecContext::from_pty_options(&options).wsl_distribution(), Some(None));
+        options.shell = Some(nebula_terminal::tty::Shell::new(
+            "wsl.exe".into(),
+            vec!["--distribution".into(), "Debian".into()],
+        ));
+        assert_eq!(
+            PaneExecContext::from_pty_options(&options).wsl_distribution(),
+            Some(Some("Debian"))
+        );
+    }
 
     #[test]
     fn bounded_reader_drains_but_keeps_only_the_limit() {

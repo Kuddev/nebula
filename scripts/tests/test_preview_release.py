@@ -47,7 +47,7 @@ class PreviewReleaseTests(unittest.TestCase):
         source = root / "docs/release-notes/v1.5.0-preview.42.md"
         source.parent.mkdir(parents=True)
         source.write_text(
-            "# Nebula Terminal 1.5.0 Preview 42\n\n" + changes +
+            "# Pebrel 1.5.0 Preview 42\n\n" + changes +
             "\n\n## Contributors\n\n- Contributors\n\n"
             "macOS signing / macOS 签名: `adhoc`\n\n---\n\n## SHA256\n\n<!-- PREVIEW_SHA256 -->\n",
             encoding="utf-8",
@@ -215,7 +215,7 @@ class PreviewReleaseTests(unittest.TestCase):
             for name in names:
                 (root / name).write_bytes(b"fixture")
             metadata = {
-                "name": "Nebula Terminal 1.5.0 Preview 42", "tag_name": "preview-v1.5.0-42",
+                "name": "Pebrel 1.5.0 Preview 42", "tag_name": "preview-v1.5.0-42",
                 "prerelease": True, "draft": False, "body": "verified notes",
                 "assets": [{"name": name, "label": "", "state": "uploaded", "size": 7,
                             "digest": f"sha256:{sha256(root / name)}"} for name in names],

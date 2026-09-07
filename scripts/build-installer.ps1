@@ -7,7 +7,7 @@ param(
     [string] $Configuration = 'release',
 
     [ValidateSet('NebulaTerminal', 'Pebrel')]
-    [string] $PackageBrand = 'NebulaTerminal',
+    [string] $PackageBrand = 'Pebrel',
 
     [switch] $SkipBuild,
     # 与 -SkipBuild 联用：跳过「exe 必须比源码新」的陈旧检查。仅用于脚本
@@ -60,8 +60,8 @@ $targetRoot = Join-Path $cargoTargetRoot $Configuration
 $setupPath = Join-Path $outputRoot "$PackageBrand-$Version-windows-x64-setup.exe"
 
 $requiredFiles = @(
-    (Join-Path $targetRoot 'nebula.exe'),
-    (Join-Path $targetRoot 'nebula-hook.exe'),
+    (Join-Path $targetRoot 'pebrel.exe'),
+    (Join-Path $targetRoot 'pebrel-hook.exe'),
     (Join-Path $targetRoot 'conpty.dll'),
     (Join-Path $targetRoot 'OpenConsole.exe'),
     (Join-Path $repo 'README.md'),
@@ -70,8 +70,8 @@ $requiredFiles = @(
     (Join-Path $repo 'docs\lua-configuration.md'),
     (Join-Path $repo 'docs\runtime-control-api.md'),
     (Join-Path $repo 'docs\runtime-api-v1.schema.json'),
-    (Join-Path $repo 'docs\skills\nebula-runtime\SKILL.md'),
-    (Join-Path $repo 'docs\skills\nebula-runtime\agents\openai.yaml'),
+    (Join-Path $repo 'docs\skills\pebrel-runtime\SKILL.md'),
+    (Join-Path $repo 'docs\skills\pebrel-runtime\agents\openai.yaml'),
     (Join-Path $repo 'assets\fonts\MapleMonoNormal-NF-CN-Regular.ttf'),
     (Join-Path $repo 'LICENSE'),
     (Join-Path $repo 'licenses\LICENSE-LUA'),
@@ -88,8 +88,8 @@ if (-not $SkipBuild) {
     $previousTargetDirectory = $env:CARGO_TARGET_DIR
     try {
         $env:CARGO_TARGET_DIR = $cargoTargetRoot
-        $workspaceArgs = @('build', '--workspace', '--exclude', 'nebula')
-        $gpuiArgs = @('build', '-p', 'nebula', '--bin', 'nebula', '--features', 'gpui-shell')
+        $workspaceArgs = @('build', '--workspace', '--exclude', 'nebula', '--locked')
+        $gpuiArgs = @('build', '-p', 'nebula', '--bin', 'pebrel', '--features', 'gpui-shell', '--locked')
         if ($Configuration -eq 'release') {
             $workspaceArgs += '--release'
             $gpuiArgs += '--release'
@@ -113,7 +113,7 @@ if ($missing.Count -ne 0) {
     throw "Required installer files are missing:`n$($missing -join "`n")"
 }
 
-$packagedExe = Join-Path $targetRoot 'nebula.exe'
+$packagedExe = Join-Path $targetRoot 'pebrel.exe'
 if ($PackageBrand -eq 'Pebrel' -and (Get-Item -LiteralPath $packagedExe).VersionInfo.ProductName -ne 'Pebrel') {
     throw 'Pebrel packages require a freshly built Pebrel executable, not renamed Nebula binaries.'
 }
@@ -127,7 +127,7 @@ if (-not $AllowStale) {
     $sourceScopes = @(
         @{ Binary = $packagedExe; Roots = $memberDirs + @(
             (Join-Path $repo 'Cargo.toml'), (Join-Path $repo '..\gpui-component-fork\crates')) },
-        @{ Binary = (Join-Path $targetRoot 'nebula-hook.exe'); Roots = @(
+        @{ Binary = (Join-Path $targetRoot 'pebrel-hook.exe'); Roots = @(
             (Join-Path $repo 'nebula_hook'), (Join-Path $repo 'Cargo.toml')) }
     )
     foreach ($scope in $sourceScopes) {
@@ -153,11 +153,11 @@ if (-not $AllowStale) {
 }
 $helpText = & $packagedExe --help 2>&1 | Out-String
 if ($helpText -notmatch '--gpui') {
-    throw "nebula.exe at $packagedExe is the legacy shell (no --gpui in --help). Rebuild with --features gpui-shell; do not package a workspace-default binary."
+    throw "pebrel.exe at $packagedExe is the legacy shell (no --gpui in --help). Rebuild with --features gpui-shell; do not package a workspace-default binary."
 }
 $versionText = & $packagedExe --version 2>&1 | Out-String
 if ($versionText -notmatch [regex]::Escape($Version)) {
-    throw "nebula.exe reports `"$($versionText.Trim())`" but the installer version is $Version. The staged exe does not match this release."
+    throw "pebrel.exe reports `"$($versionText.Trim())`" but the installer version is $Version. The staged exe does not match this release."
 }
 
 if ($ValidateOnly) {

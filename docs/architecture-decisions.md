@@ -54,6 +54,54 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
   formatting or RTL layouts warrants a separately measured design. See the
   [internationalization contract](internationalization.md).
 
+## ADR-0003 - Pebrel 1.6 identity migration
+
+- **Status:** Requested by the maintainer in this working session, 2026-09-07;
+  implementation and native package verification in progress.
+- **Context:** Display branding alone left users with a Nebula installation
+  directory, executable, command and configuration files. Renaming those interfaces
+  also affects upgrades, stored credentials and managed integrations.
+- **Decision:** Ship `pebrel.exe`, `pebrel-hook.exe`, the `pebrel` command and Pebrel
+  configuration names. Keep the existing Inno AppId to identify the same product.
+  Migrate a registered installation whose final directory component is
+  `Nebula Terminal` to the sibling `Pebrel` directory. Preserve other custom
+  directory names and explicit installer directory choices. Only remove known
+  installer-owned legacy files; preserve unknown files. Copy legacy configuration
+  into the new data directory without overwriting newer files or deleting the
+  source, so absolute imports into the old directory remain valid. Serialize
+  migration with an exclusive lock, publish copied files atomically, and record
+  success only after the copy completes; the success marker prevents subsequent
+  launches from restoring files the user deliberately removed. New configuration
+  takes precedence over legacy data. Migration failures must be visible and
+  retryable. Read old credential and integration identifiers as compatibility
+  inputs, while writing new names.
+- **Repository:** The existing repository was renamed to `Kuddev/pebrel` on
+  2026-09-07, retaining repository ID `1289958986`. GitHub redirects the old
+  repository and Git clone/fetch/push URLs. Keep `Kuddev/nebula` unused so that
+  creating a new repository at that path cannot take over the redirects. GitHub
+  Pages and callers of an action through the old repository name need separate
+  migration; this repository had no Pages site or action manifest at verification.
+- **Boundaries:** Historical release notes, release assets, upstream attribution,
+  source directory names and library crate identifiers are not rewritten as if
+  the old releases had different names. New user-facing artifacts and
+  documentation use Pebrel. Existing Runtime API and hook protocol names remain
+  stable for clients already using them.
+- **Release compatibility:** Old clients select an exact `NebulaTerminal-...` asset
+  name. A future public release needs a compatibility asset containing the same
+  installer bytes until those clients have migrated. Repository redirects do not
+  create aliases for renamed asset filenames. Keep published asset filenames and
+  tags intact when changing the repository name.
+- **Validation:** The installer migration passed 77 isolated native fixture
+  checks and a complete Inno Setup syntax build on 2026-09-07. This covers owned
+  files, custom directories, shortcuts, PATH, locks and retry behavior; it does
+  not stand in for upgrading the user's real installation. Targeted terminal/SSH,
+  config migration and update selection tests, architecture contracts, and a
+  fresh Windows GPUI ZIP/installer build are the remaining release checks.
+  Package tests must use isolated user state. The SSH startup regression checks
+  device-attributes delivery; live Helix behavior still needs user acceptance.
+- **Revisit condition:** Remove compatibility readers only after support for old
+  clients and persisted configurations is explicitly retired.
+
 ## 中文说明
 
 记录重大取舍而非每次小修复；事实与测试能推翻旧决定。规范误伤、安全修复与旧预算冲突时，

@@ -12,7 +12,7 @@ fn appearance_theme_catalog_matches_the_approved_gallery_order() {
         .collect();
     assert_eq!(
         labels,
-        ["Silver", "Nebula", "Steel", "Nord", "Paper", "Moss", "Limestone", "Coal", "Linen"]
+        ["Silver", "Pebrel", "Steel", "Nord", "Paper", "Moss", "Limestone", "Coal", "Linen"]
     );
     assert_eq!(themes.choices(1).len(), 4);
     assert_eq!(themes.choices(2).len(), 5);

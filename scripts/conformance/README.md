@@ -36,14 +36,14 @@ are accepted.
 
 ```powershell
 python scripts/conformance/run.py `
-  --app target/debug/nebula.exe `
+  --app target/debug/pebrel.exe `
   --platform windows-x86_64 `
   --output dist/conformance/windows-report.json
 ```
 
 ```sh
 python3 scripts/conformance/run.py \
-  --app target/release/nebula \
+  --app target/release/pebrel \
   --platform linux-x86_64 \
   --output dist/conformance/linux-report.json
 ```

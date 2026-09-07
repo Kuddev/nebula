@@ -1,6 +1,6 @@
-//! Explicit export of one Nebula provider to Codex CLI configuration.
+//! Explicit export of one Pebrel provider to Codex CLI configuration.
 //!
-//! Nebula normally keeps API keys in the Windows Credential Manager. Codex's
+//! Pebrel normally keeps API keys in the Windows Credential Manager. Codex's
 //! file auth mode consumes `OPENAI_API_KEY` from `auth.json`, so this module is
 //! called only after a second user confirmation and always backs up both live
 //! files before replacing them.
@@ -39,7 +39,7 @@ fn codex_home() -> Option<PathBuf> {
 }
 
 fn provider_key(provider: &AiProvider) -> String {
-    let mut key = String::from("nebula_");
+    let mut key = String::from("pebrel_");
     for character in provider.id.chars() {
         if character.is_ascii_alphanumeric() {
             key.push(character.to_ascii_lowercase());
@@ -52,7 +52,7 @@ fn provider_key(provider: &AiProvider) -> String {
 
 fn backup_path(path: &Path) -> PathBuf {
     let mut name: OsString = path.as_os_str().to_owned();
-    name.push(".nebula.bak");
+    name.push(".pebrel.bak");
     PathBuf::from(name)
 }
 
@@ -145,6 +145,8 @@ mod tests {
         .unwrap();
         std::fs::write(temp.path().join("auth.json"), r#"{"tokens":{"access_token":"keep"}}"#)
             .unwrap();
+        let legacy_backup = temp.path().join("config.toml.nebula.bak");
+        std::fs::write(&legacy_backup, b"previous export backup").unwrap();
         let mut provider = AiProvider::preset(ProviderKind::Custom, "custom-7");
         provider.name = "Example".to_owned();
         provider.base_url = "https://example.test/v1".to_owned();
@@ -157,11 +159,13 @@ mod tests {
         assert!(config.contains("unknown_setting = 7"));
         assert!(config.contains("apps = true"));
         assert!(config.contains("goals = true"));
+        assert!(config.contains("model_provider = \"pebrel_custom_7\""));
         let auth: JsonValue =
             serde_json::from_slice(&std::fs::read(temp.path().join("auth.json")).unwrap()).unwrap();
         assert_eq!(auth["OPENAI_API_KEY"], "sk-secret");
         assert_eq!(auth["tokens"]["access_token"], "keep");
         assert!(backup_path(&temp.path().join("config.toml")).exists());
         assert!(backup_path(&temp.path().join("auth.json")).exists());
+        assert_eq!(std::fs::read(legacy_backup).unwrap(), b"previous export backup");
     }
 }

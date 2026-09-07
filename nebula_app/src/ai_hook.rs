@@ -78,17 +78,22 @@ use serde_json::Value;
 /// Environment variable carrying this instance's pipe name into child shells
 /// (ConPTY merges the current process environment, so setting it process-wide
 /// before the first PTY spawn covers every pane).
-pub const PIPE_ENV: &str = "NEBULA_NOTIFY_PIPE";
+pub const PIPE_ENV: &str = "PEBREL_NOTIFY_PIPE";
+pub const LEGACY_PIPE_ENV: &str = "NEBULA_NOTIFY_PIPE";
 /// Per-pane identity, injected into each pane's PTY environment.
-pub const PANE_ENV: &str = "NEBULA_PANE_ID";
+pub const PANE_ENV: &str = "PEBREL_PANE_ID";
+pub const LEGACY_PANE_ENV: &str = "NEBULA_PANE_ID";
 /// Absolute path of `nebula-hook.exe`, exported so the opencode Bun plugin
 /// (which cannot resolve nebula.exe's install dir on its own) can shell out to
 /// the bridge. Same process-wide scope as [`PIPE_ENV`].
-pub const HOOK_EXE_ENV: &str = "NEBULA_HOOK_EXE";
+pub const HOOK_EXE_ENV: &str = "PEBREL_HOOK_EXE";
+pub const LEGACY_HOOK_EXE_ENV: &str = "NEBULA_HOOK_EXE";
 
 /// Marker locating our entries inside `settings.json` — matches on the
 /// helper's name so entries survive Nebula moving to a new absolute path.
-const HELPER_MARK: &str = "nebula-hook";
+fn contains_helper(value: &str) -> bool {
+    value.contains("pebrel-hook") || value.contains("nebula-hook")
+}
 
 /// The hook entry's argv tail. `claude` is the source discriminator
 /// `nebula-hook` reads from `args[0]`, and it must travel as a real argument:

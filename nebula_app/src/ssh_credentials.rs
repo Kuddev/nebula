@@ -1,6 +1,6 @@
-const ASKPASS_FLAG: &str = "NEBULA_SSH_ASKPASS";
-const DESTINATION_ENV: &str = "NEBULA_SSH_DESTINATION";
-const ATTEMPT_ENV: &str = "NEBULA_SSH_ASKPASS_ATTEMPT";
+const ASKPASS_FLAG: &str = "PEBREL_SSH_ASKPASS";
+const DESTINATION_ENV: &str = "PEBREL_SSH_DESTINATION";
+const ATTEMPT_ENV: &str = "PEBREL_SSH_ASKPASS_ATTEMPT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskpassAction {
@@ -31,7 +31,7 @@ pub fn classify_prompt(prompt: &str) -> AskpassPromptKind {
 }
 
 pub fn credential_target(destination: &str) -> String {
-    format!("Nebula/SSH/{destination}")
+    format!("Pebrel/SSH/{destination}")
 }
 
 pub fn private_key_credential_target(private_key: &[u8]) -> String {
@@ -43,12 +43,17 @@ pub fn private_key_credential_target(private_key: &[u8]) -> String {
     for byte in digest {
         let _ = write!(fingerprint, "{byte:02x}");
     }
-    format!("Nebula/SSH/KeyPassphrase/{fingerprint}")
+    format!("Pebrel/SSH/KeyPassphrase/{fingerprint}")
 }
 
 pub fn is_askpass_env(mut get: impl FnMut(&str) -> Option<String>) -> bool {
-    get(ASKPASS_FLAG).as_deref() == Some("1")
-        && get(DESTINATION_ENV).is_some_and(|destination| !destination.trim().is_empty())
+    askpass_env_value(ASKPASS_FLAG, &mut get).as_deref() == Some("1")
+        && askpass_env_value(DESTINATION_ENV, &mut get)
+            .is_some_and(|destination| !destination.trim().is_empty())
+}
+
+fn askpass_env_value(key: &str, mut get: impl FnMut(&str) -> Option<String>) -> Option<String> {
+    get(key).or_else(|| get(&format!("NEBULA_{}", key.strip_prefix("PEBREL_")?)))
 }
 
 pub fn askpass_action(has_stored_password: bool, attempt_marker_exists: bool) -> AskpassAction {
@@ -203,11 +208,11 @@ pub(crate) mod windows_store {
     }
 
     pub fn load_password(destination: &str) -> io::Result<Option<Vec<u8>>> {
-        load_secret(&credential_target(destination))
+        crate::platform::credentials::load(&credential_target(destination))
     }
 
     pub fn save_password(destination: &str, password: &[u8]) -> io::Result<()> {
-        save_secret(
+        crate::platform::credentials::store_with_username(
             &credential_target(destination),
             username_hint(destination).as_deref().unwrap_or(""),
             password,
@@ -215,7 +220,7 @@ pub(crate) mod windows_store {
     }
 
     pub fn delete_password(destination: &str) -> io::Result<()> {
-        delete_secret(&credential_target(destination))
+        crate::platform::credentials::delete(&credential_target(destination))
     }
 
     pub fn prompt_password(
@@ -283,11 +288,12 @@ pub(crate) mod windows_store {
         if classify_prompt(&prompt) == super::AskpassPromptKind::ConfirmHost {
             return confirm_host(&prompt);
         }
-        let destination = match std::env::var(super::DESTINATION_ENV) {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => return 1,
-        };
-        let marker = std::env::var(super::ATTEMPT_ENV).ok();
+        let destination =
+            match super::askpass_env_value(super::DESTINATION_ENV, |key| std::env::var(key).ok()) {
+                Some(value) if !value.trim().is_empty() => value,
+                _ => return 1,
+            };
+        let marker = super::askpass_env_value(super::ATTEMPT_ENV, |key| std::env::var(key).ok());
         let marker_exists = marker.as_deref().is_some_and(|path| Path::new(path).exists());
         let stored = load_password(&destination).ok().flatten();
         match askpass_action(stored.is_some(), marker_exists) {
@@ -355,7 +361,7 @@ pub(crate) mod windows_store {
             IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_YESNO, MessageBoxW,
         };
         let text = wide(prompt);
-        let title = wide("Nebula SSH");
+        let title = wide("Pebrel SSH");
         let answer = unsafe {
             MessageBoxW(
                 null_mut(),
@@ -459,21 +465,37 @@ mod tests {
 
     #[test]
     fn credential_target_is_stable_and_namespaced() {
-        assert_eq!(credential_target("root@example.com"), "Nebula/SSH/root@example.com");
+        assert_eq!(credential_target("root@example.com"), "Pebrel/SSH/root@example.com");
         assert_eq!(
             credential_target("ssh://admin@example.com:2222"),
-            "Nebula/SSH/ssh://admin@example.com:2222"
+            "Pebrel/SSH/ssh://admin@example.com:2222"
         );
     }
 
     #[test]
     fn askpass_mode_requires_destination_and_flag() {
         let mut env = std::collections::HashMap::new();
-        env.insert("NEBULA_SSH_ASKPASS".to_owned(), "1".to_owned());
+        env.insert("PEBREL_SSH_ASKPASS".to_owned(), "1".to_owned());
         assert!(!is_askpass_env(|key| env.get(key).cloned()));
 
-        env.insert("NEBULA_SSH_DESTINATION".to_owned(), "root@example.com".to_owned());
+        env.insert("PEBREL_SSH_DESTINATION".to_owned(), "root@example.com".to_owned());
         assert!(is_askpass_env(|key| env.get(key).cloned()));
+    }
+
+    #[test]
+    fn old_askpass_launchers_remain_supported_and_explicit_pebrel_values_win() {
+        let mut env = std::collections::HashMap::from([
+            ("NEBULA_SSH_ASKPASS", "1"),
+            ("NEBULA_SSH_DESTINATION", "legacy@example.com"),
+            ("PEBREL_SSH_DESTINATION", "current@example.com"),
+        ]);
+        assert!(is_askpass_env(|key| env.get(key).map(|value| (*value).to_owned())));
+        assert_eq!(
+            askpass_env_value(DESTINATION_ENV, |key| env.get(key).map(|value| (*value).to_owned())),
+            Some("current@example.com".into())
+        );
+        env.insert("PEBREL_SSH_ASKPASS", "0");
+        assert!(!is_askpass_env(|key| env.get(key).map(|value| (*value).to_owned())));
     }
 
     #[test]
@@ -490,7 +512,7 @@ mod tests {
 
         assert_eq!(first, moved);
         assert_ne!(first, changed);
-        assert!(first.starts_with("Nebula/SSH/KeyPassphrase/"));
+        assert!(first.starts_with("Pebrel/SSH/KeyPassphrase/"));
         assert!(!first.contains("Users"));
         assert!(!first.contains(".ssh"));
     }

@@ -10,7 +10,7 @@ Usage: scripts/package-macos.sh --binary PATH --version VERSION --preview-id ID
        [--output-directory DIR] [--force]
        [--sign-identity ID --notary-profile PROFILE [--signing-keychain PATH]]
 
-Builds an ad-hoc-signed Nebula Terminal Preview .app and packages it in a DMG.
+Builds an ad-hoc-signed Pebrel Preview .app and packages it in a DMG.
 Developer ID mode requires both signing and notarization; failures never
 silently downgrade to an ad-hoc signature.
 EOF
@@ -120,7 +120,7 @@ for command in codesign hdiutil iconutil lipo otool plutil shasum sips; do
   fi
 done
 if [[ ! -f "$binary" || ! -x "$binary" ]]; then
-  echo "Nebula binary is missing or not executable: $binary" >&2
+  echo "Pebrel binary is missing or not executable: $binary" >&2
   exit 1
 fi
 
@@ -145,7 +145,7 @@ done
 
 help_text="$("$binary" --help 2>&1)"
 if [[ "$help_text" != *"--gpui"* ]]; then
-  echo "refusing to package a non-GPUI Nebula binary" >&2
+  echo "refusing to package a non-GPUI Pebrel binary" >&2
   exit 1
 fi
 version_text="$("$binary" --version 2>&1)"
@@ -166,7 +166,7 @@ while IFS= read -r dependency; do
 done < <(otool -L "$binary" | tail -n +2 | awk '{print $1}')
 
 release="$version-preview.$preview_id"
-dmg_path="$output_directory/NebulaTerminal-v$release-macos-$architecture.dmg"
+dmg_path="$output_directory/Pebrel-v$release-macos-$architecture.dmg"
 if [[ -e "$dmg_path" && $force -ne 1 ]]; then
   echo "package already exists: $dmg_path (pass --force to replace it)" >&2
   exit 1
@@ -175,7 +175,7 @@ if [[ $force -eq 1 ]]; then
   rm -f -- "$dmg_path"
 fi
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/nebula-macos-package.XXXXXX")"
+work="$(mktemp -d "${TMPDIR:-/tmp}/pebrel-macos-package.XXXXXX")"
 cleanup() {
   if [[ -n "${work:-}" && -d "$work" ]]; then
     rm -rf -- "$work"
@@ -184,19 +184,19 @@ cleanup() {
 trap cleanup EXIT
 
 stage="$work/dmg-root"
-app="$stage/Nebula Terminal Preview.app"
+app="$stage/Pebrel Preview.app"
 contents="$app/Contents"
 resources="$contents/Resources"
 mkdir -p "$contents/MacOS" "$resources/docs" "$resources/licenses"
-install -m 0755 "$binary" "$contents/MacOS/nebula"
+install -m 0755 "$binary" "$contents/MacOS/pebrel"
 install -m 0644 "$plist_source" "$contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$contents/Info.plist"
 plutil -replace CFBundleVersion -string "$build_number" "$contents/Info.plist"
 plutil -replace CFBundleGetInfoString -string \
-  "Nebula Terminal $version Preview $preview_id" "$contents/Info.plist"
+  "Pebrel $version Preview $preview_id" "$contents/Info.plist"
 plutil -lint "$contents/Info.plist"
 
-iconset="$work/nebula.iconset"
+iconset="$work/pebrel.iconset"
 mkdir -p "$iconset"
 while read -r pixels filename; do
   sips -z "$pixels" "$pixels" "$icon_source" --out "$iconset/$filename" >/dev/null
@@ -212,7 +212,7 @@ done <<'EOF'
 512 icon_512x512.png
 1024 icon_512x512@2x.png
 EOF
-iconutil -c icns "$iconset" -o "$resources/nebula.icns"
+iconutil -c icns "$iconset" -o "$resources/pebrel.icns"
 
 install -m 0644 "$repo/README.md" "$resources/docs/README.md"
 install -m 0644 "$repo/CHANGELOG.md" "$resources/docs/CHANGELOG.md"
@@ -236,18 +236,18 @@ else
 fi
 codesign --verify --deep --strict --verbose=2 "$app"
 if [[ "$(plutil -extract CFBundleIdentifier raw -o - "$contents/Info.plist")" != \
-      "io.github.kuddev.nebula.preview" ]]; then
+      "io.github.kuddev.pebrel.preview" ]]; then
   echo "application bundle identifier verification failed" >&2
   exit 1
 fi
-if [[ "$(lipo -archs "$contents/MacOS/nebula")" != "$expected_uname" ]]; then
+if [[ "$(lipo -archs "$contents/MacOS/pebrel")" != "$expected_uname" ]]; then
   echo "packaged Mach-O architecture verification failed" >&2
   exit 1
 fi
 
 ln -s /Applications "$stage/Applications"
 hdiutil create \
-  -volname "Nebula Terminal Preview" \
+  -volname "Pebrel Preview" \
   -srcfolder "$stage" \
   -ov \
   -format UDZO \

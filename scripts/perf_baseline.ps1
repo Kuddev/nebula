@@ -2,7 +2,7 @@
 # 在终端内部自计时（cmd /c type 大文件），量吞吐与内存，追加到 CSV。
 #
 # 用法:
-#   .\scripts\perf_baseline.ps1 -Exe <nebula.exe> -Tag winit-old -ExeArgs '--working-directory D:\temp_build\nebula'
+#   .\scripts\perf_baseline.ps1 -Exe <pebrel.exe> -Tag winit-old -ExeArgs '--working-directory D:\temp_build\nebula'
 #   .\scripts\perf_baseline.ps1 -Exe <nebula-gpui.exe> -Tag gpui-lab
 #
 # 方法论:

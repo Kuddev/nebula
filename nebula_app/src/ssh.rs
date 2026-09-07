@@ -126,7 +126,7 @@ pub fn ssh_destination(line: &str) -> Option<String> {
     // Program identity, path/extension-normalized (`/usr/bin/ssh`,
     // `ssh.exe`); `nebula ssh …` counts too — same wrapper, same semantics.
     let mut program = crate::display::extract_program(tokens.next()?)?;
-    if program == "nebula" {
+    if matches!(program.as_str(), "pebrel" | "nebula") {
         if tokens.next() != Some("ssh") {
             return None;
         }
@@ -516,15 +516,15 @@ pub fn build_askpass_env(
     session_id: u64,
 ) -> SshAskpassEnv {
     let attempt_path = std::env::temp_dir()
-        .join(format!("nebula-ssh-askpass-{}-{session_id}.flag", std::process::id()));
+        .join(format!("pebrel-ssh-askpass-{}-{session_id}.flag", std::process::id()));
     let _ = std::fs::remove_file(&attempt_path);
     let mut values = std::collections::HashMap::new();
     values.insert("SSH_ASKPASS".into(), exe.to_string_lossy().into_owned());
     values.insert("SSH_ASKPASS_REQUIRE".into(), "force".into());
-    values.insert("DISPLAY".into(), "nebula".into());
-    values.insert("NEBULA_SSH_ASKPASS".into(), "1".into());
-    values.insert("NEBULA_SSH_DESTINATION".into(), destination.into());
-    values.insert("NEBULA_SSH_ASKPASS_ATTEMPT".into(), attempt_path.display().to_string());
+    values.insert("DISPLAY".into(), "pebrel".into());
+    values.insert("PEBREL_SSH_ASKPASS".into(), "1".into());
+    values.insert("PEBREL_SSH_DESTINATION".into(), destination.into());
+    values.insert("PEBREL_SSH_ASKPASS_ATTEMPT".into(), attempt_path.display().to_string());
     SshAskpassEnv { values, attempt_path }
 }
 
@@ -615,7 +615,7 @@ pub fn run(args: Vec<String>) -> i32 {
     let result = match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("nebula ssh: failed to launch ssh: {e}");
+            eprintln!("pebrel ssh: failed to launch ssh: {e}");
             1
         },
     };
@@ -691,6 +691,8 @@ mod tests {
         assert_eq!(d("  ssh.exe   user@host  "), Some("user@host".into()));
         assert_eq!(d("/usr/bin/ssh host"), Some("host".into()));
         assert_eq!(d("nebula ssh host"), Some("host".into()));
+        assert_eq!(d("pebrel ssh host"), Some("host".into()));
+        assert_eq!(d("pebrel.exe ssh -- user@host"), Some("user@host".into()));
         assert_eq!(d("ssh -i key -t user@host"), Some("user@host".into()));
         assert_eq!(d("ssh -J jump user@host"), Some("user@host".into()));
         assert_eq!(d("ssh -- host"), Some("host".into()));
@@ -713,6 +715,7 @@ mod tests {
         assert_eq!(d(""), None);
         assert_eq!(d("vim notes.md"), None);
         assert_eq!(d("nebula run x"), None);
+        assert_eq!(d("pebrel run x"), None);
         assert_eq!(d("ssh"), None); // no destination
         assert_eq!(d("ssh -p 2222"), None);
         assert_eq!(d("ssh host ls -la"), None); // explicit remote command
@@ -762,21 +765,22 @@ mod tests {
     #[test]
     fn ssh_pane_launch_sets_askpass_environment() {
         let launch = build_askpass_env(
-            std::path::Path::new(r"C:\Nebula\nebula.exe"),
+            std::path::Path::new(r"C:\Pebrel\pebrel.exe"),
             "alice@example.com",
             42,
         );
         assert_eq!(
             launch.values.get("SSH_ASKPASS").map(String::as_str),
-            Some(r"C:\Nebula\nebula.exe")
+            Some(r"C:\Pebrel\pebrel.exe")
         );
         assert_eq!(launch.values.get("SSH_ASKPASS_REQUIRE").map(String::as_str), Some("force"));
-        assert_eq!(launch.values.get("NEBULA_SSH_ASKPASS").map(String::as_str), Some("1"));
+        assert_eq!(launch.values.get("PEBREL_SSH_ASKPASS").map(String::as_str), Some("1"));
         assert_eq!(
-            launch.values.get("NEBULA_SSH_DESTINATION").map(String::as_str),
+            launch.values.get("PEBREL_SSH_DESTINATION").map(String::as_str),
             Some("alice@example.com")
         );
-        assert!(launch.values["NEBULA_SSH_ASKPASS_ATTEMPT"].contains("42"));
+        assert!(launch.values["PEBREL_SSH_ASKPASS_ATTEMPT"].contains("42"));
+        assert!(launch.values.keys().all(|key| !key.starts_with("NEBULA_")));
     }
 
     #[test]

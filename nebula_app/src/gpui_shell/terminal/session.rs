@@ -165,6 +165,7 @@ pub fn spawn_ssh(
     window_size: WindowSize,
     term_config: Config,
 ) -> std::io::Result<SpawnedSession> {
+    let term_config = crate::ssh_session::terminal_config(term_config);
     let (tx, rx) = unbounded();
     let (stage_tx, stage_rx) = unbounded();
     let proxy = EventProxy { events: tx, stages: stage_tx };

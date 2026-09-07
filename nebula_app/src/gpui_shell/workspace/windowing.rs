@@ -245,7 +245,7 @@ pub(crate) fn open_initial_window(
         true,
         WindowRole::Regular,
     )
-    .expect("failed to open Nebula GPUI window");
+    .expect("failed to open Pebrel GPUI window");
 }
 
 fn workspace_window_options(cx: &mut App, focus: bool, role: WindowRole) -> WindowOptions {
@@ -256,7 +256,7 @@ fn workspace_window_options(cx: &mut App, focus: bool, role: WindowRole) -> Wind
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(760.0), px(540.0))),
                 titlebar: Some(TitleBar::title_bar_options()),
-                app_id: Some("nebula".to_owned()),
+                app_id: Some("pebrel".to_owned()),
                 window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
                 focus,
                 ..Default::default()
@@ -280,7 +280,7 @@ fn workspace_window_options(cx: &mut App, focus: bool, role: WindowRole) -> Wind
                 // 与旧壳一致：无系统标题栏，但保留 Nebula 自绘标题栏及三枚
                 // 窗口按钮。TitleBar options 负责 Windows 客户区命中测试。
                 titlebar: Some(TitleBar::title_bar_options()),
-                app_id: Some("nebula-quick-terminal".to_owned()),
+                app_id: Some("pebrel-quick-terminal".to_owned()),
                 window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
                 focus: false,
                 show: false,

@@ -62,7 +62,7 @@ Add-Type -MemberDefinition '[DllImport("shcore.dll")] public static extern int S
 [void][W2.Dpi]::SetProcessDpiAwareness(2)
 
 if ($ProcId -eq 0) {
-    $p = Start-Process "D:\temp_build\nebula\target\release\nebula.exe" -ArgumentList '--working-directory','D:\temp_build' -PassThru
+    $p = Start-Process "D:\temp_build\nebula\target\release\pebrel.exe" -ArgumentList '--working-directory','D:\temp_build' -PassThru
     Start-Sleep -Seconds 6
     $p.Refresh()
     Write-Output "started pid=$($p.Id)"

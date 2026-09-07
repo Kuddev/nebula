@@ -102,7 +102,7 @@ impl DirectoryHistory {
         if missing {
             import_legacy_history(
                 &mut database,
-                &crate::display::nebula_data_dir().join("nebula_history.jsonl"),
+                &crate::display::nebula_data_dir().join(crate::nebula_history::LOCAL_HISTORY_FILE),
             );
             database.age_and_limit(current_time());
             if !database.entries.is_empty() {

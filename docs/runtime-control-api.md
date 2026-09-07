@@ -1,6 +1,6 @@
-# Nebula Runtime Control API v1
+# Pebrel Runtime Control API v1
 
-Nebula 的运行时控制面把 GUI、CLI、Agent 与未来插件统一到同一个状态权威。CLI 不会直接
+Pebrel 的运行时控制面把 GUI、CLI、Agent 与未来插件统一到同一个状态权威。CLI 不会直接
 读取窗口内部结构，也不会从终端标题猜测 Pane 状态；它和其他客户端一样，通过本机回环
 连接发送带版本的 JSON Lines 请求，所有窗口、Tab 与 PTY 写操作再进入当前 UI 壳的 owner
 线程执行；Git worktree 准备留在 Runtime 客户端工作线程，不阻塞 GPUI。
@@ -22,26 +22,30 @@ Nebula 的运行时控制面把 GUI、CLI、Agent 与未来插件统一到同一
 
 ## 环境契约
 
-Nebula 打开的每个**本地** pane 都带上下面这些变量。pane 里的进程据此回答"我在哪、控制面在哪"，
+Pebrel 打开的每个**本地** pane 都带上下面这些变量。pane 里的进程据此回答"我在哪、控制面在哪"，
 不必扫进程树、读端口文件或 grep 源码：
 
 | 变量 | 含义 |
 |---|---|
-| `TERM_PROGRAM=nebula` | 外面这层终端是 Nebula。沿用终端生态的事实标准入口，第三方工具的既有识别逻辑不必改代码 |
-| `TERM_PROGRAM_VERSION` | Nebula 版本 |
-| `NEBULA_PANE_ID` | 调用者所在 pane。AI hook 用同一个值给回合状态定位 tab 圆点 |
-| `NEBULA_CLI` | 提供控制面的那个可执行文件的绝对路径。便携版不一定在 `PATH` 上，所以给精确路径 |
-| `NEBULA_BIN_DIR` | 上者所在目录，同时被**前置**到 `PATH`，因此裸 `nebula` 也可用 |
-| `NEBULA_PANE_REMOTE=1` | 这是 SSH pane。见下 |
+| `TERM_PROGRAM=pebrel` | 外面这层终端是 Pebrel；识别旧版 `nebula` 的第三方工具应同时接受新值 |
+| `TERM_PROGRAM_VERSION` | Pebrel 版本 |
+| `PEBREL_PANE_ID` | 调用者所在 pane。AI hook 用同一个值给回合状态定位 tab 圆点 |
+| `PEBREL_CLI` | 提供控制面的那个可执行文件的绝对路径。便携版不一定在 `PATH` 上，所以给精确路径 |
+| `PEBREL_BIN_DIR` | 上者所在目录，同时被**前置**到 `PATH`，因此裸 `pebrel` 也可用 |
+| `PEBREL_PANE_REMOTE=1` | 这是 SSH pane。见下 |
+
+1.6 同时导出对应的 `NEBULA_*` 兼容别名；显式提供的 `PEBREL_*` 值优先。
+连接旧版 Nebula 时，可在新变量缺失时使用旧版导出的 `NEBULA_CLI` 与 `NEBULA_PANE_ID`。
+CLI 路径由环境给出，调用方无需根据展示名称猜测文件名。
 
 实现在 `nebula_app/src/agent_env.rs`，两个壳共用同一个 `apply()`。三条设计约束：
 
-1. **只进本地 PTY。** SSH pane 注入的是 `NEBULA_PANE_REMOTE=1`，不给 `NEBULA_CLI`/`NEBULA_BIN_DIR`
+1. **只进本地 PTY。** SSH pane 注入的是 `PEBREL_PANE_REMOTE=1`，不给 `PEBREL_CLI`/`PEBREL_BIN_DIR`
    ——远端主机上没有这个二进制，把本机绝对路径送过去只会造出一个"变量有了但永远执行不了"的伪能力，
    还会绕开远端 pane 不得取用本地上下文的护栏。
-2. **幂等。** 在 Nebula 的 pane 里再开一个 Nebula 是常规操作（嵌套 shell、`wsl.exe`、隔离实例）。
+2. **幂等。** 在 Pebrel 的 pane 里再开一个 Pebrel 是常规操作（嵌套 shell、`wsl.exe`、隔离实例）。
    `PATH` 前置与 `WSLENV` 追加都按值判重，套多少层环境块都不增长。
-3. **WSL 透传。** `WSLENV` 里带 `NEBULA_CLI/p`、`NEBULA_BIN_DIR/p`——`/p` 让 WSL 把 Windows
+3. **WSL 透传。** `WSLENV` 里带 `PEBREL_CLI/p`、`PEBREL_BIN_DIR/p`——`/p` 让 WSL 把 Windows
    路径翻成 `/mnt/...`，否则来宾 shell 拿到的是一个执行不了的 `D:\…` 字面量。合并以环境表里的
    现值为基准，因此与 `shell_detect::wsl_cwd_report_env` 的 cwd 上报条目互不覆盖。
 
@@ -49,8 +53,8 @@ Nebula 打开的每个**本地** pane 都带上下面这些变量。pane 里的�
 `features: ["env.pane_identity", "cli.resource_verbs"]` 供旧版本探测后回落。
 
 环境契约解决的是**可达性**，不是**该不该调**。后者属于 Skill
-（`docs/skills/nebula-runtime/SKILL.md`）。两者不能互相替代：没有契约，Skill 里写的命令是空头
-承诺；把发现层全押在 Skill 上（用户得手工安装一段提示词）则是不可靠的单点——所以 `nebula env`
+（`docs/skills/pebrel-runtime/SKILL.md`）。两者不能互相替代：没有契约，Skill 里写的命令是空头
+承诺；把发现层全押在 Skill 上（用户得手工安装一段提示词）则是不可靠的单点——所以 `pebrel env`
 本身也是发现入口，见下节。
 
 ## CLI
@@ -61,27 +65,27 @@ Nebula 打开的每个**本地** pane 都带上下面这些变量。pane 里的�
 同 `kubectl` / `docker` / `gh`）而不是自造词：别人看一眼就知道在做什么，比"短"更重要。
 
 ```powershell
-nebula env --pretty                              # 我是谁、控制面在哪、有哪些命令
+pebrel env --pretty                              # 我是谁、控制面在哪、有哪些命令
 
-nebula pane list                                 # 所有 pane 压平成一维行
-nebula pane read 17 --lines 80                   # 读某个 pane 的 Grid 尾部
-nebula pane send 17 "cargo test" --wait          # 写一行并回车，然后等它跑完
-nebula pane paste 17 --from-file task.txt --wait # 以 bracketed paste 发送有界多行文本
-nebula pane wait 17 --after-seq 41               # 等某个 pane 静下来
-nebula pane exec 17 -- cargo test                # 独立非 TTY 子进程，不改交互 shell 状态
-nebula pane zoom 17 --zoomed true                # 显式缩放，不用 toggle
-nebula pane resize 17 0.60                       # 修改直接父分屏中的目标占比
+pebrel pane list                                 # 所有 pane 压平成一维行
+pebrel pane read 17 --lines 80                   # 读某个 pane 的 Grid 尾部
+pebrel pane send 17 "cargo test" --wait          # 写一行并回车，然后等它跑完
+pebrel pane paste 17 --from-file task.txt --wait # 以 bracketed paste 发送有界多行文本
+pebrel pane wait 17 --after-seq 41               # 等某个 pane 静下来
+pebrel pane exec 17 -- cargo test                # 独立非 TTY 子进程，不改交互 shell 状态
+pebrel pane zoom 17 --zoomed true                # 显式缩放，不用 toggle
+pebrel pane resize 17 0.60                       # 修改直接父分屏中的目标占比
 
-nebula agent list                                # 只有 AI CLI 的 pane
-nebula agent send codex "修复登录回归" --wait    # 派任务并提交，然后等这一轮结束
-nebula agent delegate codex "检查 vc skill"       # 派任务，完成后自动回传到当前 Agent 会话
-nebula agent paste codex --from-file task.txt    # generation 绑定的多行任务输入
-nebula agent read codex --lines 80               # 读它最近打印了什么
-nebula agent wait codex --after-seq 41           # 等它这一轮结束
+pebrel agent list                                # 只有 AI CLI 的 pane
+pebrel agent send codex "修复登录回归" --wait    # 派任务并提交，然后等这一轮结束
+pebrel agent delegate codex "检查 vc skill"       # 派任务，完成后自动回传到当前 Agent 会话
+pebrel agent paste codex --from-file task.txt    # generation 绑定的多行任务输入
+pebrel agent read codex --lines 80               # 读它最近打印了什么
+pebrel agent wait codex --after-seq 41           # 等它这一轮结束
 
-nebula window close 3                            # 关闭空闲窗口
-nebula tab rename 2 tests --window 3             # 按窗口内零基索引重命名 tab
-nebula tab move 2 0 --window 3                   # 同一窗口内移动 tab
+pebrel window close 3                            # 关闭空闲窗口
+pebrel tab rename 2 tests --window 3             # 按窗口内零基索引重命名 tab
+pebrel tab move 2 0 --window 3                   # 同一窗口内移动 tab
 ```
 
 它们是完整协议的**薄别名**：同一个请求函数、同一套响应信封、同样的 generation 与 `after_seq`
@@ -89,11 +93,11 @@ nebula tab move 2 0 --window 3                   # 同一窗口内移动 tab
 
 `pane` 与 `agent` 分成两个资源不只是为了好读——它们走的是**不同**的协议方法。Agent 路径带
 generation 绑定（Codex 退出重开后不会把任务投给新会话），pane 路径没有这层保护。用两个资源名把
-这条边界摆在命令行上，比塞进一个参数再靠前缀区分要难错得多：pane 用 `nebula pane list` 给出的
-数字 id，Agent 用 `nebula agent list` 给出的名字或稳定 id。
+这条边界摆在命令行上，比塞进一个参数再靠前缀区分要难错得多：pane 用 `pebrel pane list` 给出的
+数字 id，Agent 用 `pebrel agent list` 给出的名字或稳定 id。
 
-`nebula env` 是发现层的实体：环境那半段**不依赖 runtime**，即使控制面没起来、端口文件过期、
-或这根本不是 Nebula 的 pane，命令仍然成功返回并如实说明缺什么。一个探测命令若在"没连上"时整体
+`pebrel env` 是发现层的实体：环境那半段**不依赖 runtime**，即使控制面没起来、端口文件过期、
+或这根本不是 Pebrel 的 pane，命令仍然成功返回并如实说明缺什么。一个探测命令若在"没连上"时整体
 失败，调用方唯一能学到的就是"不知道"，只好去猜。它还随响应回报完整命令清单，每条给**可直接
 复制执行**的样例而不是抽象签名——模型照抄一条完整命令的成功率远高于自己按参数表拼装。
 
@@ -102,34 +106,34 @@ generation 绑定（Codex 退出重开后不会把任务投给新会话），pan
 `--wait` 是逻辑矛盾（没提交等什么），由参数解析直接拒绝，不会执行一半再静默停下。
 
 `agent send` 与 `agent delegate` 的结果合同不同：前者只负责投递（可选同步等待），后者从
-`NEBULA_PANE_ID` 记录调用 Agent 的位置和会话身份，登记并提交成功后立即返回。目标 Agent 的
-完成 Hook 到达后，Nebula 把最多 4000 字符的结构化最终消息作为不可信 `worker_output` 自动提交
+`PEBREL_PANE_ID` 记录调用 Agent 的位置和会话身份，登记并提交成功后立即返回。目标 Agent 的
+完成 Hook 到达后，Pebrel 把最多 4000 字符的结构化最终消息作为不可信 `worker_output` 自动提交
 给原 Agent，由它向用户总结。回传只认原 pane 中的同一 managed generation，或普通 Agent 的
 同一 provider session；不会退回当前焦点，也不会把旧任务交给同 pane 中后来启动的新会话。
 
 ### 完整协议
 
 ```powershell
-nebula ctl describe --pretty
-nebula ctl snapshot --pretty
-nebula ctl orchestrate --file workflow.json --timeout-ms 30000 --pretty
-nebula ctl agents --pretty
-nebula ctl agent-fork --window <WINDOW_ID> --source-pane <PANE_ID> --name login-fixer --kind codex --pretty
-nebula ctl agent-get --agent login-fixer --pretty
-nebula ctl agent-prompt --agent login-fixer --generation 1 --text "修复登录回归" --pretty
-nebula ctl agent-wait --agent login-fixer --generation 1 --state settled --timeout-ms 300000 --pretty
-nebula ctl agent-read --agent login-fixer --generation 1 --lines 120 --pretty
-nebula ctl read --window <WINDOW_ID> --pane <PANE_ID> --lines 120 --pretty
-nebula ctl procs --window <WINDOW_ID> --pane <PANE_ID> --pretty
-nebula ctl send-key --window <WINDOW_ID> --pane <PANE_ID> --key c --control --pretty
-nebula ctl run --window <WINDOW_ID> --pane <PANE_ID> --command "cargo test" --pretty
-nebula ctl exec-pane --window <WINDOW_ID> --pane <PANE_ID> -- cargo test --workspace
-nebula ctl focus --window <WINDOW_ID> --pane <PANE_ID>
-nebula ctl new-tab --window <WINDOW_ID>
-nebula ctl split --window <WINDOW_ID> --direction right
-nebula ctl prompt --window <WINDOW_ID> --pane <PANE_ID> --text "检查当前构建" --wait settled
-nebula ctl wait --window <WINDOW_ID> --pane <PANE_ID> --state attention --timeout-ms 300000
-nebula ctl subscribe --since <REVISION>
+pebrel ctl describe --pretty
+pebrel ctl snapshot --pretty
+pebrel ctl orchestrate --file workflow.json --timeout-ms 30000 --pretty
+pebrel ctl agents --pretty
+pebrel ctl agent-fork --window <WINDOW_ID> --source-pane <PANE_ID> --name login-fixer --kind codex --pretty
+pebrel ctl agent-get --agent login-fixer --pretty
+pebrel ctl agent-prompt --agent login-fixer --generation 1 --text "修复登录回归" --pretty
+pebrel ctl agent-wait --agent login-fixer --generation 1 --state settled --timeout-ms 300000 --pretty
+pebrel ctl agent-read --agent login-fixer --generation 1 --lines 120 --pretty
+pebrel ctl read --window <WINDOW_ID> --pane <PANE_ID> --lines 120 --pretty
+pebrel ctl procs --window <WINDOW_ID> --pane <PANE_ID> --pretty
+pebrel ctl send-key --window <WINDOW_ID> --pane <PANE_ID> --key c --control --pretty
+pebrel ctl run --window <WINDOW_ID> --pane <PANE_ID> --command "cargo test" --pretty
+pebrel ctl exec-pane --window <WINDOW_ID> --pane <PANE_ID> -- cargo test --workspace
+pebrel ctl focus --window <WINDOW_ID> --pane <PANE_ID>
+pebrel ctl new-tab --window <WINDOW_ID>
+pebrel ctl split --window <WINDOW_ID> --direction right
+pebrel ctl prompt --window <WINDOW_ID> --pane <PANE_ID> --text "检查当前构建" --wait settled
+pebrel ctl wait --window <WINDOW_ID> --pane <PANE_ID> --state attention --timeout-ms 300000
+pebrel ctl subscribe --since <REVISION>
 ```
 
 一次性命令输出一个完整响应 Envelope。`subscribe` 输出 JSON Lines：第一行是订阅确认，随后
@@ -146,7 +150,7 @@ Pane ID 当前在 Window 内稳定，而不是进程内全局唯一。存在多�
 | `runtime.snapshot` | 读取完整运行时投影 | 无 |
 | `runtime.orchestrate` | 一次提交强类型布局、PTY、命令与 Agent 首任务工作流 | `steps`, `on_error?` |
 | `events.subscribe` | 从 revision 开始订阅状态变化 | `since_revision?` |
-| `agents.list` | 只列出 Nebula 已识别的 Agent Pane、会话身份、状态和证据来源 | `window_id?` |
+| `agents.list` | 只列出 Pebrel 已识别的 Agent Pane、会话身份、状态和证据来源 | `window_id?` |
 | `agent.start` | 在新 Tab 或指定既有 Pane 中启动命名 Agent | `window_id?`, `pane_id?`, `name`, `kind`, `cwd?`, `resume_session_id?` |
 | `agent.fork` | 事务化创建独立 Git branch/worktree，再启动命名 Agent | `source_pane_id?`/`source_cwd?`, `name`, `kind`, `branch?`, `base?`, `path?`, `allow_dirty_source?` |
 | `agent.get` | 按稳定 id 或名称解析 Agent generation 与 worktree provenance | `agent`, `generation?` |
@@ -240,12 +244,12 @@ Cursor 的实际可执行文件名是 `agent`。恢复/会话分叉只在对应 
    `source_cwd`。SSH Pane 明确返回 `remote_worktree_unsupported`。
 2. 校验 Git、source dirty 状态、base commit、branch 与目标路径。默认拒绝 dirty source；
    只有调用者明确传 `allow_dirty_source: true` 才跳过该检查。
-3. 在 Runtime 工作线程创建新 branch 与 worktree。默认 branch 为 `nebula/<agent-slug>`，默认
+3. 在 Runtime 工作线程创建新 branch 与 worktree。默认 branch 为 `pebrel/<agent-slug>`，默认
    目录为主仓库同级的 `<repo>-worktrees/<agent-slug>`；既存 branch/path 都返回冲突，不覆盖。
 4. 把新 worktree 作为 cwd 交给真实 Tab/PTY 创建链，注册 Agent，再发送经过验证的启动命令。
 
 成功响应和之后的 `agent.get` 都包含同一份 `worktree`：`repo_root`、`source_root`、`path`、
-`branch`、`base_commit`、`created`。创建 Tab 或启动 Agent 明确失败时，Nebula 只删除本次事务
+`branch`、`base_commit`、`created`。创建 Tab 或启动 Agent 明确失败时，Pebrel 只删除本次事务
 确认创建成功的 worktree 与 branch；已有目录、已有分支和用户其他 worktree 不在回滚范围。
 若 UI dispatch 超时，结果处于未知态，服务端返回 `runtime_timeout`、
 `details.cleanup_deferred=true` 和 worktree provenance，并保留 checkout，避免晚到的 Tab 使用
@@ -257,7 +261,7 @@ Cursor 的实际可执行文件名是 `agent`。恢复/会话分叉只在对应 
 
 `agent.delegate` 是 Agent 间需要自动回传时的专用方法。服务端先验证 `origin_pane_id` 当前确实
 运行着可稳定识别的 Agent，再把目标解析成精确 `agent_id + generation`，最后复用
-`agent.prompt` 的真实 PTY 投递路径。Provider 的完成 Hook 不含 Nebula task id，因此同一目标
+`agent.prompt` 的真实 PTY 投递路径。Provider 的完成 Hook 不含 Pebrel task id，因此同一目标
 generation 同时只允许一个委派；重复完成事件在首个事件消费 pending task 后不会再次回传。
 回调若早于发起方自己的回合结束，会先排队并由 Agent 状态看门狗重试；`running` 会继续等待，
 `attention`/`waiting_input` 不会被自动输入覆盖。发起 pane 关闭、provider session 被替换或
@@ -281,7 +285,7 @@ managed generation 改变时，旧回调直接丢弃，不会寻找替代 pane�
 
 ## Agent 状态与终端读取
 
-`RuntimePane.agent` 只在 Nebula 能把当前程序归一为已知 AI CLI 时出现；普通长命令不会被
+`RuntimePane.agent` 只在 Pebrel 能把当前程序归一为已知 AI CLI 时出现；普通长命令不会被
 误列为 Agent。Agent 对象包含规范化 `kind`、显示名、hook 上报的可选 `session_id`，以及
 `state_source`：
 
@@ -326,7 +330,7 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 2. 把它作为 `after_seq` 传给 `pane.wait`，服务端就只承认 `state_change_seq > after_seq`
    的观察结果。
 
-`nebula ctl prompt --wait` 已经在内部串好这两步。独立调用 `nebula ctl wait` 时需自己传
+`pebrel ctl prompt --wait` 已经在内部串好这两步。独立调用 `pebrel ctl wait` 时需自己传
 `--after-seq`；
 省略则退回「立即匹配当前状态」的旧语义，仅适合观察一个已在运行的 Pane。
 
@@ -338,6 +342,7 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 
 请求必须声明 `protocol: "nebula.runtime"` 和 `version: 1`。协议名或版本不匹配时，服务端
 返回 `protocol_version_mismatch`，并在 `details.supported_versions` 中列出可用版本。
+此协议标识为旧客户端保留；Pebrel 名称、命令与环境变量的迁移不改变现有 v1 通信协议。
 
 常见机器可读错误码包括：
 
@@ -355,7 +360,7 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 - `delegation_in_progress`：同一目标 generation 已有一个等待完成 Hook 的委派。
 - `agent_ready_timeout`：Agent 未在期限内完成进程身份观察与启动就绪握手。
 - `dirty_source`：`agent.fork` 的源工作树有未提交变更，且调用者未显式允许。
-- `branch_conflict` / `worktree_path_conflict`：目标分支或目录已存在；Nebula 不覆盖。
+- `branch_conflict` / `worktree_path_conflict`：目标分支或目录已存在；Pebrel 不覆盖。
 - `git_unavailable` / `invalid_base` / `invalid_branch`：Git 能力或 revision/ref 校验失败。
 - `remote_worktree_unsupported`：本地 Runtime 不能替 SSH Pane 创建远端 Git worktree。
 - `remote_process_unavailable`：本地 Runtime 不能从 SSH 传输进程推导远端进程树。
@@ -367,7 +372,7 @@ Shell/hook 结束事件归位；因此即使命令在 120ms Runtime pump 的两�
 
 ## 本机边界
 
-服务端只监听 `127.0.0.1`，发现文件位于 Nebula 数据目录下的 `runtime.port`，其中包含随机
+服务端只监听 `127.0.0.1`，发现文件位于 Pebrel 数据目录下的 `runtime.port`，其中包含随机
 token。无 token 的连接会被静默丢弃。该边界用于阻止其他本机用户误调用，不承诺抵御已经
 能读取当前用户文件或注入当前用户进程的攻击者。
 

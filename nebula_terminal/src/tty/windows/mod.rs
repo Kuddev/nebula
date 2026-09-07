@@ -199,18 +199,33 @@ fn nebula_data_dir() -> PathBuf {
     // The GUI and the injected shell prompt must read the same settings file.
     // Portable runs set this override on the parent process; falling back to
     // APPDATA preserves the normal installed-layout behavior.
-    if let Some(path) = std::env::var_os("NEBULA_CONFIG_DIR").filter(|path| !path.is_empty()) {
+    if let Some(path) = ["PEBREL_CONFIG_DIR", "NEBULA_CONFIG_DIR"]
+        .into_iter()
+        .find_map(|name| std::env::var_os(name).filter(|path| !path.is_empty()))
+    {
         return PathBuf::from(path);
     }
     std::env::var_os("APPDATA")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()).map(PathBuf::from)
+        })
         .unwrap_or_else(std::env::temp_dir)
-        .join("Nebula")
+        .join("Pebrel")
 }
 
 fn nebula_settings_value(key: &str) -> Option<String> {
-    let data = std::fs::read_to_string(nebula_data_dir().join("nebula_settings.txt")).ok()?;
+    let directory = nebula_data_dir();
+    let data = std::fs::read_to_string(directory.join("pebrel_settings.txt"))
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                std::fs::read_to_string(directory.join("nebula_settings.txt"))
+            } else {
+                Err(error)
+            }
+        })
+        .ok()?;
     data.lines().find_map(|line| {
         let (k, v) = line.split_once('=')?;
         (k.trim().eq_ignore_ascii_case(key)).then(|| v.trim().to_owned())
@@ -314,15 +329,22 @@ $global:NebFolderIcon = [char]0xE70F
 $global:NebGitBranchIcon = [char]0xF418
 $global:NebClockIcon = [char]0xF017
 $global:NebulaPromptCount = 0
-$global:NebulaSettingsFile = if ($env:NEBULA_CONFIG_DIR) {
-    Join-Path $env:NEBULA_CONFIG_DIR 'nebula_settings.txt'
+$global:PebrelSettingsFile = if ($env:PEBREL_CONFIG_DIR) {
+    Join-Path $env:PEBREL_CONFIG_DIR 'pebrel_settings.txt'
+} elseif ($env:NEBULA_CONFIG_DIR) {
+    Join-Path $env:NEBULA_CONFIG_DIR 'pebrel_settings.txt'
 } elseif ($env:APPDATA) {
-    Join-Path $env:APPDATA 'Nebula\nebula_settings.txt'
-} elseif ($env:HOME) {
-    Join-Path (Join-Path $env:HOME '.config') 'Nebula\nebula_settings.txt'
+    Join-Path $env:APPDATA 'Pebrel\pebrel_settings.txt'
+} elseif ($env:USERPROFILE) {
+    Join-Path $env:USERPROFILE 'Pebrel\pebrel_settings.txt'
 } else {
-    Join-Path ([System.IO.Path]::GetTempPath()) 'Nebula\nebula_settings.txt'
+    Join-Path ([System.IO.Path]::GetTempPath()) 'Pebrel\pebrel_settings.txt'
 }
+if (-not (Test-Path -LiteralPath $global:PebrelSettingsFile)) {
+    $legacy = Join-Path (Split-Path -Parent $global:PebrelSettingsFile) 'nebula_settings.txt'
+    if (Test-Path -LiteralPath $legacy) { $global:PebrelSettingsFile = $legacy }
+}
+$global:NebulaSettingsFile = $global:PebrelSettingsFile
 
 function global:Get-NebulaSetting {
     param([string]$Key, [string]$Default)
@@ -764,7 +786,7 @@ fn write_if_changed(path: &std::path::Path, contents: &[u8]) -> bool {
 
 /// Write the Nebula prompt script to a temp file, returning its path.
 fn nebula_prompt_script_path() -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join("nebula_prompt.ps1");
+    let path = std::env::temp_dir().join("pebrel_prompt.ps1");
     // NOTE: do NOT touch the theme bridge file here. The UI process owns it
     // (written with the restored/selected theme); stamping a default from the
     // spawn path used to reset the powerline palette on every new tab.
@@ -779,7 +801,7 @@ fn nebula_prompt_script_path() -> Option<std::path::PathBuf> {
 }
 
 const NEBULA_BASH_RC: &str = r#"
-# Nebula Bash integration. Source the user's bashrc first, then keep the
+# Pebrel Bash integration. Source the user's bashrc first, then keep the
 # terminal-visible prompt/title/cwd contract stable for tabs and splits.
 # 先记下 source 之前的 PS1：系统级 rc（Git Bash 的 /etc/bash.bashrc）此刻已经跑
 # 过，所以之后出现的差异只可能来自用户自己的配置。
@@ -790,17 +812,18 @@ if [ -f "$HOME/.bashrc" ] && [ -z "${NEBULA_BASHRC_SOURCED:-}" ]; then
 fi
 
 __nebula_settings_file() {
-    if [ -n "${NEBULA_CONFIG_DIR:-}" ]; then
-        printf '%s/nebula_settings.txt' "$NEBULA_CONFIG_DIR"
-    elif command -v cygpath >/dev/null 2>&1 && [ -n "${APPDATA:-}" ]; then
-        printf '%s/Nebula/nebula_settings.txt' "$(cygpath -u "$APPDATA")"
-    elif [ -n "${APPDATA:-}" ]; then
-        printf '%s/Nebula/nebula_settings.txt' "$APPDATA"
-    elif [ -n "${HOME:-}" ]; then
-        printf '%s/.config/Nebula/nebula_settings.txt' "$HOME"
-    else
-        printf ''
+    local root="${PEBREL_CONFIG_DIR:-${NEBULA_CONFIG_DIR:-}}"
+    if [ -z "$root" ]; then
+        root="${APPDATA:-${USERPROFILE:-${TEMP:-${TMP:-/tmp}}}}/Pebrel"
     fi
+    if command -v cygpath >/dev/null 2>&1; then
+        root="$(cygpath -u "$root")"
+    fi
+    local file="$root/pebrel_settings.txt"
+    if [ ! -e "$file" ] && [ -f "$root/nebula_settings.txt" ]; then
+        file="$root/nebula_settings.txt"
+    fi
+    printf '%s' "$file"
 }
 
 __nebula_setting() {
@@ -963,7 +986,7 @@ fi
 "#;
 
 fn nebula_bash_rc_path() -> Option<std::path::PathBuf> {
-    let path = std::env::temp_dir().join("nebula_bashrc");
+    let path = std::env::temp_dir().join("pebrel_bashrc");
     write_if_changed(&path, NEBULA_BASH_RC.as_bytes()).then_some(path)
 }
 
@@ -1165,14 +1188,12 @@ mod test {
 
     #[test]
     fn shell_integrations_share_the_portable_settings_override() {
-        assert!(
-            NEBULA_PROMPT_PS1.contains("NEBULA_CONFIG_DIR"),
-            "PowerShell must read the same override as the GUI"
-        );
-        assert!(
-            NEBULA_BASH_RC.contains("NEBULA_CONFIG_DIR"),
-            "Bash must read the same override as the GUI"
-        );
+        for script in [NEBULA_PROMPT_PS1, NEBULA_BASH_RC] {
+            assert!(script.contains("PEBREL_CONFIG_DIR"));
+            assert!(script.contains("NEBULA_CONFIG_DIR"));
+            assert!(script.contains("pebrel_settings.txt"));
+            assert!(script.find("PEBREL_CONFIG_DIR") < script.find("NEBULA_CONFIG_DIR"));
+        }
     }
 
     #[test]
@@ -1293,7 +1314,8 @@ mod test {
     /// `Get-Command Set-PSReadLineOption` 门控，而非交互的 powershell.exe 看不到
     /// 真正的 PSReadLine —— 不占位，整段 wrapper 就不会安装，用例会静默跳过。
     const PS_PRELUDE: &str = r#"
-$env:NEBULA_CONFIG_DIR = Join-Path ([System.IO.Path]::GetTempPath()) 'nebula-ps-test-no-config'
+$env:PEBREL_CONFIG_DIR = Join-Path ([System.IO.Path]::GetTempPath()) 'pebrel-ps-test-no-config'
+$env:NEBULA_CONFIG_DIR = $env:PEBREL_CONFIG_DIR
 function global:Set-PSReadLineOption { }
 "#;
 
@@ -1363,6 +1385,8 @@ exit 0
         };
         let child = Command::new(program)
             .args(["--noprofile", "--norc", "-s"])
+            .env("PEBREL_CONFIG_DIR", "/__pebrel_test_missing_config__")
+            .env("NEBULA_CONFIG_DIR", "/__pebrel_test_missing_config__")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

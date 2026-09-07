@@ -51,6 +51,8 @@ mod agents;
 mod model;
 mod nebula_fetch_art;
 mod runtime;
+mod ssh_panes;
+mod tab_duplication;
 /// New-tab welcome page (Windows logo + fastfetch intro). Stateless helpers.
 pub(crate) mod welcome;
 use welcome::nebula_fastfetch_intro_command_for;
@@ -577,51 +579,6 @@ impl WindowContext {
         })
     }
 
-    #[cfg(windows)]
-    /// 创建由远端 PTY 通道驱动的 Pane，并复用本地终端的解析、渲染和事件协议。
-    /// 这样传输层只负责字节流，输入、缩放与终端状态无需维护两套实现。
-    fn create_ssh_pane(
-        size_info: &crate::display::SizeInfo,
-        window_id: WindowId,
-        config: &UiConfig,
-        proxy: &EventLoopProxy<Event>,
-        pane_id: PaneId,
-        destination: String,
-    ) -> Result<Pane, Box<dyn Error>> {
-        let window_route = Arc::new(AtomicU64::new(window_id.into()));
-        let event_proxy = EventProxy::new_tab(proxy.clone(), window_route.clone(), pane_id);
-        let terminal = Arc::new(FairMutex::new(Term::new(
-            config.term_options(),
-            size_info,
-            event_proxy.clone(),
-        )));
-        let sender = crate::ssh_session::spawn_session(
-            destination.clone(),
-            (*size_info).into(),
-            terminal.clone(),
-            event_proxy.clone(),
-        )?;
-        if config.cursor.style().blinking {
-            event_proxy.send_event(TerminalEvent::CursorBlinkingChange.into());
-        }
-        Ok(Pane {
-            terminal,
-            notifier: Notifier(sender),
-            search_state: Default::default(),
-            inline_search_state: Default::default(),
-            id: pane_id,
-            title: String::from("ssh"),
-            exec_context: None,
-            ssh_destination: Some(destination),
-            nebula_state: NebulaPaneState::default(),
-            intro_cols: None,
-            shell_pid: 0,
-            window_route,
-            #[cfg(not(windows))]
-            master_fd: -1,
-        })
-    }
-
     /// A pane-shaped stub for document-viewer tabs: a real (empty) `Term` so
     /// the shared event pipeline has state to borrow, but NO PTY behind it —
     /// the notifier is a sink, so keystrokes routed here are swallowed
@@ -1082,6 +1039,15 @@ impl WindowContext {
     /// `nebula ssh` is typed into that shell's PTY so OpenSSH remains inside
     /// Nebula's ConPTY instead of becoming the pane's GUI-subsystem root.
     fn spawn_tab_ssh(&mut self, host: String, placement: TabPlacement) {
+        self.spawn_tab_ssh_at(host, None, placement);
+    }
+
+    fn spawn_tab_ssh_at(
+        &mut self,
+        host: String,
+        remote_cwd: Option<String>,
+        placement: TabPlacement,
+    ) {
         #[cfg(windows)]
         {
             let pane_id = self.next_pane_id;
@@ -1092,6 +1058,7 @@ impl WindowContext {
                 &self.proxy,
                 pane_id,
                 host.clone(),
+                remote_cwd,
             ) {
                 Ok(pane) => {
                     self.next_pane_id += 1;
@@ -1133,8 +1100,9 @@ impl WindowContext {
 
         #[cfg(not(windows))]
         {
+            let _ = remote_cwd;
             let Ok(exe) = std::env::current_exe() else {
-                error!("Cannot locate nebula.exe for the SSH AskPass helper");
+                error!("Cannot locate the Pebrel executable for the SSH AskPass helper");
                 return;
             };
             let shell_id = self.display.nebula_shell_id.clone().unwrap_or_else(|| {
@@ -1204,6 +1172,7 @@ impl WindowContext {
                 &self.proxy,
                 new_id,
                 destination.clone(),
+                None,
             ) {
                 Ok(pane) => pane,
                 Err(error) => {
@@ -1348,60 +1317,6 @@ impl WindowContext {
         self.dirty = true;
     }
 
-    /// Duplicate the selected tab next to itself. We copy the launch identity,
-    /// current cwd, user name and color, but intentionally not the live grid or
-    /// split tree: a duplicate is a fresh process/session, matching Windows
-    /// Terminal and avoiding shared PTY ownership.
-    fn duplicate_tab(&mut self, index: usize) {
-        let Some(tab) = self.tabs.get(index) else { return };
-        let launch = tab.launch.clone();
-        let custom_name = tab.custom_name.clone();
-        let custom_color = tab.custom_color;
-        self.select_tab(index);
-        let before = self.tabs.len();
-
-        match launch {
-            TabLaunch::Default => self.spawn_tab_at(self.focused_cwd(), TabPlacement::Created),
-            TabLaunch::Profile(profile) => {
-                self.spawn_tab_profile_value(profile, TabPlacement::Created)
-            },
-            TabLaunch::Shell { name, shell } => {
-                self.spawn_tab_shell(name, shell, TabPlacement::Created)
-            },
-            TabLaunch::Ssh(host) => self.spawn_tab_ssh(host, TabPlacement::Created),
-            TabLaunch::Document(path) => {
-                let doc = crate::display::markdown_view::DocView::open(path.clone());
-                let label = format!("\u{eb1d} {}", doc.title);
-                self.insert_tab(
-                    TabEntry {
-                        layout: Layout::Leaf(DOC_PANE_ID),
-                        active_pane: DOC_PANE_ID,
-                        has_bell: false,
-                        custom_name: Some(label),
-                        custom_color: None,
-                        launch: TabLaunch::Document(path),
-                        doc: Some(doc),
-                        image: None,
-                        settings: false,
-                    },
-                    TabPlacement::Created,
-                );
-                self.dirty = true;
-            },
-            TabLaunch::Image(path) => self.open_image_tab(path),
-            TabLaunch::Settings => self.open_settings_tab(),
-        }
-
-        if self.tabs.len() > before {
-            if let Some(duplicate) = self.tabs.get_mut(self.active_tab) {
-                duplicate.custom_name = custom_name;
-                duplicate.custom_color = custom_color;
-            }
-            self.sync_chrome_tabs();
-            self.mark_session_dirty();
-        }
-    }
-
     /// Continue one live AI conversation in a fresh tab with a new session id.
     ///
     /// This deliberately recreates the shell instead of cloning a PTY/process.
@@ -1503,7 +1418,7 @@ impl WindowContext {
             .collect();
 
         let Some(path) =
-            self.display.save_workspace_dialog(&format!("{stem}.nebula-workspace.json"))
+            self.display.save_workspace_dialog(&format!("{stem}.pebrel-workspace.json"))
         else {
             return;
         };
@@ -1527,8 +1442,8 @@ impl WindowContext {
         let Some(session) = session::load_from(&path) else {
             let user_error = crate::ux::UserFacingError::new(
                 "工作区导入失败",
-                "所选文件不是可识别的 Nebula 工作区。",
-                "确认选择的是导出生成的 .nebula-workspace.json 文件。",
+                "所选文件不是可识别的 Pebrel 工作区。",
+                "确认选择的是导出生成的 .pebrel-workspace.json 或旧版 .nebula-workspace.json 文件。",
             );
             self.message_buffer.push(crate::message_bar::Message::user_error(&user_error));
             self.dirty = true;
@@ -2785,7 +2700,7 @@ impl WindowContext {
         self.display.update_config(&self.config);
         let focused = self.focused_pane_id();
         if let Some(pane) = self.pane(focused) {
-            pane.terminal.lock().set_options(self.config.term_options());
+            ssh_panes::apply_terminal_config(pane, &self.config);
         }
 
         // Reload cursor if its thickness has changed.

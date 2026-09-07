@@ -1,4 +1,4 @@
-//! Password-protected backups of the files Nebula owns in its data directory.
+//! Password-protected backups of the files Pebrel owns in its data directory.
 //!
 //! This module deliberately does not discover files by walking the user's home
 //! directory. The allowlist below is the security boundary for both export and
@@ -155,7 +155,7 @@ pub(crate) fn open(packet: &[u8], passphrase: &str) -> Result<BackupArchive, Str
     validate_passphrase(passphrase)?;
     let header_len = MAGIC.len() + SALT_LEN + NONCE_LEN;
     if packet.len() <= header_len || packet.get(..MAGIC.len()) != Some(MAGIC) {
-        return Err("not a Nebula encrypted backup or unsupported version".to_owned());
+        return Err("not a Pebrel encrypted backup or unsupported version".to_owned());
     }
     let salt = &packet[MAGIC.len()..MAGIC.len() + SALT_LEN];
     let nonce = &packet[MAGIC.len() + SALT_LEN..header_len];
@@ -181,28 +181,35 @@ fn collect_from(root: &Path, selection: BackupSelection) -> Result<BackupArchive
     for category in selection.categories() {
         match category {
             BackupCategory::Appearance => {
-                add_file(root, category, "nebula_settings.txt", &mut entries, filter_settings)
+                add_file(root, category, "nebula_settings.txt", &mut entries, filter_settings)?
             },
             BackupCategory::Config => {
-                add_file(root, category, "nebula.lua", &mut entries, identity);
-                add_file(root, category, "terminal_profiles.json", &mut entries, identity);
+                for name in [
+                    "nebula.lua",
+                    "nebula.toml",
+                    "nebula.yml",
+                    "nebula.yaml",
+                    "terminal_profiles.json",
+                ] {
+                    add_file(root, category, name, &mut entries, identity)?;
+                }
             },
             BackupCategory::Ssh => add_sanitized_ssh(root, &mut entries)?,
             BackupCategory::Sync => {
-                add_file(root, category, "nebula_sync.txt", &mut entries, identity)
+                add_file(root, category, "nebula_sync.txt", &mut entries, identity)?
             },
             BackupCategory::Assistant => {
-                add_file(root, category, "nebula_assistant.txt", &mut entries, identity)
+                add_file(root, category, "nebula_assistant.txt", &mut entries, identity)?
             },
             BackupCategory::Session => {
-                add_file(root, category, "session.json", &mut entries, identity)
+                add_file(root, category, "session.json", &mut entries, identity)?
             },
             BackupCategory::DirectoryHistory => {
-                add_file(root, category, "directory_history.json", &mut entries, identity)
+                add_file(root, category, "directory_history.json", &mut entries, identity)?
             },
             BackupCategory::CommandHistory => {
                 for file_name in crate::nebula_history::history_file_names() {
-                    add_file(root, category, file_name, &mut entries, identity);
+                    add_file(root, category, file_name, &mut entries, identity)?;
                 }
             },
             BackupCategory::Fonts => add_fonts(root, &mut entries)?,
@@ -249,11 +256,27 @@ fn add_file(
     name: &str,
     entries: &mut Vec<BackupEntry>,
     transform: fn(Vec<u8>) -> Vec<u8>,
-) {
-    let path = root.join(name);
-    if let Ok(bytes) = fs::read(path) {
-        entries.push(BackupEntry { category, name: name.to_owned(), bytes: transform(bytes) });
+) -> Result<(), String> {
+    let canonical = nebula_settings::canonical_data_file_name(name);
+    let legacy = nebula_settings::legacy_data_file_name(canonical).unwrap_or(name);
+    for candidate in [canonical, legacy] {
+        match fs::read(root.join(candidate)) {
+            Ok(bytes) => {
+                entries.push(BackupEntry {
+                    category,
+                    name: canonical.to_owned(),
+                    bytes: transform(bytes),
+                });
+                return Ok(());
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(format!("read backup file {candidate}: {error}")),
+        }
+        if canonical == legacy {
+            break;
+        }
     }
+    Ok(())
 }
 
 fn add_sanitized_ssh(root: &Path, entries: &mut Vec<BackupEntry>) -> Result<(), String> {
@@ -287,6 +310,13 @@ fn add_fonts(root: &Path, entries: &mut Vec<BackupEntry>) -> Result<(), String> 
     while let Some(directory) = stack.pop() {
         for item in fs::read_dir(directory).map_err(|error| format!("read fonts: {error}"))? {
             let path = item.map_err(|error| format!("read fonts entry: {error}"))?.path();
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(nebula_settings::is_migration_artifact)
+            {
+                continue;
+            }
             let metadata =
                 fs::symlink_metadata(&path).map_err(|error| format!("font metadata: {error}"))?;
             if metadata.is_dir() {
@@ -317,7 +347,7 @@ fn restore_to(root: &Path, archive: &BackupArchive) -> Result<(), String> {
     let paths = archive
         .entries
         .iter()
-        .map(|entry| restore_path(root, &entry.name))
+        .map(|entry| restore_path(root, nebula_settings::canonical_data_file_name(&entry.name)))
         .collect::<Result<Vec<_>, _>>()?;
     for (entry, path) in archive.entries.iter().zip(paths) {
         crate::atomic_file::write(&path, &entry.bytes)
@@ -365,29 +395,36 @@ fn validate_archive(archive: &BackupArchive) -> Result<(), String> {
     }
     let mut names = HashSet::new();
     for entry in &archive.entries {
-        if !categories.contains(&entry.category) || !names.insert(entry.name.clone()) {
+        let canonical = nebula_settings::canonical_data_file_name(&entry.name);
+        if !categories.contains(&entry.category) || !names.insert(canonical) {
             return Err("invalid or duplicate backup entry".to_owned());
         }
         safe_path(Path::new("."), &entry.name)?;
         let allowed = match entry.category {
             BackupCategory::Appearance => {
-                entry.name == "nebula_settings.txt"
+                canonical == "pebrel_settings.txt"
                     && filter_settings(entry.bytes.clone()) == entry.bytes
             },
             BackupCategory::Config => {
-                matches!(entry.name.as_str(), "nebula.lua" | "terminal_profiles.json")
-                    && (entry.name != "terminal_profiles.json"
-                        || serde_json::from_slice::<serde_json::Value>(&entry.bytes).is_ok())
+                matches!(
+                    canonical,
+                    "pebrel.lua"
+                        | "pebrel.toml"
+                        | "pebrel.yml"
+                        | "pebrel.yaml"
+                        | "terminal_profiles.json"
+                ) && (entry.name != "terminal_profiles.json"
+                    || serde_json::from_slice::<serde_json::Value>(&entry.bytes).is_ok())
             },
             BackupCategory::Ssh => {
                 entry.name == "ssh_profiles.json" && ssh_is_sanitized(&entry.bytes)
             },
-            BackupCategory::Sync => entry.name == "nebula_sync.txt",
-            BackupCategory::Assistant => entry.name == "nebula_assistant.txt",
+            BackupCategory::Sync => canonical == "pebrel_sync.txt",
+            BackupCategory::Assistant => canonical == "pebrel_assistant.txt",
             BackupCategory::Session => entry.name == "session.json",
             BackupCategory::DirectoryHistory => entry.name == "directory_history.json",
             BackupCategory::CommandHistory => {
-                crate::nebula_history::history_file_names().contains(&entry.name.as_str())
+                crate::nebula_history::history_file_names().contains(&canonical)
             },
             BackupCategory::Fonts => {
                 entry.name.starts_with("fonts/") && entry.name.len() > "fonts/".len()
@@ -440,8 +477,61 @@ mod tests {
     #[test]
     fn roundtrip_and_wrong_password_fail() {
         let packet = seal(&archive(), "correct horse").unwrap();
+        assert_eq!(&packet[..8], b"NEBUBAK1");
         assert_eq!(open(&packet, "correct horse").unwrap(), archive());
         assert!(open(&packet, "wrong horse").is_err());
+    }
+
+    #[test]
+    fn legacy_archive_restores_with_new_names_and_keeps_its_encryption_format() {
+        let original = archive();
+        let packet = seal(&original, "correct horse").unwrap();
+        let restored = open(&packet, "correct horse").unwrap();
+        assert_eq!(restored, original);
+        let directory = tempdir().unwrap();
+        restore_to(directory.path(), &restored).unwrap();
+        assert_eq!(fs::read(directory.path().join("pebrel_settings.txt")).unwrap(), b"theme=dark");
+        assert!(!directory.path().join("nebula_settings.txt").exists());
+    }
+
+    #[test]
+    fn conflicting_legacy_and_new_archive_names_are_rejected_before_writes() {
+        let mut archive = archive();
+        let mut duplicate = archive.entries[0].clone();
+        duplicate.name = "pebrel_settings.txt".into();
+        archive.entries.push(duplicate);
+        let directory = tempdir().unwrap();
+        assert!(restore_to(directory.path(), &archive).is_err());
+        assert!(!directory.path().join("pebrel_settings.txt").exists());
+    }
+
+    #[test]
+    fn collection_prefers_pebrel_files_and_ignores_migration_bookkeeping() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("nebula_settings.txt"), "theme=old").unwrap();
+        fs::write(directory.path().join("pebrel_settings.txt"), "theme=new").unwrap();
+        fs::write(directory.path().join(".pebrel-migration-v1"), "complete").unwrap();
+        fs::write(directory.path().join(".pebrel-migration.lock"), "").unwrap();
+        let archive = collect_from(directory.path(), BackupSelection::default()).unwrap();
+        assert_eq!(archive.entries.len(), 1);
+        assert_eq!(archive.entries[0].name, "pebrel_settings.txt");
+        assert_eq!(archive.entries[0].bytes, b"theme=new");
+    }
+
+    #[test]
+    fn font_backups_exclude_files_left_by_an_interrupted_migration() {
+        let directory = tempdir().unwrap();
+        fs::create_dir(directory.path().join("fonts")).unwrap();
+        fs::write(directory.path().join("fonts/regular.ttf"), b"font").unwrap();
+        fs::write(directory.path().join("fonts/regular.pebrel-migrate-10-20-30.tmp"), b"partial")
+            .unwrap();
+        let archive = collect_from(
+            directory.path(),
+            BackupSelection { appearance: false, fonts: true, ..BackupSelection::default() },
+        )
+        .unwrap();
+        assert_eq!(archive.entries.len(), 1);
+        assert_eq!(archive.entries[0].name, "fonts/regular.ttf");
     }
 
     #[test]
@@ -456,7 +546,7 @@ mod tests {
         assert_eq!(collected.entries[0].bytes, b"theme=dark".to_vec());
         restore_to(directory.path(), &collected).unwrap();
         assert_eq!(
-            fs::read_to_string(directory.path().join("nebula_settings.txt")).unwrap(),
+            fs::read_to_string(directory.path().join("pebrel_settings.txt")).unwrap(),
             "theme=dark"
         );
     }
@@ -472,7 +562,7 @@ mod tests {
         let collected = collect_from(directory.path(), selection).unwrap();
         assert_eq!(
             collected.entries.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(),
-            vec!["nebula.lua", "terminal_profiles.json"]
+            vec!["pebrel.lua", "terminal_profiles.json"]
         );
     }
 

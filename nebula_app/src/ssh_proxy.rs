@@ -478,7 +478,7 @@ impl SshProxyConfig {
     /// 直接读 `nebula_settings.txt` 的三个键。SSH runtime 线程不持有窗口的
     /// 设置结构，走文件是两边共享配置的既有方式（同 `sync.rs`）。
     pub fn load_global() -> Self {
-        let path = crate::display::nebula_data_dir().join("nebula_settings.txt");
+        let path = nebula_settings::settings_path();
         let mut config = Self::default();
         let Ok(data) = std::fs::read_to_string(path) else { return config };
         for line in data.lines() {

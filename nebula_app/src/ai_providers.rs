@@ -1,6 +1,6 @@
 //! AI provider metadata and credential references.
 //!
-//! Provider metadata is deliberately kept separate from `nebula_settings.txt`:
+//! Provider metadata is deliberately kept separate from `pebrel_settings.txt`:
 //! the latter is a user-editable runtime file, while provider credentials need
 //! a stable identity and must never be serialized beside ordinary settings.
 
@@ -15,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::event::{Event, EventType};
 use crate::provider_test::ProviderTestOutcome;
 
-const STORE_FILE: &str = "nebula_providers.json";
+const STORE_FILE: &str = "pebrel_providers.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -299,7 +299,7 @@ pub fn save(store: &ProviderStore) -> io::Result<()> {
 }
 
 pub fn credential_target(id: &str) -> String {
-    format!("Nebula/AI/{id}")
+    format!("Pebrel/AI/{id}")
 }
 
 pub fn api_key_hint(key: &str) -> String {
@@ -344,7 +344,7 @@ pub fn store_provider_api_key(provider: &mut AiProvider, key: &str) -> io::Resul
 #[cfg(windows)]
 pub fn prompt_and_store_api_key(provider: &mut AiProvider) -> io::Result<bool> {
     let Some(bytes) =
-        crate::ssh_credentials::prompt_generic_secret(&credential_target(&provider.id), "Nebula")?
+        crate::ssh_credentials::prompt_generic_secret(&credential_target(&provider.id), "Pebrel")?
     else {
         return Ok(false);
     };
@@ -501,7 +501,7 @@ pub fn spawn_test(
     window_id: winit::window::WindowId,
 ) -> io::Result<()> {
     std::thread::Builder::new()
-        .name("nebula-provider-test".into())
+        .name("pebrel-provider-test".into())
         .spawn(move || {
             let result = test_provider(&request.provider);
             let _ = proxy.send_event(Event::new(

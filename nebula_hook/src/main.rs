@@ -1,4 +1,4 @@
-//! nebula-hook — the bridge between AI-CLI lifecycle hooks and Nebula.
+//! pebrel-hook — the bridge between AI-CLI lifecycle hooks and Pebrel.
 //!
 //! Claude Code (`Stop` / `Notification` / `UserPromptSubmit` hooks), Codex
 //! (`notify` program), Pi and opencode (bundled extensions/plugins, shelling out on
@@ -65,6 +65,17 @@ fn foreign_hook_runner() -> Option<&'static str> {
         .iter()
         .copied()
         .find(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+}
+
+fn hook_env(name: &str) -> Option<std::ffi::OsString> {
+    aliased_env(name, |name| std::env::var_os(name))
+}
+
+fn aliased_env(
+    suffix: &str,
+    mut read: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    read(&format!("PEBREL_{suffix}")).or_else(|| read(&format!("NEBULA_{suffix}")))
 }
 
 /// 一次调用的去向。写进侧信道日志，用来回答「通知为什么没出现」。
@@ -135,7 +146,7 @@ fn outcome_line(source: &str, pane: &str, bytes: usize, outcome: &Outcome, at_ms
 /// CLI 有意义），于是「完成通知没出现」这类问题事后完全无从取证。只记路由事实
 /// 和去向，**绝不记载荷内容**：payload 里有 cwd、工具参数，甚至选区正文。
 fn log_outcome(source: &str, pane: &str, bytes: usize, outcome: &Outcome) {
-    let Some(path) = std::env::var_os("NEBULA_HOOK_LOG").filter(|value| !value.is_empty()) else {
+    let Some(path) = hook_env("HOOK_LOG").filter(|value| !value.is_empty()) else {
         return;
     };
     let at_ms = std::time::SystemTime::now()
@@ -193,13 +204,13 @@ fn run() {
         return;
     }
 
-    let pane = std::env::var("NEBULA_PANE_ID").unwrap_or_default();
+    let pane = hook_env("PANE_ID").and_then(|value| value.into_string().ok()).unwrap_or_default();
     let mut message = format!("nebula-hook/1 source={source} pane={pane}\n").into_bytes();
     message.extend_from_slice(&payload);
 
     // 本地 Pane 使用命名管道；远端 Pane 没有本地管道时，把同一信封写入控制终端的私有 OSC。
     let mut outcome = Outcome::NotHosted;
-    if let Some(pipe) = std::env::var_os("NEBULA_NOTIFY_PIPE") {
+    if let Some(pipe) = hook_env("NOTIFY_PIPE") {
         // The server accepts one connection at a time and re-creates the pipe
         // instance in between, so a raced connect fails for microseconds.
         // Retry briefly, then give up silently: notifications are best-effort.
@@ -214,7 +225,9 @@ fn run() {
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
             }
         }
-    } else if let Ok(token) = std::env::var("NEBULA_REMOTE_HOOK_TOKEN") {
+    } else if let Some(token) =
+        hook_env("REMOTE_HOOK_TOKEN").and_then(|value| value.into_string().ok())
+    {
         if token.len() == 32
             && token.bytes().all(|byte| byte.is_ascii_hexdigit())
             && message.len() <= 64 * 1024
@@ -262,6 +275,32 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{FOREIGN_HOOK_RUNNERS, Outcome, base64_encode, foreign_hook_runner, outcome_line};
+
+    #[test]
+    fn environment_migration_retains_scope_and_prefers_current_names() {
+        use std::collections::HashMap;
+        use std::ffi::OsString;
+
+        let mut values = HashMap::<&str, OsString>::from([
+            ("NEBULA_NOTIFY_PIPE", "legacy-pipe".into()),
+            ("NEBULA_PANE_ID", "7".into()),
+        ]);
+        let read = |name: &str| values.get(name).cloned();
+        assert_eq!(super::aliased_env("NOTIFY_PIPE", read), Some("legacy-pipe".into()));
+        assert_eq!(super::aliased_env("PANE_ID", read), Some("7".into()));
+        assert_eq!(super::aliased_env("REMOTE_HOOK_TOKEN", read), None);
+        values.insert("PEBREL_NOTIFY_PIPE", "new-pipe".into());
+        assert_eq!(
+            super::aliased_env("NOTIFY_PIPE", |name| values.get(name).cloned()),
+            Some("new-pipe".into())
+        );
+        values.insert("PEBREL_NOTIFY_PIPE", "".into());
+        assert_eq!(
+            super::aliased_env("NOTIFY_PIPE", |name| values.get(name).cloned()),
+            Some("".into()),
+            "an explicit empty scope must not fall through to a legacy host"
+        );
+    }
 
     #[test]
     fn oversized_stdin_is_drained_but_never_forwarded_as_truncated_json() {

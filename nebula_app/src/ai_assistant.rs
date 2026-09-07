@@ -25,7 +25,7 @@ use crate::event::{Event, EventType};
 /// 配置文件名（位于 `nebula_data_dir()`）。独立于 `nebula_settings.txt`：
 /// 设置页整存整取那份文件，手工加进去的陌生键会在下次保存时被抹掉；
 /// 助手配置独立成文件，阶段三设置页接管时再迁移。
-const CONFIG_FILE: &str = "nebula_assistant.txt";
+const CONFIG_FILE: &str = "pebrel_assistant.txt";
 
 /// A fix produced by the model for one failed command.
 #[derive(Debug, Clone, PartialEq, Eq)]
