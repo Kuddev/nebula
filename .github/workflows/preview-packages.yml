@@ -102,6 +102,7 @@ jobs:
           python3 -m unittest
           scripts.tests.test_preview_release
           scripts.tests.test_macos_dmg
+          scripts.tests.test_ai_session_probe
           scripts.tests.test_platform_cfg
           scripts.tests.test_windows_resources
           scripts.tests.test_pebrel_branding

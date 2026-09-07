@@ -9,24 +9,26 @@ Every release entry is provided in English and Simplified Chinese.
 ### English
 
 #### Added
-- Clipboard images can be pasted into local, WSL, and SSH terminal sessions as PNG file paths. WSL paths are translated and SSH images are uploaded before insertion; failures are visible, and late results are discarded after input submission, interruption, or a session change.
+- Release downloads now include Windows x64 ZIP and installer packages, Linux x64 AppImage, DEB and tar.gz packages, and separate macOS 14+ DMGs for Apple Silicon and Intel. macOS packages are ad-hoc signed; the first launch may require Open Anyway in System Settings > Privacy & Security.
+- Pasting a clipboard image now writes it as a PNG and inserts its path into local, WSL, or SSH terminal sessions. WSL paths are translated and SSH images are uploaded before insertion; failures are reported, and results arriving after submission, interruption, or a session change are discarded.
 - Added an application icon picker with 25 color palettes and light/dark previews.
-- Added an opt-in terminal network proxy setting. On Windows, new local sessions inherit the system HTTP/HTTPS proxy when enabled; existing sessions keep their environment.
+- Added an opt-in terminal network proxy setting. On Windows, new local sessions inherit the system HTTP/HTTPS proxy when enabled; existing sessions keep their environment. Contributed by [@Sakyvo](https://github.com/Sakyvo) in [#94](https://github.com/Kuddev/pebrel/pull/94).
 - Added per-host SSH proxy and jump-host options, with separate proxy credentials and a connection-route preview.
 - Added an answer reader for captured Claude Code and Codex responses, with Markdown, formulas, source-text mode, and local image previews.
 - Added UI language choices for Traditional Chinese, French, German, Spanish, Brazilian Portuguese, Italian, Russian, Japanese, and Korean alongside English and Simplified Chinese. Initial coverage includes navigation, common actions, appearance, and network controls; untranslated text falls back to English.
 - Added a settings search that opens the matching section and a confirmed Restore defaults action that backs up preferences while retaining saved hosts and other user data.
 - Added the Antigravity product icon to terminal tabs and the sidebar, including its common launcher aliases, while retaining its original colors in light and dark themes.
-- Recognized binary terminal confirmations can show Allow and Deny actions in a notification. The action is rejected if the prompt, session, or input state has changed, and is available only once for the captured request.
+- Recognized binary terminal confirmation prompts now appear in notifications with Allow and Deny actions. An action is rejected when the prompt, session, or input state has changed, and each captured request can be handled only once.
 
 #### Fixed
-- `Ctrl+C` copies and clears a terminal selection, and still sends an interrupt when no selection is present. Text inputs keep their own copy behavior.
-- `Ctrl+Backspace` deletes a word in the supported legacy and kitty keyboard paths, including the managed PowerShell prompt.
+- With AI session restoration enabled, Codex sessions in WSL and Linux can recover the current conversation ID when no hook reported it, so reopening the workspace resumes that conversation. Window close and the application's Quit action allow a bounded wait for the identity before saving. Ambiguous identities are not selected; native Windows and macOS continue to use hook-reported session IDs.
+- `Ctrl+C` copies and clears a terminal selection, and still sends an interrupt when no selection is present. Text inputs keep their own copy behavior. Contributed by [@Sakyvo](https://github.com/Sakyvo) in [#93](https://github.com/Kuddev/pebrel/pull/93).
+- `Ctrl+Backspace` deletes a word in the supported legacy and kitty keyboard paths, including the managed PowerShell prompt. Contributed by [@Sakyvo](https://github.com/Sakyvo) in [#92](https://github.com/Kuddev/pebrel/pull/92).
 - Running tab indicators keep animating when another window has focus; hidden or minimized windows stop requesting animation frames.
 - File-name search discards results from an old root, updates after creates, renames and deletes, and handles canonical file-watcher paths without losing the visible directory root.
 - Multiline confirmation text is measured with wrapping so longer messages fit the shared confirmation dialog.
-- Improved Antigravity activity and permission detection so old spinner output and ordinary prose mentioning approval do not keep an idle session marked as running or waiting for permission.
-- Closing the last regular window and then quitting no longer replaces saved tabs and AI session identities with an empty snapshot. Closing all tabs explicitly still starts an empty workspace next time, and failed session writes are retried.
+- Antigravity activity and permission detection no longer lets old spinner output or ordinary prose mentioning approval mark an idle session as running or waiting for permission. Contributed by [@821869798](https://github.com/821869798) in [#96](https://github.com/Kuddev/pebrel/pull/96).
+- Closing the last regular window and then quitting no longer replaces saved tabs with an empty snapshot. Explicitly closing all tabs still starts an empty workspace next time, and failed session writes are retried.
 - SSH startup now waits for PTY and shell confirmation before showing Ready, supports cancellation during connection setup, and stops stalled startup stages within a bounded timeout. Unexpected disconnects retain the pane and its failure state; explicit shell exits still close normally.
 - Duplicated WSL tabs retain the current guest directory and selected distribution. Duplicated SSH tabs retain the known remote working directory and quote it when starting the new remote shell.
 - Fixed Windows native SSH sessions consuming a remote application's first device-attributes response during local console startup, which could leave the application waiting with a blank screen.
@@ -34,6 +36,7 @@ Every release entry is provided in English and Simplified Chinese.
 - Runtime CLI responses and event subscriptions stop cleanly when the program reading their output closes its pipe, instead of opening a panic dialog. Other output errors are still reported.
 
 #### Improved
+- New package names consistently use `Pebrel-v<version>-<system>-<architecture>`. A byte-identical installer with the legacy Nebula filename remains available for existing Windows auto-update clients.
 - Made Titanium the default application icon and adjusted small-size proportions, prompt strokes, and transparent edges.
 - Unified the application, command, executable, helper, package, and managed integration names under Pebrel. New local sessions expose `PEBREL_*` environment variables alongside legacy aliases.
 - The Windows installer migrates registered `Nebula Terminal` installation directories to a sibling `Pebrel` directory, updates its shortcuts and PATH entry, and preserves custom directory names and unknown files. Cleanup failures are reported and can be retried.
@@ -51,24 +54,26 @@ Every release entry is provided in English and Simplified Chinese.
 ### 中文
 
 #### 新增
-- 新增把剪贴板图片转换为 PNG 文件路径后粘贴到本地、WSL 与 SSH 终端会话；WSL 会转换路径，SSH 会先上传图片。失败会明确提示，提交输入、中断或会话变化后到达的结果会被丢弃。
+- 发布下载新增 Windows x64 ZIP 与安装器、Linux x64 AppImage、DEB 与 tar.gz，以及分别适用于 Apple Silicon 和 Intel 的 macOS 14+ DMG。macOS 包采用临时签名，首次启动可能需要在“系统设置 > 隐私与安全性”中选择“仍要打开”。
+- 粘贴剪贴板图片时会将其写成 PNG，并把路径插入本地、WSL 或 SSH 终端会话。WSL 会转换路径，SSH 会先上传图片；失败会明确报告，提交输入、中断或会话变化后到达的结果会被丢弃。
 - 新增应用图标选择器，提供 25 款配色及浅色、深色背景预览。
-- 新增默认关闭的终端网络代理设置。Windows 下启用后，新建本地会话继承系统 HTTP/HTTPS 代理；现有会话保留原有环境。
+- 新增默认关闭的终端网络代理设置。Windows 下启用后，新建本地会话继承系统 HTTP/HTTPS 代理；现有会话保留原有环境。由 [@Sakyvo](https://github.com/Sakyvo) 在 [#94](https://github.com/Kuddev/pebrel/pull/94) 中贡献。
 - SSH 主机新增独立的代理与跳板配置，支持单独保存代理凭据并预览连接路线。
 - 为已捕获的 Claude Code 和 Codex 回答新增阅读视图，支持 Markdown、公式、原文模式和本地图片预览。
 - 在英语和简体中文之外，界面语言新增繁体中文、法语、德语、西班牙语、巴西葡萄牙语、意大利语、俄语、日语及韩语。初版覆盖导航、常用操作、外观与网络控件，未翻译文案回退英文。
 - 新增可跳转到匹配分区的设置搜索，以及需要确认的“恢复默认”操作；重置前备份偏好设置，并保留已保存主机等用户数据。
 - 终端标签与侧栏新增 Antigravity 产品图标，支持常见启动别名，并在浅色和深色主题中保留图标原色。
-- 可识别的终端二选一确认提示可在通知中显示允许与拒绝操作；提示、会话或输入状态变化后会拒绝过期操作，每个捕获的请求只能处理一次。
+- 可识别的终端二选一确认提示现在会在通知中显示允许与拒绝操作。提示、会话或输入状态变化后会拒绝操作，每个捕获的请求只能处理一次。
 
 #### 修复
-- 终端中 `Ctrl+C` 会复制并清除选区，没有选区时仍发送中断；文本输入框保留自身的复制行为。
-- `Ctrl+Backspace` 在支持的传统和 kitty 键盘路径中按词删除，并适用于受管理的 PowerShell 提示符。
+- 启用 AI 会话恢复后，WSL 与 Linux 中的 Codex 在 hook 未上报会话 ID 时，可从当前会话补全 ID，使重新打开工作区时接续该对话。关闭窗口和应用内“退出”操作会在保存前限定等待身份查询完成；不会选择存在歧义的身份，原生 Windows 与 macOS 继续使用 hook 上报的会话 ID。
+- 终端中 `Ctrl+C` 会复制并清除选区，没有选区时仍发送中断；文本输入框保留自身的复制行为。由 [@Sakyvo](https://github.com/Sakyvo) 在 [#93](https://github.com/Kuddev/pebrel/pull/93) 中贡献。
+- `Ctrl+Backspace` 在支持的传统和 kitty 键盘路径中按词删除，并适用于受管理的 PowerShell 提示符。由 [@Sakyvo](https://github.com/Sakyvo) 在 [#92](https://github.com/Kuddev/pebrel/pull/92) 中贡献。
 - 其他窗口获得焦点后，运行中的标签指示器继续播放动画；窗口隐藏或最小化时停止请求动画帧。
 - 文件名搜索丢弃旧目录的结果，在创建、重命名和删除后更新，并正确处理文件监听器返回的规范路径，保留用户看到的目录根。
 - 多行确认文案按换行后的尺寸测量，使较长消息能完整放入共享确认框。
-- 改进 Antigravity 的活动与权限提示识别，避免历史转圈输出或普通正文中提到审批时，把空闲会话误标为运行中或等待授权。
-- 关闭最后一个普通窗口后再退出，不再用空快照覆盖已保存标签与 AI 会话身份；明确关闭全部标签后，下次仍从空工作区开始，保存失败会重试。
+- 修复 Antigravity 的活动与权限提示识别，避免历史转圈输出或普通正文中提到审批时，把空闲会话误标为运行中或等待授权。由 [@821869798](https://github.com/821869798) 在 [#96](https://github.com/Kuddev/pebrel/pull/96) 中贡献。
+- 关闭最后一个普通窗口后再退出，不再用空快照覆盖已保存标签；明确关闭全部标签后，下次仍从空工作区开始，保存失败会重试。
 - SSH 启动现在等待 PTY 与 shell 确认后才显示就绪，连接准备期间可取消，停滞的启动阶段会在限定时间内结束；意外断连会保留 pane 与失败状态，明确退出 shell 时仍正常关闭。
 - 复制 WSL 标签时保留当前来宾目录与所选发行版；复制 SSH 标签时保留已知远端工作目录，并在启动新远端 shell 时正确引用该路径。
 - 修复 Windows 原生 SSH 会话在本地控制台启动时消耗远端应用首个设备属性应答的问题；该问题可能导致远端应用停留在空白画面等待应答。
@@ -76,6 +81,7 @@ Every release entry is provided in English and Simplified Chinese.
 - 读取输出的程序关闭管道后，Runtime CLI 响应与事件订阅会正常结束，不再弹出 panic 对话框；其他输出错误仍会报告。
 
 #### 改进
+- 新安装包统一采用 `Pebrel-v<版本>-<系统>-<架构>` 命名；同时保留与正式安装器字节一致的旧 Nebula 文件名资产，供已安装的 Windows 客户端自动更新。
 - 将钛银设为默认应用图标，并调整小尺寸比例、提示符笔画与透明边缘。
 - 应用、命令、可执行文件、辅助程序、安装包与受管理的集成统一使用 Pebrel 名称。新建本地会话同时提供 `PEBREL_*` 环境变量和旧版兼容别名。
 - Windows 安装器会把已注册的 `Nebula Terminal` 安装目录迁到同级 `Pebrel`，更新其快捷方式与 PATH 项，并保留自定义目录名称和未知文件；清理失败时会明确报告并支持重试。
@@ -91,7 +97,26 @@ Every release entry is provided in English and Simplified Chinese.
 - 命令完成、响铃和 Agent 待处理通知现在跟随来源 pane，即使标签已移动到另一个窗口；点击通知会聚焦来源 pane，一个 pane 的活动不再抑制另一个 pane 的通知。
 
 ### Contributors
-- [@Sakyvo](https://github.com/Sakyvo): terminal network proxy, conditional `Ctrl+C` copy, and word deletion with `Ctrl+Backspace` / 终端网络代理、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除。
+
+<a href="https://github.com/Sakyvo"><img src="https://github.com/Sakyvo.png?size=96" width="64" height="64" alt="@Sakyvo avatar"></a>
+<a href="https://github.com/821869798"><img src="https://github.com/821869798.png?size=96" width="64" height="64" alt="@821869798 avatar"></a>
+
+**[@Sakyvo](https://github.com/Sakyvo)** — Added the opt-in Windows system proxy for new local sessions, conditional `Ctrl+C` selection copy, and word deletion with `Ctrl+Backspace` / 新增可选的 Windows 系统代理注入、`Ctrl+C` 按选区复制及 `Ctrl+Backspace` 按词删除（[#94](https://github.com/Kuddev/pebrel/pull/94)、[#93](https://github.com/Kuddev/pebrel/pull/93)、[#92](https://github.com/Kuddev/pebrel/pull/92)）。
+
+**[@821869798](https://github.com/821869798)** — Added negotiated `Shift+Enter` multiline input and improved Antigravity idle and permission-state detection / 新增协商键盘协议下的 `Shift+Enter` 多行输入，并改进 Antigravity 空闲与权限状态识别（[#96](https://github.com/Kuddev/pebrel/pull/96)）。
+
+---
+
+**SHA256**
+
+- `Pebrel-v1.6.0-windows-x64.zip`: `PENDING FINAL BUILD`
+- `Pebrel-v1.6.0-windows-x64-setup.exe`: `PENDING FINAL BUILD`
+- `NebulaTerminal-1.6.0-windows-x64-setup.exe`: `PENDING FINAL BUILD`
+- `Pebrel-v1.6.0-linux-x64.AppImage`: `PENDING FINAL BUILD`
+- `Pebrel-v1.6.0-linux-x64.deb`: `PENDING FINAL BUILD`
+- `Pebrel-v1.6.0-linux-x64.tar.gz`: `PENDING FINAL BUILD`
+- `Pebrel-v1.6.0-macos-arm64.dmg`: `PENDING FINAL BUILD`
+- `Pebrel-v1.6.0-macos-x64.dmg`: `PENDING FINAL BUILD`
 
 ## 1.5.0 - 2026-09-01
 

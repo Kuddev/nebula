@@ -57,7 +57,7 @@ if ([string]::IsNullOrWhiteSpace($TargetDirectory)) {
 }
 $cargoTargetRoot = [System.IO.Path]::GetFullPath($TargetDirectory)
 $targetRoot = Join-Path $cargoTargetRoot $Configuration
-$setupPath = Join-Path $outputRoot "$PackageBrand-$Version-windows-x64-setup.exe"
+$setupPath = Join-Path $outputRoot "$PackageBrand-v$Version-windows-x64-setup.exe"
 
 $requiredFiles = @(
     (Join-Path $targetRoot 'pebrel.exe'),

@@ -74,7 +74,7 @@ class PebrelBrandingTests(unittest.TestCase):
                 self.assertIn("Stale binary:", source)
         installer = self.source("scripts/installer.iss")
         self.assertIn('#define PackageBrand "Pebrel"', installer)
-        self.assertIn("OutputBaseFilename={#PackageBrand}-{#AppVersion}-windows-x64-setup", installer)
+        self.assertIn("OutputBaseFilename={#PackageBrand}-v{#AppVersion}-windows-x64-setup", installer)
         builder = self.source("scripts/build-installer.ps1")
         self.assertIn('"/DPackageBrand=$PackageBrand"', builder)
 
@@ -82,6 +82,7 @@ class PebrelBrandingTests(unittest.TestCase):
         check = self.source("nebula_app/src/update_check.rs")
         download = self.source("nebula_app/src/update_download.rs")
         self.assertIn('format!("Pebrel-{version}-windows-x64-setup.exe")', check)
+        self.assertIn('format!("Pebrel-v{version}-windows-x64-setup.exe")', check)
         self.assertIn('format!("NebulaTerminal-{version}-windows-x64-setup.exe")', check)
         self.assertIn("windows_x64_installer_names(version)", check)
         self.assertIn("windows_x64_installer_names(&asset.version).contains(&asset.name)", download)

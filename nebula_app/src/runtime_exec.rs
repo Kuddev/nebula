@@ -19,7 +19,7 @@ use crate::runtime_api::{ApiError, RuntimeDispatch};
 #[derive(Clone, Debug)]
 enum ExecLocation {
     Host,
-    Wsl { distro: Option<String> },
+    Wsl { distro: Option<String>, user: Option<String> },
 }
 
 /// 创建 pane 时冻结的、可由独立 child 安全复用的上下文。
@@ -38,8 +38,22 @@ impl PaneExecContext {
     pub(crate) fn wsl_distribution(&self) -> Option<Option<&str>> {
         match &self.location {
             ExecLocation::Host => None,
-            ExecLocation::Wsl { distro } => Some(distro.as_deref()),
+            ExecLocation::Wsl { distro, .. } => Some(distro.as_deref()),
         }
+    }
+
+    pub(crate) fn wsl_user(&self) -> Option<&str> {
+        match &self.location {
+            ExecLocation::Host => None,
+            ExecLocation::Wsl { user, .. } => user.as_deref(),
+        }
+    }
+
+    pub(crate) fn process_instance(&self) -> Option<&str> {
+        self.env
+            .get(crate::agent_env::PROCESS_ENV)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
     }
 
     pub(crate) fn from_pty_options(options: &nebula_terminal::tty::Options) -> Self {
@@ -49,6 +63,8 @@ impl PaneExecContext {
             .filter(|shell| is_wsl_program(shell.program()))
             .map_or(ExecLocation::Host, |shell| ExecLocation::Wsl {
                 distro: crate::shell_detect::wsl_launch_distro(shell.program(), shell.args())
+                    .map(str::to_owned),
+                user: crate::shell_detect::wsl_launch_user(shell.program(), shell.args())
                     .map(str::to_owned),
             });
         Self {
@@ -171,10 +187,13 @@ fn build_command(
             command.args(&argv[1..]).current_dir(&cwd);
             execution = json!({ "environment": "host", "cwd": cwd });
         },
-        ExecLocation::Wsl { distro } => {
+        ExecLocation::Wsl { distro, user } => {
             command = Command::new("wsl.exe");
             if let Some(distro) = distro {
                 command.args(["--distribution", distro]);
+            }
+            if let Some(user) = user {
+                command.args(["--user", user]);
             }
             let guest_cwd = crate::shell_detect::wsl_guest_cwd(reported_cwd);
             if let Some(cwd) = guest_cwd {
@@ -452,12 +471,13 @@ mod tests {
         assert_eq!(PaneExecContext::from_pty_options(&options).wsl_distribution(), Some(None));
         options.shell = Some(nebula_terminal::tty::Shell::new(
             "wsl.exe".into(),
-            vec!["--distribution".into(), "Debian".into()],
+            vec!["--distribution".into(), "Debian".into(), "--user".into(), "hello".into()],
         ));
         assert_eq!(
             PaneExecContext::from_pty_options(&options).wsl_distribution(),
             Some(Some("Debian"))
         );
+        assert_eq!(PaneExecContext::from_pty_options(&options).wsl_user(), Some("hello"));
     }
 
     #[test]

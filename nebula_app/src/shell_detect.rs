@@ -496,6 +496,33 @@ pub fn wsl_launch_distro<'a>(program: &str, args: &'a [String]) -> Option<&'a st
     args.get(index + 1).map(String::as_str).filter(|distro| !distro.is_empty())
 }
 
+/// 一次 WSL 启动用的来宾用户：只认显式 `-u` / `--user`。探测来宾进程时必须
+/// 使用同一个用户，否则 `wsl.exe` 可能启动另一份默认用户环境，看不到目标
+/// Codex 的 `/proc`。
+pub fn wsl_launch_user<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
+    let filename = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let stem = std::path::Path::new(filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if stem != "wsl" {
+        return None;
+    }
+    for (index, arg) in args.iter().enumerate() {
+        if matches!(arg.as_str(), "--" | "--exec" | "-e") {
+            break;
+        }
+        if matches!(arg.as_str(), "-u" | "--user") {
+            return args.get(index + 1).map(String::as_str).filter(|user| !user.is_empty());
+        }
+        if let Some(user) = arg.strip_prefix("--user=") {
+            return (!user.is_empty()).then_some(user);
+        }
+    }
+    None
+}
+
 /// 终端报的 cwd 是来宾侧的绝对路径吗（`/home/x`）。宿主路径（`D:\…`）不需要
 /// 映射，交给普通路径分支即可。
 pub fn wsl_guest_cwd(cwd: &str) -> Option<&str> {
@@ -778,6 +805,15 @@ mod tests {
         assert_eq!(super::wsl_launch_distro("wsl.exe", &owned(&["-d"])), None);
         assert_eq!(super::wsl_launch_distro("wsl.exe", &owned(&["-d", ""])), None);
         assert_eq!(super::wsl_launch_distro("pwsh.exe", &owned(&["-d", "Debian"])), None);
+
+        assert_eq!(super::wsl_launch_user("wsl.exe", &owned(&["--user", "hello"])), Some("hello"));
+        assert_eq!(super::wsl_launch_user("wsl.exe", &owned(&["--user=hello"])), Some("hello"));
+        assert_eq!(super::wsl_launch_user("wsl.exe", &owned(&["--user"])), None);
+        assert_eq!(
+            super::wsl_launch_user("wsl.exe", &owned(&["--exec", "tool", "--user", "remote"])),
+            None
+        );
+        assert_eq!(super::wsl_launch_user("pwsh.exe", &owned(&["--user", "hello"])), None);
     }
 
     /// 只有来宾绝对路径需要映射；宿主路径与空 cwd 走普通分支。

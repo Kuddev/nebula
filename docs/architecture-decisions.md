@@ -102,6 +102,33 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
 - **Revisit condition:** Remove compatibility readers only after support for old
   clients and persisted configurations is explicitly retired.
 
+## ADR-0004 - Current conversation identity at workspace save
+
+- **Status:** Implemented for the maintainer-reported restore defect, 2026-09-07;
+  validation is part of the 1.6.0 release candidate checks.
+- **Context:** A Codex pane can identify its foreground program without receiving
+  a session ID from the CLI hook. Saving only the program restores the tab but
+  cannot construct an exact conversation resume command.
+- **Decision:** Keep hook identities authoritative. For WSL and Linux, match the
+  process environment to both the Pebrel instance and pane, then read only the
+  first metadata record of open Codex rollout files. Accept one main conversation
+  whose filename and metadata agree. Do not choose by working directory or time.
+  Native Windows and macOS keep the existing hook path.
+- **Lifecycle:** Queries use the existing background executor, a two-second time
+  limit and bounded output. Results carry the foreground command generation.
+  Window close and the application Quit action allow up to three seconds before
+  saving and stopping panes; the UI thread remains responsive. A refreshed
+  inferred identity is required at close. Hook identities are not replaced.
+- **Persistence:** Reuse the existing optional `source` and `session_id` fields;
+  there is no new file format or dependency. A missing or ambiguous ID cannot
+  launch a different conversation as a fallback. Existing autosave and the final
+  operating-system shutdown callback save the identities already available.
+- **Validation:** File save/load and exact resume commands, primary-thread
+  metadata selection, WSL user arguments, pane/instance isolation, output limits,
+  stale-result rejection, and a subprocess deadline have focused regressions.
+- **Revisit condition:** Replace the procfs fallback when a supported CLI session
+  identity API covers these launches consistently.
+
 ## 中文说明
 
 记录重大取舍而非每次小修复；事实与测试能推翻旧决定。规范误伤、安全修复与旧预算冲突时，

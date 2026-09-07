@@ -9,6 +9,7 @@
 //! 切模块 + 模块内 `#[cfg]` 分派」，只保留真正值钱的两点：单一入口，以及
 //! 能力探测（让 UI 隐藏入口，而不是让功能在别的平台报错）。
 
+pub(crate) mod ai_session_identity;
 pub mod capabilities;
 pub mod credentials;
 pub mod dirs;

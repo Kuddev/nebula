@@ -50,6 +50,10 @@ const LEGACY_CLI_ENV: &str = "NEBULA_CLI";
 pub const BIN_DIR_ENV: &str = "PEBREL_BIN_DIR";
 const LEGACY_BIN_DIR_ENV: &str = "NEBULA_BIN_DIR";
 
+/// 当前 Pebrel 进程的 PID。和 pane id 一起构成进程归属，避免两个同时运行的
+/// Pebrel 实例各自的 pane 1 被身份探测混在一起；数字值可原样穿过 WSL。
+pub const PROCESS_ENV: &str = "PEBREL_PROCESS_ID";
+
 const TERM_PROGRAM_ENV: &str = "TERM_PROGRAM";
 const TERM_PROGRAM_VERSION_ENV: &str = "TERM_PROGRAM_VERSION";
 const PATH_ENV: &str = "PATH";
@@ -71,6 +75,7 @@ pub fn apply(env: &mut HashMap<String, String>, pane_id: impl Display) {
     let pane_id = pane_id.to_string();
     insert_env(env, PANE_ENV, pane_id.clone());
     insert_env(env, crate::ai_hook::LEGACY_PANE_ENV, pane_id);
+    insert_env(env, PROCESS_ENV, std::process::id().to_string());
     insert_env(env, TERM_PROGRAM_ENV, TERM_PROGRAM.to_owned());
     insert_env(env, TERM_PROGRAM_VERSION_ENV, env!("VERSION").to_owned());
 
@@ -166,6 +171,7 @@ const WSLENV_ENTRIES: &[&str] = &[
     TERM_PROGRAM_VERSION_ENV,
     "PEBREL_CLI/p",
     "PEBREL_BIN_DIR/p",
+    PROCESS_ENV,
     "NEBULA_CLI/p",
     "NEBULA_BIN_DIR/p",
 ];
@@ -219,6 +225,8 @@ mod tests {
         let env = applied(17);
         assert_eq!(env.get(PANE_ENV).map(String::as_str), Some("17"));
         assert_eq!(env.get(crate::ai_hook::LEGACY_PANE_ENV), env.get(PANE_ENV));
+        let process_id = std::process::id().to_string();
+        assert_eq!(env.get(PROCESS_ENV).map(String::as_str), Some(process_id.as_str()));
         assert_eq!(env.get(LEGACY_CLI_ENV), env.get(CLI_ENV));
         assert_eq!(env.get(LEGACY_BIN_DIR_ENV), env.get(BIN_DIR_ENV));
         assert_eq!(env.get("TERM_PROGRAM").map(String::as_str), Some(TERM_PROGRAM));
@@ -299,6 +307,7 @@ mod tests {
         let names: Vec<&str> = WSLENV_ENTRIES.iter().copied().map(variable_name).collect();
         assert!(names.contains(&CLI_ENV), "{CLI_ENV} missing from WSLENV passthrough: {names:?}");
         assert!(names.contains(&BIN_DIR_ENV), "{BIN_DIR_ENV} missing: {names:?}");
+        assert!(names.contains(&PROCESS_ENV), "{PROCESS_ENV} missing: {names:?}");
     }
 
     #[cfg(windows)]

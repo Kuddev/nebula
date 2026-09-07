@@ -5,18 +5,22 @@ export LC_ALL=C.UTF-8
 
 usage() {
   cat <<'EOF'
-Usage: scripts/package-linux.sh --binary PATH --version VERSION --preview-id ID
+Usage: scripts/package-linux.sh --binary PATH --version VERSION
+       [--channel preview --preview-id ID|--channel stable]
        [--output-directory DIR] [--linuxdeploy PATH] [--force]
 
-Builds a Linux x86_64 Preview AppImage, portable tar.gz, and Debian package
-from one fresh Pebrel release binary. linuxdeploy must be supplied explicitly
-or through LINUXDEPLOY; the CI workflow downloads a pinned, SHA-verified copy.
+Builds a Linux x86_64 AppImage, portable tar.gz, and Debian package from one
+fresh Pebrel release binary. Preview packages require --preview-id; stable
+packages use formal Pebrel metadata and x64 asset names. linuxdeploy must be
+supplied explicitly or through LINUXDEPLOY; CI downloads a pinned,
+SHA-verified copy.
 EOF
 }
 
 binary=""
 version=""
 preview_id=""
+channel="preview"
 output_directory="dist"
 linuxdeploy="${LINUXDEPLOY:-}"
 force=0
@@ -33,6 +37,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --preview-id)
       preview_id="${2:-}"
+      shift 2
+      ;;
+    --channel)
+      channel="${2:-}"
       shift 2
       ;;
     --output-directory)
@@ -59,7 +67,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$binary" || -z "$version" || -z "$preview_id" || -z "$linuxdeploy" ]]; then
+if [[ "$channel" != "preview" && "$channel" != "stable" ]]; then
+  echo "unsupported package channel: $channel (expected preview or stable)" >&2
+  exit 2
+fi
+if [[ "$channel" == "preview" && -z "$preview_id" ]]; then
+  echo "Preview packages require --preview-id" >&2
+  exit 2
+fi
+if [[ "$channel" == "stable" && -n "$preview_id" ]]; then
+  echo "stable packages must not include --preview-id" >&2
+  exit 2
+fi
+if [[ -z "$binary" || -z "$version" || -z "$linuxdeploy" ]]; then
   usage >&2
   exit 2
 fi
@@ -67,7 +87,7 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
   echo "invalid Cargo package version: $version" >&2
   exit 2
 fi
-if [[ ! "$preview_id" =~ ^[0-9A-Za-z][0-9A-Za-z.-]{0,31}$ ]]; then
+if [[ -n "$preview_id" && ! "$preview_id" =~ ^[0-9A-Za-z][0-9A-Za-z.-]{0,31}$ ]]; then
   echo "invalid Preview id: $preview_id" >&2
   exit 2
 fi
@@ -100,8 +120,25 @@ linuxdeploy="$(cd "$(dirname "$linuxdeploy")" && pwd -P)/$(basename "$linuxdeplo
 mkdir -p "$output_directory"
 output_directory="$(cd "$output_directory" && pwd -P)"
 
-desktop_source="$repo/packaging/linux/io.github.kuddev.pebrel.preview.desktop"
-metainfo_source="$repo/packaging/linux/io.github.kuddev.pebrel.preview.metainfo.xml"
+if [[ "$channel" == "stable" ]]; then
+  desktop_source="$repo/packaging/linux/io.github.kuddev.pebrel.desktop"
+  metainfo_source="$repo/packaging/linux/io.github.kuddev.pebrel.metainfo.xml"
+  desktop_id="io.github.kuddev.pebrel"
+  package_name="pebrel"
+  package_description="Pebrel GPU-accelerated terminal"
+  package_note=""
+  asset_architecture="x64"
+  release="$version"
+else
+  desktop_source="$repo/packaging/linux/io.github.kuddev.pebrel.preview.desktop"
+  metainfo_source="$repo/packaging/linux/io.github.kuddev.pebrel.preview.metainfo.xml"
+  desktop_id="io.github.kuddev.pebrel.preview"
+  package_name="pebrel-preview"
+  package_description="Pebrel cross-platform Preview"
+  package_note=" This package is a Preview build and is not a stable release."
+  asset_architecture="x86_64"
+  release="$version-preview.$preview_id"
+fi
 icon_source="$repo/extra/logo/nebula.png"
 for required in "$desktop_source" "$metainfo_source" "$icon_source" \
   "$repo/README.md" "$repo/CHANGELOG.md" "$repo/INSTALL.md" \
@@ -153,10 +190,9 @@ if dpkg --compare-versions "$required_glibc" gt "2.35"; then
   exit 1
 fi
 
-release="$version-preview.$preview_id"
-appimage_path="$output_directory/Pebrel-v$release-linux-x86_64.AppImage"
-tar_path="$output_directory/Pebrel-v$release-linux-x86_64.tar.gz"
-deb_path="$output_directory/Pebrel-v$release-linux-x86_64.deb"
+appimage_path="$output_directory/Pebrel-v$release-linux-$asset_architecture.AppImage"
+tar_path="$output_directory/Pebrel-v$release-linux-$asset_architecture.tar.gz"
+deb_path="$output_directory/Pebrel-v$release-linux-$asset_architecture.deb"
 outputs=("$appimage_path" "$tar_path" "$deb_path")
 for output in "${outputs[@]}"; do
   if [[ -e "$output" && $force -ne 1 ]]; then
@@ -178,37 +214,37 @@ trap cleanup EXIT
 
 common_root="$work/common"
 appdir="$work/Pebrel.AppDir"
-deb_root="$work/debian/pebrel-preview"
+deb_root="$work/debian/$package_name"
 mkdir -p \
   "$common_root/usr/bin" \
   "$common_root/usr/share/applications" \
   "$common_root/usr/share/icons/hicolor/256x256/apps" \
   "$common_root/usr/share/metainfo" \
-  "$common_root/usr/share/doc/pebrel-preview/licenses" \
+  "$common_root/usr/share/doc/$package_name/licenses" \
   "$common_root/usr/share/bash-completion/completions" \
   "$common_root/usr/share/fish/vendor_completions.d" \
   "$common_root/usr/share/zsh/vendor-completions"
 
 install -m 0755 "$binary" "$common_root/usr/bin/pebrel"
 install -m 0644 "$desktop_source" \
-  "$common_root/usr/share/applications/io.github.kuddev.pebrel.preview.desktop"
+  "$common_root/usr/share/applications/$desktop_id.desktop"
 install -m 0644 "$metainfo_source" \
-  "$common_root/usr/share/metainfo/io.github.kuddev.pebrel.preview.metainfo.xml"
+  "$common_root/usr/share/metainfo/$desktop_id.metainfo.xml"
 convert "$icon_source" -resize 256x256 \
-  "$common_root/usr/share/icons/hicolor/256x256/apps/io.github.kuddev.pebrel.preview.png"
-install -m 0644 "$repo/README.md" "$common_root/usr/share/doc/pebrel-preview/README.md"
-install -m 0644 "$repo/CHANGELOG.md" "$common_root/usr/share/doc/pebrel-preview/CHANGELOG.md"
-install -m 0644 "$repo/INSTALL.md" "$common_root/usr/share/doc/pebrel-preview/INSTALL.md"
-install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE"
-install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/pebrel-preview/copyright"
+  "$common_root/usr/share/icons/hicolor/256x256/apps/$desktop_id.png"
+install -m 0644 "$repo/README.md" "$common_root/usr/share/doc/$package_name/README.md"
+install -m 0644 "$repo/CHANGELOG.md" "$common_root/usr/share/doc/$package_name/CHANGELOG.md"
+install -m 0644 "$repo/INSTALL.md" "$common_root/usr/share/doc/$package_name/INSTALL.md"
+install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/$package_name/licenses/LICENSE"
+install -m 0644 "$repo/LICENSE" "$common_root/usr/share/doc/$package_name/copyright"
 install -m 0644 "$repo/THIRD-PARTY-NOTICES" \
-  "$common_root/usr/share/doc/pebrel-preview/licenses/THIRD-PARTY-NOTICES"
+  "$common_root/usr/share/doc/$package_name/licenses/THIRD-PARTY-NOTICES"
 install -m 0644 "$repo/licenses/LICENSE-LUA" \
-  "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE-LUA"
+  "$common_root/usr/share/doc/$package_name/licenses/LICENSE-LUA"
 install -m 0644 "$repo/licenses/LICENSE-MLUA" \
-  "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE-MLUA"
+  "$common_root/usr/share/doc/$package_name/licenses/LICENSE-MLUA"
 install -m 0644 "$repo/licenses/LICENSE-LATIN-MODERN-MATH" \
-  "$common_root/usr/share/doc/pebrel-preview/licenses/LICENSE-LATIN-MODERN-MATH"
+  "$common_root/usr/share/doc/$package_name/licenses/LICENSE-LATIN-MODERN-MATH"
 install -m 0644 "$repo/extra/completions/pebrel.bash" \
   "$common_root/usr/share/bash-completion/completions/pebrel"
 install -m 0644 "$repo/extra/completions/pebrel.fish" \
@@ -217,9 +253,9 @@ install -m 0644 "$repo/extra/completions/_pebrel" \
   "$common_root/usr/share/zsh/vendor-completions/_pebrel"
 
 desktop-file-validate \
-  "$common_root/usr/share/applications/io.github.kuddev.pebrel.preview.desktop"
+  "$common_root/usr/share/applications/$desktop_id.desktop"
 appstreamcli validate --no-net \
-  "$common_root/usr/share/metainfo/io.github.kuddev.pebrel.preview.metainfo.xml"
+  "$common_root/usr/share/metainfo/$desktop_id.metainfo.xml"
 
 cp -a "$common_root/." "$appdir/"
 tool_output="$work/linuxdeploy-output"
@@ -232,8 +268,8 @@ mkdir -p "$tool_output"
     "$linuxdeploy" \
       --appdir "$appdir" \
       --executable "$appdir/usr/bin/pebrel" \
-      --desktop-file "$appdir/usr/share/applications/io.github.kuddev.pebrel.preview.desktop" \
-      --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/io.github.kuddev.pebrel.preview.png" \
+      --desktop-file "$appdir/usr/share/applications/$desktop_id.desktop" \
+      --icon-file "$appdir/usr/share/icons/hicolor/256x256/apps/$desktop_id.png" \
       --output appimage
 )
 mapfile -t generated_appimages < <(find "$tool_output" -maxdepth 1 -type f -name '*.AppImage' -print)
@@ -255,7 +291,7 @@ if [[ ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
   echo "SOURCE_DATE_EPOCH must be an integer" >&2
   exit 1
 fi
-archive_root="Pebrel-v$release-linux-x86_64"
+archive_root="Pebrel-v$release-linux-$asset_architecture"
 tar \
   --sort=name \
   --mtime="@$source_date_epoch" \
@@ -269,15 +305,15 @@ tar \
 mkdir -p "$deb_root"
 cp -a "$common_root/." "$deb_root/"
 cat >"$work/debian/control" <<EOF
-Source: pebrel-preview
+Source: $package_name
 Section: utils
 Priority: optional
 Maintainer: Kuddev <Kuddev@users.noreply.github.com>
 Standards-Version: 4.6.2
 
-Package: pebrel-preview
+Package: $package_name
 Architecture: any
-Description: Pebrel cross-platform Preview
+Description: $package_description
  GPU-accelerated terminal for local and remote workflows.
 EOF
 dependency_line="$(
@@ -291,9 +327,13 @@ fi
 dependencies="${dependency_line#shlibs:Depends=}"
 installed_size="$(du -sk "$deb_root/usr" | awk '{print $1}')"
 mkdir -p "$deb_root/DEBIAN"
+expected_deb_version="$version"
+if [[ "$channel" == "preview" ]]; then
+  expected_deb_version="$version~preview.$preview_id"
+fi
 cat >"$deb_root/DEBIAN/control" <<EOF
-Package: pebrel-preview
-Version: $version~preview.$preview_id
+Package: $package_name
+Version: $expected_deb_version
 Section: utils
 Priority: optional
 Architecture: amd64
@@ -302,15 +342,15 @@ Installed-Size: $installed_size
 Depends: $dependencies
 Recommends: libsecret-tools, gnome-keyring
 Homepage: https://github.com/Kuddev/pebrel
-Description: Pebrel cross-platform Preview
+Description: $package_description
  GPU-accelerated terminal for local and remote workflows.
- This package is a Preview build and is not a stable release.
+$package_note
 EOF
 chmod 0755 "$deb_root/DEBIAN"
 chmod 0644 "$deb_root/DEBIAN/control"
 dpkg-deb --root-owner-group --build "$deb_root" "$deb_path"
 
-if [[ "$(dpkg-deb --field "$deb_path" Package)" != "pebrel-preview" ]]; then
+if [[ "$(dpkg-deb --field "$deb_path" Package)" != "$package_name" ]]; then
   echo "Debian package identity verification failed" >&2
   exit 1
 fi
@@ -318,7 +358,7 @@ if [[ "$(dpkg-deb --field "$deb_path" Architecture)" != "amd64" ]]; then
   echo "Debian package architecture verification failed" >&2
   exit 1
 fi
-if [[ "$(dpkg-deb --field "$deb_path" Version)" != "$version~preview.$preview_id" ]]; then
+if [[ "$(dpkg-deb --field "$deb_path" Version)" != "$expected_deb_version" ]]; then
   echo "Debian package version verification failed" >&2
   exit 1
 fi

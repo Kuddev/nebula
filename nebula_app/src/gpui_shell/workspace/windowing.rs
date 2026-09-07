@@ -119,6 +119,7 @@ pub(crate) struct WindowRegistry {
     entries: Vec<WindowEntry>,
     runtime_hub: crate::runtime_api::RuntimeHub,
     session_persistence: SessionPersistence,
+    quit_pending: bool,
     #[cfg(windows)]
     quick_terminal: Option<QuickTerminalWindow>,
     _subscriptions: Vec<Subscription>,
@@ -192,6 +193,7 @@ pub(crate) fn initialize(cx: &mut App, runtime_hub: crate::runtime_api::RuntimeH
         entries: Vec::new(),
         runtime_hub,
         session_persistence: SessionPersistence::default(),
+        quit_pending: false,
         #[cfg(windows)]
         quick_terminal: None,
         _subscriptions: Vec::new(),
@@ -1404,6 +1406,27 @@ pub(super) fn save_current_window_session(
 }
 
 pub(crate) fn quit_all(cx: &mut App) {
+    if cx.global::<WindowRegistry>().quit_pending {
+        return;
+    }
+    cx.global_mut::<WindowRegistry>().quit_pending = true;
+    let entries = cx.global::<WindowRegistry>().entries.clone();
+    let panes = entries
+        .iter()
+        .filter(|entry| entry.role == WindowRole::Regular)
+        .filter_map(|entry| {
+            entry.workspace.update(cx, |workspace, cx| workspace.prepare_session_save(cx)).ok()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    cx.spawn(async move |cx| {
+        super::closing::wait_for_session_ids(&panes, cx).await;
+        cx.update(finish_quit_all);
+    })
+    .detach();
+}
+
+fn finish_quit_all(cx: &mut App) {
     save_combined_session(cx, true);
     prune_entries(cx);
     let entries = cx.global::<WindowRegistry>().entries.clone();

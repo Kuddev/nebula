@@ -310,8 +310,9 @@ fn parse_latest_release(bytes: &[u8]) -> Result<LatestRelease, String> {
     Ok(LatestRelease { version, asset })
 }
 
-pub(crate) fn windows_x64_installer_names(version: &str) -> [String; 2] {
+pub(crate) fn windows_x64_installer_names(version: &str) -> [String; 3] {
     [
+        format!("Pebrel-v{version}-windows-x64-setup.exe"),
         format!("Pebrel-{version}-windows-x64-setup.exe"),
         format!("NebulaTerminal-{version}-windows-x64-setup.exe"),
     ]
@@ -484,8 +485,8 @@ mod tests {
 
     #[test]
     fn installer_selection_prefers_pebrel_regardless_of_asset_order() {
-        let [pebrel, legacy] = windows_x64_installer_names("1.6.0");
-        for names in [[&legacy, &pebrel], [&pebrel, &legacy]] {
+        let [pebrel, interim, legacy] = windows_x64_installer_names("1.6.0");
+        for names in [[&legacy, &interim, &pebrel], [&pebrel, &legacy, &interim]] {
             let assets = names.map(|name| release_asset(name)).into_iter().collect();
             let selected = select_windows_x64_installer("1.6.0", "", assets).unwrap();
             assert_eq!(selected.name, pebrel);
@@ -495,7 +496,7 @@ mod tests {
 
     #[test]
     fn installer_selection_accepts_legacy_only_releases_and_body_checksums() {
-        let [_, legacy] = windows_x64_installer_names("1.6.0");
+        let [_, _, legacy] = windows_x64_installer_names("1.6.0");
         let mut asset = release_asset(&legacy);
         asset.digest = None;
         let hash = "b".repeat(64);

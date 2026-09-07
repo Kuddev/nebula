@@ -71,3 +71,4 @@ jobs:
           scripts.tests.test_pebrel_branding
           scripts.tests.test_windows_resources
           scripts.tests.test_app_icons
+          scripts.tests.test_ai_session_probe

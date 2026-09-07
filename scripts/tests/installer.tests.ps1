@@ -34,7 +34,7 @@ $requiredPatterns = [ordered]@{
     'Pebrel display name' = 'AppName=Pebrel'
     'compatible installer identity' = 'AppId=\{\{61022144-7D0A-4E54-94F2-C329A8F58656\}'
     'Pebrel default asset name' = '#define PackageBrand "Pebrel"'
-    'explicit package brand' = 'OutputBaseFilename=\{#PackageBrand\}-\{#AppVersion\}-windows-x64-setup'
+    'explicit package brand' = 'OutputBaseFilename=\{#PackageBrand\}-v\{#AppVersion\}-windows-x64-setup'
     'localized Chinese context menu label' = 'chinesesimplified\.OpenInPebrel=\S.+'
     'directory background context menu' = 'Software\\Classes\\Directory\\Background\\shell\\Pebrel'
     'selected directory context menu' = 'Software\\Classes\\Directory\\shell\\Pebrel'

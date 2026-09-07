@@ -46,6 +46,7 @@ use gpui_component::notification::Notification;
 use nebula_split::{DIVIDER_GAP, HIT_SLOP, RemoveOutcome, SplitDirection, SplitNav, SplitTree};
 
 mod agents;
+mod closing;
 mod command_manager;
 mod file_tree;
 mod key_actions;
@@ -1103,6 +1104,7 @@ pub struct NebulaWorkspace {
     spinner_visible: std::cell::Cell<bool>,
     /// 系统关闭按钮可能连续送来多次 should-close；确认框在场时只保留一份。
     window_close_confirm_open: bool,
+    window_close_pending: bool,
     /// `keep_session` 关窗后 HWND 已隐藏、PTY 仍在；托盘 / mux ATTACH 用来捞回。
     window_hidden: bool,
     /// 开窗时记下，mux `tab.new` 需要从 pump 拿到 `&mut Window`。
@@ -1335,6 +1337,7 @@ impl NebulaWorkspace {
             spinner_frame_pending: std::cell::Cell::new(false),
             spinner_visible: std::cell::Cell::new(false),
             window_close_confirm_open: false,
+            window_close_pending: false,
             window_hidden: false,
             window_handle: window.window_handle(),
             runtime_window_id,
@@ -1996,61 +1999,6 @@ impl NebulaWorkspace {
             session_persistence::SaveReason::WindowClose,
             cx,
         );
-    }
-
-    /// GPUI 的 should-close 回调必须同步返回：无繁忙进程时直接允许系统关闭；
-    /// 有繁忙进程时先返回 false，再由对话框确认回调显式移除窗口。
-    fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let persist_session = self.window_role == windowing::WindowRole::Regular;
-        if persist_session && self.keep_session_on_close(window, cx) {
-            return false;
-        }
-        let Some(process) = self.busy_process_in_window(cx) else {
-            if persist_session {
-                self.save_clean_window_session(cx);
-            }
-            return true;
-        };
-        if self.window_close_confirm_open {
-            return false;
-        }
-        self.window_close_confirm_open = true;
-
-        let body: SharedString = format!("{process} 仍在运行，关闭窗口会中止它。").into();
-        let confirm_workspace = cx.entity().downgrade();
-        let close_workspace = confirm_workspace.clone();
-        window.open_dialog(cx, move |dialog, window, _cx| {
-            let confirm_workspace = confirm_workspace.clone();
-            let close_workspace = close_workspace.clone();
-            confirm_dialog(
-                dialog,
-                window,
-                "关闭窗口？",
-                body.clone(),
-                "关闭",
-                "取消",
-                ButtonVariant::Danger,
-            )
-            .on_ok(move |_, window, cx| {
-                let _ = confirm_workspace.update(cx, |workspace, cx| {
-                    if persist_session {
-                        workspace.save_clean_window_session(cx);
-                    }
-                    workspace.window_close_confirm_open = false;
-                    // `remove_window` 是确认后的最终动作，不会重新触发
-                    // should-close，从而避免再次弹出同一确认框。
-                    window.remove_window();
-                });
-                true
-            })
-            .on_close(move |_, _, cx| {
-                let _ = close_workspace.update(cx, |workspace, cx| {
-                    workspace.window_close_confirm_open = false;
-                    cx.notify();
-                });
-            })
-        });
-        false
     }
 
     fn request_close_pane(

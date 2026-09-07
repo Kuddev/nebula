@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Pebrel
+GenericName=Terminal Emulator
+Comment=GPU-accelerated terminal for local and remote workflows
+Exec=pebrel
+Icon=io.github.kuddev.pebrel
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;ssh;
+StartupNotify=true
+StartupWMClass=Pebrel
