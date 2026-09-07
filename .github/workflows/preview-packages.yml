@@ -321,6 +321,13 @@ jobs:
       - name: Test SSH confirmation and password dialogs
         run: cargo test --locked -p nebula --features gpui-test-support dialog
 
+      - name: Release completed test artifacts before building the package
+        run: |
+          df -h . "${TMPDIR:-/tmp}"
+          du -sh target/debug
+          cargo clean --profile dev --package nebula
+          df -h . "${TMPDIR:-/tmp}"
+
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin nebula --features gpui-shell
 

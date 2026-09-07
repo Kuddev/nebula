@@ -246,12 +246,20 @@ if [[ "$(lipo -archs "$contents/MacOS/nebula")" != "$expected_uname" ]]; then
 fi
 
 ln -s /Applications "$stage/Applications"
-hdiutil create \
+df -h "$output_directory" "$work"
+du -sh "$stage"
+if hdiutil create \
   -volname "Nebula Terminal Preview" \
   -srcfolder "$stage" \
   -ov \
   -format UDZO \
-  "$dmg_path"
+  "$dmg_path"; then
+  :
+else
+  create_status=$?
+  df -h "$output_directory" "$work"
+  exit "$create_status"
+fi
 hdiutil verify "$dmg_path"
 if [[ -n "$sign_identity" ]]; then
   codesign --force --sign "$sign_identity" --timestamp ${keychain_args[@]+"${keychain_args[@]}"} "$dmg_path"
