@@ -91,6 +91,15 @@ jobs:
           fi
         env:
           CI_SUITE: ${{ matrix.suite }}
+      - name: Initialize the native PowerShell runtime
+        if: runner.os == 'Linux' && matrix.suite == 'core'
+        timeout-minutes: 1
+        env:
+          POWERSHELL_TELEMETRY_OPTOUT: "1"
+        run: |
+          if command -v pwsh >/dev/null 2>&1; then
+            timeout 30s pwsh -NoLogo -NoProfile -NonInteractive -Command '(Get-Host).Version.ToString()'
+          fi
       - name: Test native shell and process contracts
         if: matrix.suite == 'core'
         run: >-

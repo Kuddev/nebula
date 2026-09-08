@@ -244,7 +244,16 @@ mod tab_rename_paste_tests {
             window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
         });
 
-        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-v" } else { "ctrl-v" });
+        let paste_shortcut = cx.update(|window, cx| {
+            let focus = probe.read(cx).input.read(cx).focus_handle(cx);
+            let binding = window
+                .highest_precedence_binding_for_action_in(&gpui_component::input::Paste, &focus)
+                .expect("the focused input must register its native paste binding");
+            assert_eq!(binding.keystrokes().len(), 1);
+            binding.keystrokes()[0].unparse()
+        });
+        assert!(matches!(paste_shortcut.as_str(), "cmd-v" | "ctrl-v"));
+        cx.simulate_keystrokes(&paste_shortcut);
 
         let (value, workspace_paste_actions, terminal_pastes) = probe.read_with(cx, |probe, cx| {
             (

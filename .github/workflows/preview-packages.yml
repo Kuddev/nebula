@@ -47,6 +47,9 @@ env:
 jobs:
   tests:
     name: Native tests
+    # Let the two package VMs start before the four Mac test VMs compete for
+    # hosted macOS concurrency. Compilation and tests still overlap.
+    needs: prepare
     uses: ./.github/workflows/ci.yml
     with:
       full: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}

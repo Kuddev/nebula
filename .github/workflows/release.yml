@@ -55,6 +55,7 @@ jobs:
   tests:
     name: Native tests
     if: ${{ inputs.source_commit == '' }}
+    needs: prepare
     uses: ./.github/workflows/ci.yml
     with:
       full: true
