@@ -246,13 +246,18 @@ mod tab_rename_paste_tests {
 
         let paste_shortcut = cx.update(|window, cx| {
             let focus = probe.read(cx).input.read(cx).focus_handle(cx);
-            let binding = window
-                .highest_precedence_binding_for_action_in(&gpui_component::input::Paste, &focus)
-                .expect("the focused input must register its native paste binding");
-            assert_eq!(binding.keystrokes().len(), 1);
-            binding.keystrokes()[0].unparse()
+            // Ctrl+Shift+V is also registered; preserve the original regression's
+            // unshifted gesture while taking its platform mapping from Input.
+            window
+                .bindings_for_action_in(&gpui_component::input::Paste, &focus)
+                .into_iter()
+                .filter_map(|binding| {
+                    let [stroke] = binding.keystrokes() else { return None };
+                    Some(stroke.unparse())
+                })
+                .find(|shortcut| matches!(shortcut.as_str(), "cmd-v" | "ctrl-v"))
+                .expect("the focused input must register its unshifted native paste binding")
         });
-        assert!(matches!(paste_shortcut.as_str(), "cmd-v" | "ctrl-v"));
         cx.simulate_keystrokes(&paste_shortcut);
 
         let (value, workspace_paste_actions, terminal_pastes) = probe.read_with(cx, |probe, cx| {
