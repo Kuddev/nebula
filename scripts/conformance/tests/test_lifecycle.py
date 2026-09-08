@@ -34,7 +34,10 @@ else:
         [sys.executable, '-I', '-S', __file__, str(root), next_role],
         stdin=subprocess.DEVNULL,
     )
-    (root / (next_role + '.pid')).write_text(str(child.pid))
+    # Publish a complete PID before readers observe the readiness marker.
+    pending_pid = root / (next_role + '.pid.pending')
+    pending_pid.write_text(str(child.pid))
+    pending_pid.replace(root / (next_role + '.pid'))
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if role == 'parent' and (root / 'exit').exists():

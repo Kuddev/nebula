@@ -29,7 +29,9 @@ role = sys.argv[2]
 if role != 'grandchild':
     next_role = 'child' if role == 'parent' else 'grandchild'
     subprocess.Popen([sys.executable, '-I', '-S', __file__, str(root), next_role])
-(root / (role + '.pid')).write_text(str(os.getpid()))
+pending_pid = root / (role + '.pid.pending')
+pending_pid.write_text(str(os.getpid()))
+pending_pid.replace(root / (role + '.pid'))
 while True:
     if role == 'parent' and (root / 'exit').exists():
         code = root / 'exit-code'
