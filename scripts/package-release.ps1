@@ -217,9 +217,15 @@ try {
     }
 
     Assert-Manifest $stage @($manifest.Keys)
-    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $temporaryZip -CompressionLevel Optimal
-
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zipCompression = [System.IO.Compression.CompressionLevel]::Optimal
+    if ([System.Enum]::GetNames([System.IO.Compression.CompressionLevel]) -contains 'SmallestSize') {
+        $zipCompression = [System.IO.Compression.CompressionLevel]::SmallestSize
+    }
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $stage, $temporaryZip, $zipCompression, $false
+    )
+
     $archive = [System.IO.Compression.ZipFile]::OpenRead($temporaryZip)
     try {
         $zipManifest = @($archive.Entries |
