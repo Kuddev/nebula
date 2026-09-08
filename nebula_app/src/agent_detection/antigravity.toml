@@ -1,12 +1,37 @@
 # Screen-chrome evidence for this CLI (idle / working / blocked).
 id = "antigravity"
 aliases = ["agy", "antigravity-cli"]
+# Wrap inherited regions without changing their original 1/10/12-line windows.
+shared_rule_region = "after_last_prompt_row"
+# Local input rules first select their window, then discard rows before the last
+# empty prompt. Spinner/task rules intentionally retain evidence above the prompt.
+
+# Captured from agy 1.1.27 ask_question: choices and navigation footer
+# coexist with "esc to cancel", which otherwise matches shared working.
+[[rules]]
+id = "question_selection"
+state = "blocked"
+priority = 900
+region = "after_last_prompt_row(bottom_non_empty_lines(12))"
+line_regex = ['(?i)^\s*↑/↓\s+Navigate\b.*\benter\s+Select\b']
+# Only the current bottom working hint excludes quoted form chrome; older
+# interrupt text in command/diff content must not hide a real approval.
+not = [{ regex = ['(?im)^\s*(?:press\s+)?esc to interrupt[^\n]*(?:\n\s*)*\z'] }]
+
+# agy 1.1.27 creation/edit reviews, captured with request-review enabled.
+[[rules]]
+id = "file_review"
+state = "blocked"
+priority = 900
+region = "after_last_prompt_row(bottom_non_empty_lines(12))"
+line_regex = ['(?i)^\s*↑/↓\s+Navigate\b.*\bf\s+full diff\b']
+not = [{ regex = ['(?im)^\s*(?:press\s+)?esc to interrupt[^\n]*(?:\n\s*)*\z'] }]
 
 [[rules]]
 id = "permission_prompt"
 state = "blocked"
 priority = 900
-region = "bottom_non_empty_lines(12)"
+region = "after_last_prompt_row(bottom_non_empty_lines(12))"
 any = [
   { contains = ["requesting approval"], any = [
     { contains = ["[y]"] },
@@ -54,7 +79,7 @@ line_regex = ['(?i)·\s*[1-9][0-9]*\s+task']
 id = "prompt_idle"
 state = "idle"
 priority = 100
-region = "bottom_non_empty_lines(6)"
+region = "after_last_prompt_row(bottom_non_empty_lines(6))"
 any = [
   { contains = ["shift+tab to cycle"] },
   { contains = ["? for shortcuts"] },
