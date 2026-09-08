@@ -87,12 +87,18 @@ class ScrollbackCompletionTests(unittest.TestCase):
         for shell, invocation in shells:
             with self.subTest(shell=shell):
                 command = context_for(shell).scrollback_command(6, MARKER)
+                environment = os.environ.copy()
+                if shell == "pwsh":
+                    # Exercise the command without first-run telemetry/UUID
+                    # initialization competing with the short subprocess limit.
+                    environment["POWERSHELL_TELEMETRY_OPTOUT"] = "1"
                 result = subprocess.run(
                     [*invocation, command],
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
+                    env=environment,
                     timeout=10,
                     check=True,
                 )

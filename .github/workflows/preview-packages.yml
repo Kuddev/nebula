@@ -169,6 +169,7 @@ jobs:
         with:
           shared-key: release-v2
           cache-workspace-crates: true
+          cache-on-failure: true
           cache-bin: false
           env-vars: MACOSX_DEPLOYMENT_TARGET
 
@@ -336,6 +337,7 @@ jobs:
         with:
           shared-key: release-v2
           cache-workspace-crates: true
+          cache-on-failure: true
           cache-bin: false
           env-vars: MACOSX_DEPLOYMENT_TARGET
 
@@ -476,6 +478,7 @@ jobs:
         with:
           shared-key: release-v2
           cache-workspace-crates: true
+          cache-on-failure: true
           cache-bin: false
           env-vars: MACOSX_DEPLOYMENT_TARGET
       - name: Build GPUI comparison binary

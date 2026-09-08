@@ -189,7 +189,11 @@ mod tests {
 
     #[gpui::test]
     fn confirm_dialog_mouse_buttons_dispatch_cancel_and_confirm(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            // Hitbox assertions need the dialog's settled position.
+            cx.set_reduce_motion(true);
+        });
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| ConfirmDialogProbe);
             Root::new(view, window, cx)

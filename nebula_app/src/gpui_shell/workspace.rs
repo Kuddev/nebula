@@ -4380,7 +4380,7 @@ impl Render for NebulaWorkspace {
             .on_action(cx.listener(|this, _: &PasteClipboard, window, cx| {
                 this.paste_focused_terminal(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleFullscreen, window, _cx| {
+            .on_action(cx.listener(|_, _: &ToggleFullscreen, window, _| {
                 window.toggle_fullscreen();
             }))
             .on_action(cx.listener(|this, _: &OpenQuickJump, window, cx| {

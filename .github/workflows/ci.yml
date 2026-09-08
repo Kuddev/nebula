@@ -111,6 +111,7 @@ jobs:
           shared-key: ci-v1-${{ matrix.suite }}-${{ hashFiles('.github/ci-profile.toml') }}
           workspaces: . -> target/ci-${{ matrix.suite }}
           cache-workspace-crates: true
+          cache-on-failure: true
           cache-bin: false
           env-vars: MACOSX_DEPLOYMENT_TARGET
       - name: Compile the product and run complete affected crate suites
