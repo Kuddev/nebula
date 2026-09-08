@@ -487,6 +487,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Prepare the same pinned console runtime as Windows packages
+        shell: pwsh
+        run: ./scripts/prepare-windows-runtime.ps1 -Destination assets/windows/conhost
       - uses: ./.github/actions/rust-cache
         id: rust-cache
         with:

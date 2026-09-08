@@ -77,7 +77,8 @@ class PosixLifecycleTests(unittest.TestCase):
         self.client = SimpleNamespace(request=lambda *args, **kwargs: {
             "result": {
                 "process_id": self.parents[-1].pid,
-                "windows": [{"tabs": [{"kind": "shell", "panes": [{}]}]}],
+                "text": "fixture> ",
+                "windows": [{"id": 1, "tabs": [{"kind": "shell", "panes": [{"id": 1}]}]}],
             },
         })
         self.launch_patch = patch("conformance.harness.subprocess.Popen", side_effect=launch_fixture)
@@ -184,7 +185,8 @@ class PosixLifecycleTests(unittest.TestCase):
         self.client.request = lambda *args, **kwargs: {
             "result": {
                 "process_id": int((self.launches[-1] / "child.pid").read_text()),
-                "windows": [{"tabs": [{"kind": "shell", "panes": [{}]}]}],
+                "text": "fixture> ",
+                "windows": [{"id": 1, "tabs": [{"kind": "shell", "panes": [{"id": 1}]}]}],
             },
         }
         self.context.start()

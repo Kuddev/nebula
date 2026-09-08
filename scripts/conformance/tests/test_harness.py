@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 import plistlib
 import re
 import subprocess
@@ -18,6 +19,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from conformance.harness import (  # noqa: E402
     ConformanceError,
+    ConformanceContext,
     ResolvedApp,
     compare_reports,
     find_last_line_match,
@@ -55,6 +57,69 @@ class NormalizationTests(unittest.TestCase):
         self.assertIsNotNone(match)
         assert match is not None
         self.assertEqual(match.group(1), "57")
+
+
+class StartupReadinessTests(unittest.TestCase):
+    def context(self, directory, timeout=1):
+        root = Path(directory)
+        context = ConformanceContext(
+            SimpleNamespace(executable=root / "fixture-app"), "test",
+            root / "config", root / "work", root / "artifacts", startup_timeout=timeout,
+        )
+        context.prepare()
+        context.port_file.write_text("1 token", encoding="utf-8")
+        self.addCleanup(context._close_log)
+        return context
+
+    def client(self, outputs):
+        observations = iter(outputs)
+        reads = []
+
+        def request(method, params=None, **kwargs):
+            if method == "pane.read":
+                reads.append(params)
+                return {"result": {"text": next(observations, "")}}
+            return {"result": {"process_id": 1234, "windows": [
+                {"id": 1, "tabs": [{"kind": "shell", "panes": [{"id": 1}]}]}
+            ]}}
+
+        return SimpleNamespace(request=request), reads
+
+    def test_pane_model_does_not_make_an_empty_shell_ready(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
+            context = self.context(directory)
+            cleanup.callback(context._close_log)
+            client, reads = self.client(["", "  \n", "PS> "])
+            process = SimpleNamespace(pid=1234, poll=lambda: None)
+            with patch.object(context, "_spawn_process", return_value=process), patch(
+                "conformance.harness.RuntimeClient.from_port_file", return_value=client,
+            ), patch("conformance.harness.os.getpgid", return_value=1234, create=True):
+                context.start()
+            self.assertIs(context.client, client)
+            self.assertEqual(len(reads), 3)
+            self.assertEqual((context.window_id, context.pane_id), (1, 1))
+
+    def test_silent_shell_keeps_the_existing_startup_deadline(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
+            context = self.context(directory, timeout=0.01)
+            cleanup.callback(context._close_log)
+            client, _ = self.client([])
+            process = SimpleNamespace(pid=1234, poll=lambda: None)
+            elapsed = [0.0]
+            with patch.object(context, "_spawn_process", return_value=process), patch.object(
+                context, "stop",
+            ) as stop, patch(
+                "conformance.harness.RuntimeClient.from_port_file", return_value=client,
+            ), patch("conformance.harness.os.getpgid", return_value=1234, create=True), patch(
+                "conformance.harness.time.monotonic", side_effect=lambda: elapsed[0],
+            ), patch(
+                "conformance.harness.time.sleep",
+                side_effect=lambda delay: elapsed.__setitem__(0, elapsed[0] + delay),
+            ):
+                with self.assertRaisesRegex(ConformanceError, "shell pane has not produced startup output"):
+                    context.start()
+            stop.assert_called_once_with(force=True)
+            self.assertIsNone(context.client)
 
 
 class ComparisonTests(unittest.TestCase):

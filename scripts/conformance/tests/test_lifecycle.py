@@ -122,7 +122,9 @@ class WindowsLifecycleTests(unittest.TestCase):
             return process
 
         client = SimpleNamespace(request=lambda *args, **kwargs: {
-            "result": {"windows": [{"tabs": [{"kind": "shell", "panes": [{}]}]}]},
+            "result": {"text": "fixture> ", "windows": [
+                {"id": 1, "tabs": [{"kind": "shell", "panes": [{"id": 1}]}]}
+            ]},
         })
         self.launch_patch = patch("conformance.harness.subprocess.Popen", side_effect=launch_fixture)
         self.client_patch = patch("conformance.harness.RuntimeClient.from_port_file", return_value=client)

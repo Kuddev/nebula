@@ -543,6 +543,18 @@ class ConformanceContext:
                         for window in windows
                     )
                     require(ready, "runtime snapshot has no ready shell pane")
+                    self.refresh_targets(snapshot)
+                    pane_output = candidate.request(
+                        "pane.read",
+                        {"window_id": self.window_id, "pane_id": self.pane_id, "lines": 160},
+                        timeout=min(1.0, max(0.1, deadline - time.monotonic())),
+                    ).get("result")
+                    require(
+                        isinstance(pane_output, dict)
+                        and isinstance(pane_output.get("text"), str)
+                        and bool(pane_output["text"].strip()),
+                        "shell pane has not produced startup output",
+                    )
                     self.client = candidate
                     self.description = response["result"]
                     self.startup_ms = round((time.monotonic() - started) * 1000)
