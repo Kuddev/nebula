@@ -134,6 +134,7 @@ build. Preview and stable packages share the release target cache. The pinned
 compiler, SDK, build flags, manifests and CI profile participate in target keys;
 Cargo still validates its own fingerprints. Complete downloads and compiled
 targets are saved separately, retaining completed compilation after a test fails.
+macOS also caches the compiled Swift verification helper and its imported modules.
 Already compressed package artifacts are uploaded without another compression pass.
 Release builds retain O3 for the product and thin LTO; the large product crate uses
 16 codegen units to parallelize LLVM compilation. Native package validation still
@@ -145,12 +146,42 @@ package bytes; cold compilation, runner queues and Apple notarization can exceed
 that objective. A timeout or omitted test is never reported as meeting it. Compare
 completed runs before claiming the target has been achieved.
 
+On 2026-09-08, the populated-cache [cross-platform Preview run](https://github.com/Kuddev/pebrel/actions/runs/34188496290)
+at `7f390b7` passed in **8m52s**, including all native tests, package conformance,
+aggregation and uploads. The separate [complete Windows packaging run](https://github.com/Kuddev/pebrel/actions/runs/34185855622)
+at `9fa1f7e` passed in **9m22s**. Both runs used `publish=false`.
+
+| Verified job | Job duration |
+| --- | --- |
+| Linux x86_64 packages and conformance | 5m59s |
+| Apple Silicon DMG and conformance | 5m52s |
+| Intel macOS DMG and conformance | 7m57s |
+| Windows Preview executable and conformance | 8m10s |
+| Windows ZIP and installer, separate complete packaging run | 8m55s |
+
+The Preview Windows lane validates the comparison executable; the separate run
+verifies the ZIP and installer. These measurements establish the populated-cache
+result, not a cold-build or notarization-time guarantee.
+
 Package size changes retain the bundled fonts and licenses. macOS DMGs use LZMA
 (`ULMO`, supported by the minimum macOS 14 target); Windows uses a 128 MiB LZMA
 dictionary so the embedded and installable copies of the font can share compressed
-data. Windows packaging builds the product and hook without linking the unshipped
-component lab. Package helper tests and native mounts/install layouts remain part
-of verification.
+data. Windows ZIPs use the smallest supported .NET compression level, with an
+`Optimal` fallback for Windows PowerShell 5. Windows packaging builds the product
+and hook without linking the unshipped component lab. Package helper tests and
+native mounts/install layouts remain part of verification.
+
+Measured package sizes against the published 1.6.0 assets are below. macOS sizes
+come from the successful native package jobs in [run 34176429079](https://github.com/Kuddev/pebrel/actions/runs/34176429079)
+at `12d65b1`; Windows sizes come from the complete packaging run at `9fa1f7e` above.
+These are actual built assets, not estimates or the controlled fixture below.
+
+| Asset | Published 1.6.0 bytes | Optimized bytes | Reduction |
+| --- | ---: | ---: | ---: |
+| Apple Silicon DMG | 33,653,425 | 23,626,972 | 29.79% |
+| Intel macOS DMG | 34,948,801 | 25,254,879 | 27.74% |
+| Windows installer | 30,277,117 | 23,101,991 | 23.70% |
+| Windows ZIP | 31,735,316 | 31,218,437 | 1.63% |
 
 The Windows compression comparison on 2026-09-08 used the same published 1.6.0
 payload and Inno Setup 6.7.1 for both runs: the default dictionary produced
