@@ -89,6 +89,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--text-probe", type=Path)
     args = parser.parse_args()
     report = {"status": "failed", "launch_method": "launchservices",
               "commit": os.environ.get("GITHUB_SHA", "local"),
@@ -109,11 +110,16 @@ def main() -> int:
             launcher = None
             with (logs / "launchservices.log").open("wb") as log:
                 try:
-                    text_probe = root / "macos-text"
-                    subprocess.run([
-                        "/usr/bin/xcrun", "swiftc", str(SCRIPTS / "conformance/macos_text.swift"),
-                        "-module-cache-path", str(root / "swift-cache"), "-o", str(text_probe),
-                    ], stdout=log, stderr=subprocess.STDOUT, timeout=90, check=True)
+                    if args.text_probe is not None:
+                        text_probe = args.text_probe.resolve()
+                        require(text_probe.is_file() and os.access(text_probe, os.X_OK),
+                                "native text probe is missing or not executable")
+                    else:
+                        text_probe = root / "macos-text"
+                        subprocess.run([
+                            "/usr/bin/xcrun", "swiftc", str(SCRIPTS / "conformance/macos_text.swift"),
+                            "-module-cache-path", str(root / "swift-cache"), "-o", str(text_probe),
+                        ], stdout=log, stderr=subprocess.STDOUT, timeout=90, check=True)
                     launcher = subprocess.Popen(
                         ["/usr/bin/open", "-n", "-W", "-a", str(installed),
                          "--env", f"PEBREL_CONFIG_DIR={ctx.config_dir}",

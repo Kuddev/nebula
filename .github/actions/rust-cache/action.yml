@@ -11,6 +11,9 @@ inputs:
   legacy-key:
     description: Previous combined cache key, restored only during migration
     default: ""
+  extra-key:
+    description: Additional inputs for native build tools stored with this target
+    default: ""
 
 outputs:
   cache-key:
@@ -30,7 +33,7 @@ runs:
         CACHE_OS: ${{ runner.os }}
         CACHE_ARCH: ${{ runner.arch }}
         CACHE_WORKLOAD: ${{ inputs.key }}
-        CACHE_MANIFESTS: ${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '**/.cargo/config.toml', '.github/ci-profile.toml') }}
+        CACHE_MANIFESTS: ${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '**/.cargo/config.toml', '.github/ci-profile.toml') }}${{ inputs.extra-key }}
       run: |
         python - <<'PY'
         import hashlib

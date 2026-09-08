@@ -290,8 +290,14 @@ jobs:
         with:
           key: release
           legacy-key: release-v2
+          extra-key: ${{ hashFiles('scripts/conformance/macos_text.swift') }}
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+      - name: Build native text verification helper
+        run: |
+          mkdir -p target/ci-tools
+          xcrun swiftc scripts/conformance/macos_text.swift \
+            -module-cache-path target/ci-tools/swift-cache -o target/ci-tools/macos-text
       - name: Save compiled targets
         if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -368,6 +374,7 @@ jobs:
           python3 scripts/conformance/run.py --app "$app" --platform "macos-${{ matrix.architecture }}" \
             --output "dist/conformance/macos-${{ matrix.architecture }}-report.json"
           python3 scripts/conformance/macos_launch.py --app "$app" \
+            --text-probe target/ci-tools/macos-text \
             --output "dist/conformance/macos-${{ matrix.architecture }}-launch.json"
       - name: Remove temporary signing credentials
         if: ${{ always() && env.MACOS_SIGNING == 'developer-id' }}
