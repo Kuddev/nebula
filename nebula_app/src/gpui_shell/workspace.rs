@@ -47,6 +47,7 @@ use nebula_split::{DIVIDER_GAP, HIT_SLOP, RemoveOutcome, SplitDirection, SplitNa
 
 mod agents;
 mod command_manager;
+mod documents;
 mod file_tree;
 mod key_actions;
 mod notifications;
@@ -54,6 +55,7 @@ mod palette;
 mod pane_header;
 mod quick_jump;
 mod quick_terminal;
+mod recipes;
 mod remote_files;
 mod residency;
 mod send_to_chat;
@@ -74,7 +76,7 @@ pub(crate) mod windowing;
 // 调用点分散在设置页与窗口层，原样再导出以免拆分波及它们。
 pub(crate) use update_dialog::{open_update_dialog, show_update_notification};
 
-use tab_drag::{TabDrag, TabDragAxis};
+use tab_drag::{DockTarget, TabDrag, TabDragAxis};
 
 #[cfg(test)]
 use agents::ai_hook_target_pane;
@@ -163,7 +165,7 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
     "ctrl-shift-f",
     "escape",
     "ctrl-shift-d",
-    "ctrl-shift-s",
+    "ctrl-alt-shift-s",
     "f2",
     "ctrl-shift-enter",
     "ctrl-alt-left",
@@ -191,6 +193,10 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
 /// `keybind=` 自定义表（两壳共读）中 config::Action → GPUI 工作区动作的
 /// 映射。仍跳过未接线的动作（prompt 跳转、搜索）：编辑器可读写，这里不
 /// 注入。`CreateNewWindow` 复用同一个 GPUI App 和进程级 hook/runtime。
+
+/// 存储格式 combo（`ctrl+shift+t`）→ gpui 绑定串（`ctrl-shift-t`）。键名
+/// 两套体系同构（小写命名键 + 单字符）；digitN 折回数字，plus/minus 折回
+/// `+`/`-`（`+` 是存储分隔符，必须先占位再替换）。
 fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Option<KeyBinding> {
     use crate::config::Action;
     let combo = gpui_binding_combo(combo);
@@ -233,9 +239,6 @@ fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Opti
     }
 }
 
-/// 存储格式 combo（`ctrl+shift+t`）→ gpui 绑定串（`ctrl-shift-t`）。键名
-/// 两套体系同构（小写命名键 + 单字符）；digitN 折回数字，plus/minus 折回
-/// `+`/`-`（`+` 是存储分隔符，必须先占位再替换）。
 fn gpui_binding_combo(combo: &str) -> String {
     combo
         .replace("plus", "\u{1}")
@@ -257,6 +260,7 @@ pub fn init(cx: &mut App) {
 fn default_workspace_bindings() -> Vec<KeyBinding> {
     [
         KeyBinding::new("ctrl-shift-t", NewTerminal, None),
+        KeyBinding::new("ctrl-alt-shift-s", recipes::OpenLayoutRecipes, None),
         KeyBinding::new("ctrl-shift-e", NewWindow, None),
         KeyBinding::new("ctrl-shift-w", CloseActiveTerminal, None),
         KeyBinding::new("ctrl-shift-b", ToggleSidebar, None),
@@ -556,21 +560,7 @@ fn pane_card_divider_bounds(
 /// 纯树手术（dock 的核心）：把 `source` 整树挂到 `target` 树的 `nav` 侧，
 /// 根级 50/50 分割（旧壳 `dock_tab_into_active` 的布局公式）。
 fn dock_tree(target: SplitTree<u64>, source: SplitTree<u64>, nav: SplitNav) -> SplitTree<u64> {
-    let (direction, src_first) = match nav {
-        SplitNav::Left => (SplitDirection::LeftRight, true),
-        SplitNav::Right => (SplitDirection::LeftRight, false),
-        SplitNav::Up => (SplitDirection::TopBottom, true),
-        SplitNav::Down => (SplitDirection::TopBottom, false),
-    };
-    let (first, second) = if src_first { (source, target) } else { (target, source) };
-    SplitTree::Split {
-        direction,
-        ratio: 0.5,
-        preview_ratio: None,
-        dragging: false,
-        first: Box::new(first),
-        second: Box::new(second),
-    }
+    target.joined(source, nav)
 }
 
 /// 侧栏 tab 行高与行距（与 `render_sidebar` 的 `h(px(TAB_ROW_H))`、
@@ -633,6 +623,7 @@ enum WorkspacePaletteAction {
     Shared(crate::display::command_palette::PaletteAction),
     /// 聚焦已经存在的工作区标签，不创建副本。
     FocusTab(usize),
+    LayoutRecipes,
     /// 先激活标签，再把焦点交给其中的明确 pane。
     FocusPane {
         tab: usize,
@@ -761,7 +752,7 @@ struct WorkspacePaletteRow {
     icon_path: Option<SharedString>,
 }
 
-fn open_in_file_manager(path: &Path) {
+pub(super) fn open_in_file_manager(path: &Path) {
     log_file_manager_spawn("open", path, crate::platform::file_manager::open(path));
 }
 
@@ -783,7 +774,7 @@ fn log_file_manager_spawn(kind: &str, path: &Path, result: std::io::Result<()>) 
 
 /// “在文件管理器中显示”与单纯打开路径不是一个动作。Windows 的
 /// `/select,` 必须和路径组成同一个 argv，避免空格与 Unicode 被二次解析。
-fn reveal_in_file_manager(path: &Path) {
+pub(super) fn reveal_in_file_manager(path: &Path) {
     log_file_manager_spawn("reveal", path, crate::platform::file_manager::reveal(path));
 }
 
@@ -1011,7 +1002,7 @@ pub struct NebulaWorkspace {
     /// 见 [`pane_header::PaneDrag`]。
     pane_drag: Option<pane_header::PaneDrag>,
     /// 其它窗口的标签悬停在本窗口终端区时的跨窗 dock 预览。
-    cross_window_dock: Option<SplitNav>,
+    cross_window_dock: Option<DockTarget>,
     /// 进行中的分隔条拖拽；预览比例写进树节点，松手提交（吸附整格）。
     split_drag: Option<SplitDrag>,
     /// 进行中的侧栏拖宽（设置「面板拖拽调节」开启时才有入口）；宽度实时
@@ -1172,7 +1163,8 @@ impl NebulaWorkspace {
         #[cfg(windows)]
         {
             let mut icon_scale = window.scale_factor();
-            cx.observe_window_bounds(window, move |_, window, _| {
+            cx.observe_window_bounds(window, move |_, window, cx| {
+                windowing::quick_terminal_bounds_changed(runtime_window_id, window, cx);
                 if icon_scale != window.scale_factor() {
                     icon_scale = window.scale_factor();
                     crate::gpui_shell::set_native_window_icon(window);
@@ -2001,10 +1993,24 @@ impl NebulaWorkspace {
     /// GPUI 的 should-close 回调必须同步返回：无繁忙进程时直接允许系统关闭；
     /// 有繁忙进程时先返回 false，再由对话框确认回调显式移除窗口。
     fn should_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        #[cfg(windows)]
+        windowing::quick_terminal_bounds_changed(self.runtime_window_id, window, cx);
         let persist_session = self.window_role == windowing::WindowRole::Regular;
         if persist_session && self.keep_session_on_close(window, cx) {
             return false;
         }
+        if self.guard_file_window_close(window, cx) {
+            return false;
+        }
+        self.close_window_after_documents(window, cx)
+    }
+
+    fn close_window_after_documents(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let persist_session = self.window_role == windowing::WindowRole::Regular;
         let Some(process) = self.busy_process_in_window(cx) else {
             if persist_session {
                 self.save_clean_window_session(cx);
@@ -2422,146 +2428,6 @@ impl NebulaWorkspace {
         }
     }
 
-    /// 调试/验收后门：`NEBULA_GPUI_OPEN_DOC=路径` 时启动即打开该文档，
-    /// 与文件树双击同一条路由（公式渲染等文档 UI 的免点击验收）。
-    pub fn open_document_at_startup(
-        &mut self,
-        path: std::path::PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_document_path(path, window, cx);
-    }
-
-    /// 文件路由（旧壳 `input/chrome.rs` 双击合同）：图片 → 图片 tab；
-    /// Markdown → 文档 tab（TextView 富渲染）；其余可读文本（txt/log/json
-    /// 与源码）→ 代码 tab（行号 + 行级虚拟化，用户裁定 txt 同代码一样）；
-    /// 都不认的交系统处理器。
-    fn open_document_path(
-        &mut self,
-        path: std::path::PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let is_markdown =
-            path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
-                matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
-            });
-        if crate::display::image_viewer::viewable_file(&path) {
-            self.open_image_tab(path, window, cx);
-        } else if is_markdown {
-            self.open_doc_tab(path, window, cx);
-        } else if crate::gpui_shell::code_tab::viewable_file(&path)
-            || crate::display::markdown_view::viewable_file(&path)
-        {
-            self.open_code_tab(path, window, cx);
-        } else {
-            open_in_file_manager(&path);
-        }
-    }
-
-    /// 同一路径复用已开 tab（激活 + 重读盘，旧壳 open_image_tab 同语义）。
-    fn open_image_tab(
-        &mut self,
-        path: std::path::PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(ix) = self.tabs.iter().position(
-            |tab| matches!(tab, WorkspaceTab::Image { view } if view.read(cx).path == path),
-        ) {
-            if let Some(WorkspaceTab::Image { view }) = self.tabs.get(ix) {
-                view.clone().update(cx, |view, cx| view.reload(cx));
-            }
-            self.activate_tab(ix, window, cx);
-            return;
-        }
-        let view = cx.new(|cx| crate::gpui_shell::doc_tabs::ImageTabView::new(path, cx));
-        self.insert_new_tab(WorkspaceTab::Image { view });
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    fn open_doc_tab(
-        &mut self,
-        path: std::path::PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(ix) = self.tabs.iter().position(
-            |tab| matches!(tab, WorkspaceTab::Document { view, .. } if view.read(cx).path == path),
-        ) {
-            if let Some(WorkspaceTab::Document { view, .. }) = self.tabs.get(ix) {
-                view.clone().update(cx, |view, cx| {
-                    view.reload(cx);
-                    cx.notify();
-                });
-            }
-            self.activate_tab(ix, window, cx);
-            return;
-        }
-        let view = cx.new(|cx| crate::gpui_shell::doc_tabs::DocTabView::new(path, cx));
-        let subscription = cx.subscribe_in(&view, window, Self::on_document_event);
-        self.insert_new_tab(WorkspaceTab::Document { view, _subscription: subscription });
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    fn open_code_tab(
-        &mut self,
-        path: std::path::PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(ix) = self.tabs.iter().position(
-            |tab| matches!(tab, WorkspaceTab::Code { view, .. } if view.read(cx).is_regular_path(&path)),
-        ) {
-            if let Some(WorkspaceTab::Code { view, .. }) = self.tabs.get(ix) {
-                view.clone().update(cx, |view, cx| view.reload(window, cx));
-            }
-            self.activate_tab(ix, window, cx);
-            return;
-        }
-        let view = cx.new(|cx| crate::gpui_shell::code_tab::CodeTabView::new(path, window, cx));
-        let subscription = cx.subscribe(&view, Self::on_code_tab_event);
-        self.insert_new_tab(WorkspaceTab::Code { view, _subscription: subscription });
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
-    /// 冲突文件仍属于代码 Tab，但以三栏合并形态打开；同一仓库、同一路径复用
-    /// 已有 Tab，避免用户从冲突列表连续点击后堆出多个独立结果缓冲区。
-    fn open_git_merge_tab(
-        &mut self,
-        relative_path: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(location) = self.side_panel.git_location() else { return };
-        if let Some(ix) = self.tabs.iter().position(|tab| {
-            matches!(tab, WorkspaceTab::Code { view, .. }
-                if view.read(cx).matches_git_merge(&location, &relative_path))
-        }) {
-            if let Some(WorkspaceTab::Code { view, .. }) = self.tabs.get(ix) {
-                view.clone().update(cx, |view, cx| view.reload_git_merge(window, cx));
-            }
-            self.activate_tab(ix, window, cx);
-            return;
-        }
-        let view = cx.new(|cx| {
-            crate::gpui_shell::code_tab::CodeTabView::new_git_merge(
-                location,
-                relative_path,
-                window,
-                cx,
-            )
-        });
-        let subscription = cx.subscribe(&view, Self::on_code_tab_event);
-        self.insert_new_tab(WorkspaceTab::Code { view, _subscription: subscription });
-        self.focus_active(window, cx);
-        cx.notify();
-    }
-
     /// 按视图实体反查 (tab 下标, pane id)。
     fn locate_pane(&self, entity_id: gpui::EntityId) -> Option<(usize, u64)> {
         self.tabs.iter().enumerate().find_map(|(ix, tab)| match tab {
@@ -2684,34 +2550,6 @@ impl NebulaWorkspace {
         }
     }
 
-    fn on_document_event(
-        &mut self,
-        _: &Entity<crate::gpui_shell::doc_tabs::DocTabView>,
-        event: &DocTabViewEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            DocTabViewEvent::SelectionContextMenuRequested { position, text } => {
-                self.open_document_selection_context_menu(*position, text.clone(), window, cx);
-            },
-        }
-    }
-
-    fn on_code_tab_event(
-        &mut self,
-        _: Entity<crate::gpui_shell::code_tab::CodeTabView>,
-        event: &CodeTabViewEvent,
-        cx: &mut Context<Self>,
-    ) {
-        match event {
-            CodeTabViewEvent::GitConflictResolved => {
-                self.side_panel.request_refresh();
-                cx.notify();
-            },
-        }
-    }
-
     /// 热应用设置页变更，并把 SSH 连接请求转为新标签。
     fn on_settings_event(
         &mut self,
@@ -2737,6 +2575,13 @@ impl NebulaWorkspace {
     /// 终端应用惯例：最后一个 Tab 关闭即退出应用。整 tab 关闭（侧栏 ×）
     /// 逐 pane 回收会话；实体引用清零后 `TerminalView::drop` 再兜底。
     fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard_file_tab_close(ix, window, cx) {
+            return;
+        }
+        self.finish_close_tab(ix, window, cx);
+    }
+
+    fn finish_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some((tab, _meta)) = self.remove_tab_at(ix) else { return };
         if let WorkspaceTab::Terminal { panes, .. } = &tab {
             let mut bounds = self.pane_bounds.borrow_mut();
@@ -2818,13 +2663,9 @@ impl NebulaWorkspace {
                 None => return,
             },
             Some(WorkspaceTab::Settings { view, .. }) => view.read(cx).focus_handle(cx),
-            // 图片/文档/代码查看 tab 没有键盘焦点语义（滚轮/拖拽直达元素）。
-            Some(
-                WorkspaceTab::Image { .. }
-                | WorkspaceTab::Document { .. }
-                | WorkspaceTab::Code { .. },
-            )
-            | None => return,
+            Some(WorkspaceTab::Document { view, .. }) => view.read(cx).focus_handle(cx),
+            Some(WorkspaceTab::Code { view, .. }) => view.read(cx).focus_handle(cx),
+            Some(WorkspaceTab::Image { .. }) | None => return,
         };
         window.defer(cx, move |window, cx| window.focus(&focus, cx));
     }
@@ -3036,6 +2877,7 @@ impl NebulaWorkspace {
                     }
                 })
                 .collect();
+            rows.push(recipes::palette_row(language));
             // 启动器混排（旧壳 ⌘K 裁定）：SSH 主机与命令同列，置顶/隐藏
             // 次序由共享 merge 权威裁定。
             let ssh_icons = ssh_host_icon_ids(&crate::display::nebula_data_dir());
@@ -3193,6 +3035,10 @@ impl NebulaWorkspace {
         let Some(action) = action else { return };
         match action {
             WorkspacePaletteAction::Shared(action) => self.run_palette_action(action, window, cx),
+            WorkspacePaletteAction::LayoutRecipes => {
+                self.dismiss_palette_state();
+                self.open_layout_recipes(window, cx);
+            },
             WorkspacePaletteAction::FocusTab(tab) => {
                 self.dismiss_palette_state();
                 self.activate_tab(tab, window, cx);
@@ -3510,8 +3356,8 @@ impl NebulaWorkspace {
         match &self.tabs[ix] {
             WorkspaceTab::Settings { .. } => "设置".into(),
             WorkspaceTab::Image { view } => view.read(cx).title.clone().into(),
-            WorkspaceTab::Document { view, .. } => view.read(cx).title.clone().into(),
-            WorkspaceTab::Code { view, .. } => view.read(cx).title.clone().into(),
+            WorkspaceTab::Document { view, .. } => view.read(cx).tab_title().into(),
+            WorkspaceTab::Code { view, .. } => view.read(cx).tab_title(cx).into(),
             tab @ WorkspaceTab::Terminal { .. } => {
                 // 标签 = 聚焦 pane 的 cwd 末级目录名（旧壳 chrome_tab_label
                 // 规则）。分屏计数**不拼在这里**：这份字符串还要喂给 runtime
@@ -4260,14 +4106,8 @@ impl Render for NebulaWorkspace {
             .filter(|drag| drag.active)
             .and_then(|drag| drag.dock)
             .or(self.cross_window_dock)
-            .and_then(|nav| {
-                self.active_terminal_area().map(|area| match nav {
-                    SplitNav::Left => (area.x, area.y, area.w * 0.5, area.h),
-                    SplitNav::Right => (area.x + area.w * 0.5, area.y, area.w * 0.5, area.h),
-                    SplitNav::Up => (area.x, area.y, area.w, area.h * 0.5),
-                    SplitNav::Down => (area.x, area.y + area.h * 0.5, area.w, area.h * 0.5),
-                })
-            });
+            .and_then(|target| self.dock_preview_area(target))
+            .map(|area| (area.x, area.y, area.w, area.h));
 
         div()
             .size_full()
@@ -4351,6 +4191,9 @@ impl Render for NebulaWorkspace {
                 this.sidebar_collapsed = !this.sidebar_collapsed;
                 this.sidebar_fold_armed = true;
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &recipes::OpenLayoutRecipes, window, cx| {
+                this.open_layout_recipes(window, cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.toggle_settings(window, cx);

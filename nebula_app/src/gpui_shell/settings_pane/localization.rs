@@ -18,6 +18,10 @@ pub(super) fn localized_select_labels(
                 }
             })
             .collect(),
+        "quick_terminal_mode" => vec![
+            language.text(crate::i18n::Message::SettingsQuickTerminalDedicated),
+            language.text(crate::i18n::Message::SettingsQuickTerminalExisting),
+        ],
         "cursor_shape" => vec![
             language.pick("条形（│）", "Bar (│)"),
             language.pick("下划线（_）", "Underscore (_)"),

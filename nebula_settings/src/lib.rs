@@ -18,7 +18,11 @@ use std::collections::HashMap;
 mod app_icon;
 pub use app_icon::{AppIconName, AppIconPalette};
 mod language;
+mod quick_terminal;
+mod themes;
 pub use language::{LanguageInfo, LanguagePref};
+pub use quick_terminal::{QuickTerminalMode, QuickTerminalSize};
+pub use themes::FreshPalette;
 mod reset;
 pub use reset::restore_default_settings;
 mod paths;
@@ -196,6 +200,10 @@ pub enum ThemeName {
     Nord,
     /// 浅色：暖纸面 Paper 配色。跟随系统时作为 [`Self::Nord`] 的浅色成员。
     Paper,
+    BreezeLight,
+    BreezeDark,
+    MintLight,
+    MintDark,
 }
 
 impl ThemeName {
@@ -210,6 +218,11 @@ impl ThemeName {
             "MossDark" => Self::MossDark,
             "Nord" => Self::Nord,
             "Paper" => Self::Paper,
+            "BreezeLight" => Self::BreezeLight,
+            "BreezeDark" => Self::BreezeDark,
+            "MintLight" => Self::MintLight,
+            "MintDark" => Self::MintDark,
+
             _ => return None,
         })
     }
@@ -225,6 +238,10 @@ impl ThemeName {
             Self::MossDark => "MossDark",
             Self::Nord => "Nord",
             Self::Paper => "Paper",
+            Self::BreezeLight => "BreezeLight",
+            Self::BreezeDark => "BreezeDark",
+            Self::MintLight => "MintLight",
+            Self::MintDark => "MintDark",
         }
     }
 
@@ -233,6 +250,9 @@ impl ThemeName {
         // 背景与 is_light 来自各主题 palette()；powerline 为提示符段色
         // （icon bg/fg、path bg/fg、branch bg/fg、time bg/fg）。
         match self {
+            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
+                themes::fresh_terminal(self)
+            },
             Self::Nebula => TermTheme {
                 background: [15, 17, 26],
                 is_light: false,
@@ -978,6 +998,9 @@ pub struct RuntimeSettings {
     pub ssh_proxy_url: String,
     pub ssh_proxy_no_proxy: String,
     pub quick_terminal_hotkey: String,
+    pub quick_terminal_mode: QuickTerminalMode,
+    /// Remembered logical size; independent of monitor DPI.
+    pub quick_terminal_size: Option<QuickTerminalSize>,
     /// 终端卡圆角（逻辑像素）。`None` = 跟随主题自带的几何
     /// （见 [`ThemeName::card_geometry`]）。两壳同径：旧壳的
     /// `UI_SHELL_RADIUS_LOGICAL` 直接引用 [`DEFAULT_PANE_CARD_RADIUS`]，
@@ -1142,10 +1165,19 @@ impl RuntimeSettings {
                 .unwrap_or_default(),
             ssh_proxy_url: raw.value("ssh_proxy_url").unwrap_or_default().to_owned(),
             ssh_proxy_no_proxy: raw.value("ssh_proxy_no_proxy").unwrap_or_default().to_owned(),
+            quick_terminal_mode: raw
+                .value("quick_terminal_mode")
+                .and_then(QuickTerminalMode::from_settings)
+                .unwrap_or_default(),
+            quick_terminal_size: raw
+                .f32("quick_terminal_width")
+                .zip(raw.f32("quick_terminal_height"))
+                .and_then(|(w, h)| QuickTerminalSize::new(w, h)),
             quick_terminal_hotkey: raw
-                .value("quick_terminal_hotkey")
-                .unwrap_or(DEFAULT_QUICK_TERMINAL_HOTKEY)
-                .to_owned(),
+                .values
+                .get("quick_terminal_hotkey")
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned()),
             // 这四项一律保留 `Option`：`None` 就是「用户没设过」，让
             // `ThemeName::card_geometry` 的主题默认生效。若在这里就 unwrap 成
             // 具体数字，切主题便再也换不了形态——那正是要避免的。

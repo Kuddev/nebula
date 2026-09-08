@@ -74,7 +74,9 @@
       "fallback_description": "The first family is preferred; missing glyphs fall back through the remaining families, with bundled Maple as the final safe fallback.",
       "group_description": "The first family is primary; the rest are used in fallback order.",
       "loading": "Enumerating system fonts...",
-      "no_matches": "No matching fonts"
+      "no_matches": "No matching fonts",
+      "expand": "Show font list",
+      "collapse": "Hide font list"
     },
     "keymap": {
       "conflict": "{combo} is assigned to both \"{first}\" and \"{second}\"; only the earlier \"{first}\" action will run.",
@@ -92,7 +94,14 @@
       "hide_config_host": "Hide (config sources cannot be deleted)",
       "empty_hint": "Use \"+ Add host\" or maintain aliases in ~/.ssh/config",
       "shared_data_hint": "Uses the same data as the legacy shell. Deleting a config alias hides it and it can be restored."
-    }
+    },
+    "quick_terminal": {
+      "mode": "Quick terminal behavior",
+      "description": "The dedicated window remembers its size. Showing an existing window does not create a tab.",
+      "dedicated": "Dedicated window",
+      "existing": "Show existing window"
+    },
+    "search_empty": "No matching settings"
   },
   "provider": {
     "test": {
@@ -252,5 +261,62 @@
     "yes": "Yes",
     "no": "No",
     "confirmation_expired": "The confirmation request changed or is no longer active."
+  },
+  "editor": {
+    "loading": "Loading file…",
+    "save": "Save",
+    "saving": "Saving…",
+    "saved": "Saved",
+    "unsaved": "Unsaved",
+    "edit": "Edit",
+    "preview": "Preview",
+    "outline": "Outline",
+    "no_headings": "This document has no headings yet",
+    "copy_heading": "Copy heading",
+    "reload": "Reload file",
+    "copy_path": "Copy file path",
+    "read_only": "Read-only file",
+    "truncated": "File exceeds 8 MB. Only the beginning is shown; editing and saving are disabled.",
+    "encoding": "This file is not valid UTF-8 text. Preview only.",
+    "conflict": "The file changed on disk. Your edits are preserved. Copy any changes you need before reloading.",
+    "read_failed": "Could not read file: {error}",
+    "save_failed": "Could not save file: {error}",
+    "discard_title": "Discard unsaved changes?",
+    "close_title": "Save changes to this file?",
+    "discard": "Discard changes",
+    "cancel": "Cancel",
+    "lines": "{count} lines",
+    "save_shortcut": "Save (Ctrl+S / ⌘S)",
+    "info": "File info",
+    "type": "Type",
+    "size": "File size",
+    "modified": "Modified",
+    "characters": "Characters",
+    "line_count": "Lines",
+    "encoding_label": "Encoding",
+    "line_ending": "Line ending",
+    "status": "Status",
+    "copy_name": "Copy file name",
+    "reveal": "Reveal in file manager",
+    "open_external": "Open with default app"
+  },
+  "recipe": {
+    "title": "Layout recipes",
+    "name": "Layout name",
+    "save": "Save layout",
+    "tab": "Current tab",
+    "window": "Current window",
+    "empty": "No saved layouts yet. Arrange your tabs and panes, then give the layout a name.",
+    "description": "Save tabs, split proportions, and working directories. Restore terminals in a new window.",
+    "open": "Restore",
+    "delete": "Delete",
+    "loading": "Loading layouts…",
+    "saved": "Layout saved",
+    "failed": "Operation failed: {error}",
+    "delete_title": "Delete this layout recipe?",
+    "open_failed": "Could not restore layout",
+    "count": "{tabs} tabs · {panes} panes",
+    "save_window": "Save current window layout…",
+    "open_library": "Open layout recipes…"
   }
 }

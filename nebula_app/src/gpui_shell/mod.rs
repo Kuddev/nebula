@@ -27,6 +27,7 @@ pub mod code_tab;
 pub mod config;
 pub mod doc_tabs;
 pub mod file_drop;
+mod file_editor;
 pub mod http;
 pub mod math_view;
 pub mod network_settings;
@@ -155,6 +156,7 @@ fn init(cx: &mut App) {
 
     // 组件库必须只初始化一次，否则全局 action、菜单和主题状态会重复注册。
     gpui_component::init(cx);
+    file_editor::init(cx);
     // TextView 的公式渲染钩子：旧壳数学管线（compile → 栅格化）接入组件库
     // 的 markdown 渲染；不注册时公式回退为源码文本。
     math_view::register(cx);

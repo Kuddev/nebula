@@ -42,7 +42,10 @@ impl QuickTerminalGeometry {
 
 /// 以普通工作区 HWND 所在显示器为目标；没有锚点时 Win32 回退主显示器。
 #[cfg(windows)]
-pub(super) fn native_geometry(anchor_hwnd: isize) -> Option<QuickTerminalGeometry> {
+pub(super) fn native_geometry(
+    anchor_hwnd: isize,
+    remembered: Option<nebula_settings::QuickTerminalSize>,
+) -> Option<QuickTerminalGeometry> {
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
@@ -72,7 +75,22 @@ pub(super) fn native_geometry(anchor_hwnd: isize) -> Option<QuickTerminalGeometr
     let width = (info.rcMonitor.right - info.rcMonitor.left).max(1);
     let monitor_height = (info.rcMonitor.bottom - info.rcMonitor.top).max(1);
     let height = ((monitor_height as f64) * 0.4).round().max(1.0) as i32;
-    Some(QuickTerminalGeometry { x: info.rcMonitor.left, y: info.rcMonitor.top, width, height })
+    let scale = if anchor_hwnd != 0 {
+        (unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForWindow(anchor) }) as f32 / 96.0
+    } else {
+        1.0
+    };
+    let scale = scale.max(1.0);
+    let saved =
+        remembered.map(|size| size.fit(width as f32 / scale, monitor_height as f32 / scale));
+    let saved_width = saved.map_or(width, |size| (size.width * scale).round() as i32);
+    let saved_height = saved.map_or(height, |size| (size.height * scale).round() as i32);
+    Some(QuickTerminalGeometry {
+        x: info.rcMonitor.left + (width - saved_width) / 2,
+        y: info.rcMonitor.top,
+        width: saved_width,
+        height: saved_height,
+    })
 }
 
 /// 创建时一次性设置旧壳的完整几何和 topmost，再把窗口显示在屏幕上缘之外。
@@ -225,16 +243,14 @@ impl NebulaWorkspace {
 
 /// 设置里持久化的组合键；缺失或非法时回落到与旧壳同一个默认值。
 fn current_combo() -> String {
-    let stored = nebula_settings::RuntimeSettings::load().quick_terminal_hotkey;
-    if stored.trim().is_empty() {
-        crate::display::keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned()
-    } else {
-        stored
-    }
+    nebula_settings::RuntimeSettings::load().quick_terminal_hotkey
 }
 
 /// 注册一个组合键。返回 `None` 表示解析或注册失败——两者都不影响其余功能。
 fn register(manager: &GlobalHotKeyManager, combo: &str) -> Option<HotKey> {
+    if combo.trim().is_empty() {
+        return None;
+    }
     let hotkey = match combo.parse::<HotKey>() {
         Ok(hotkey) => hotkey,
         Err(err) => {
@@ -257,10 +273,21 @@ fn register(manager: &GlobalHotKeyManager, combo: &str) -> Option<HotKey> {
 fn resync_combo(cx: &mut App) {
     let latest = current_combo();
     let state = cx.global::<QuickTerminalHotkey>();
-    if state.combo == latest && state.hotkey.is_some() {
+    if state.combo == latest && (state.hotkey.is_some() || latest.trim().is_empty()) {
         return;
     }
     let state = cx.global_mut::<QuickTerminalHotkey>();
+    if latest.trim().is_empty() {
+        if let Some(previous) = state.hotkey {
+            if let Err(error) = state.manager.unregister(previous) {
+                log::warn!("could not clear quick terminal shortcut: {error}");
+                return;
+            }
+        }
+        state.hotkey = None;
+        state.combo = latest;
+        return;
+    }
     let replacement = register(&state.manager, &latest);
     if replacement.is_some() {
         if let Some(previous) = state.hotkey.take() {

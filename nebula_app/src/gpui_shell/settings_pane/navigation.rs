@@ -1,7 +1,7 @@
 use super::*;
 
 /// 主题下拉（展示名 = 持久化名，与旧壳一致）。
-pub(super) const THEME_VALUES: [&str; 9] = [
+pub(super) const THEME_VALUES: [&str; 13] = [
     "Nebula",
     "SilverLight",
     "SteelDark",
@@ -11,6 +11,10 @@ pub(super) const THEME_VALUES: [&str; 9] = [
     "MossDark",
     "Nord",
     "Paper",
+    "BreezeLight",
+    "BreezeDark",
+    "MintLight",
+    "MintDark",
 ];
 
 pub(super) const REPOSITORY_URL: &str = "https://github.com/Kuddev/pebrel";
@@ -43,7 +47,7 @@ pub(super) const SECTION_SEARCH_TERMS: [&str; 10] = [
     "ssh host 主机 remote 远程 connection 连接",
     "network 网络 proxy 代理 connectivity 连接",
     "interaction 交互 copy 复制 paste 粘贴 tab 标签 panel 面板",
-    "keymap key binding shortcut 按键映射 快捷键",
+    "keymap key binding shortcut quick terminal 快速终端 独立窗口 已有窗口 按键映射 快捷键",
     "advanced 高级 session 会话 tray 托盘 restore 恢复",
     "backup 备份 export 导出 restore 恢复",
 ];
@@ -142,6 +146,10 @@ pub(super) fn chrome_theme(theme: ThemeName) -> crate::display::NebulaTheme {
         ThemeName::MossDark => NebulaTheme::MossDark,
         ThemeName::Nord => NebulaTheme::Nord,
         ThemeName::Paper => NebulaTheme::Paper,
+        ThemeName::BreezeLight => NebulaTheme::BreezeLight,
+        ThemeName::BreezeDark => NebulaTheme::BreezeDark,
+        ThemeName::MintLight => NebulaTheme::MintLight,
+        ThemeName::MintDark => NebulaTheme::MintDark,
     }
 }
 

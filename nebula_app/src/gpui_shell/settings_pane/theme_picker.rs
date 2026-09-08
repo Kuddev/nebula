@@ -1,7 +1,11 @@
 use super::appearance_picker::{AppearanceColors, AppearanceSelection, picker_columns};
 use super::*;
 
-pub(super) const THEME_ORDER: [ThemeName; 9] = [
+pub(super) const THEME_ORDER: [ThemeName; 13] = [
+    ThemeName::BreezeLight,
+    ThemeName::BreezeDark,
+    ThemeName::MintLight,
+    ThemeName::MintDark,
     ThemeName::SilverLight,
     ThemeName::Nebula,
     ThemeName::SteelDark,
@@ -108,6 +112,9 @@ impl SettingsPane {
                     .px(px(12.0))
                     .justify_between()
                     .flex_shrink_0()
+                    // GPUI's overflow mask is rectangular; each painted surface
+                    // must carry the radius where it meets the outer border.
+                    .rounded_t(px(8.0))
                     .bg(rgb_hsla(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b))
                     .child(
                         h_flex()

@@ -96,7 +96,7 @@ pub struct SettingsPane {
     about_update_seq: u64,
     about_last_checked: Option<String>,
     settings_search_input: Entity<InputState>,
-    settings_search_trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    search_origin_section: Option<usize>,
     /// 每项还带着自己的 `values` 表：`SelectState` 只认索引，而从代码侧
     /// 改设置（还原默认值、命令面板切换）时手里只有配置文件记号，没有
     /// 这张表就没法把闭框的选中项拉回去。
@@ -1130,6 +1130,18 @@ impl SettingsPane {
 
     fn section_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         use gpui::IntoElement as _;
+        if self.matching_settings_sections(cx).is_empty() {
+            return div()
+                .id("settings-search-empty")
+                .py_5()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(
+                    crate::gpui_shell::config::ui_language(cx)
+                        .text(crate::i18n::Message::SettingsSearchEmpty),
+                )
+                .into_any_element();
+        }
         match self.active_section {
             0 => self.section_home(window, cx),
             1 => self.section_appearance(window, cx),
@@ -1189,7 +1201,7 @@ impl SettingsPane {
                     .child(Icon::new(IconName::ArrowLeft).size(px(SETTINGS_NAV_ICON_SIZE)))
                     .child(language.pick("返回工作区", "Back to workspace")),
             );
-        for ix in visible_nav_sections() {
+        for ix in self.matching_settings_sections(cx) {
             let active = ix == self.active_section;
             nav = nav.child(
                 div()

@@ -42,6 +42,10 @@ pub enum NebulaTheme {
     MossDark,
     Nord,
     Paper,
+    BreezeLight,
+    BreezeDark,
+    MintLight,
+    MintDark,
 }
 
 impl Default for NebulaTheme {
@@ -77,6 +81,10 @@ impl NebulaTheme {
             (Self::LinenLight | Self::MossDark, false) => Self::MossDark,
             (Self::Paper | Self::Nord, true) => Self::Paper,
             (Self::Paper | Self::Nord, false) => Self::Nord,
+            (Self::BreezeLight | Self::BreezeDark, true) => Self::BreezeLight,
+            (Self::BreezeLight | Self::BreezeDark, false) => Self::BreezeDark,
+            (Self::MintLight | Self::MintDark, true) => Self::MintLight,
+            (Self::MintLight | Self::MintDark, false) => Self::MintDark,
         }
     }
 
@@ -91,6 +99,29 @@ impl NebulaTheme {
             Self::MossDark => "Moss Dark",
             Self::Nord => "Nord",
             Self::Paper => "Paper",
+            Self::BreezeLight => "Breeze Light",
+            Self::BreezeDark => "Breeze Dark",
+            Self::MintLight => "Mint Light",
+            Self::MintDark => "Mint Dark",
+        }
+    }
+
+    /// Static command-palette labels share theme metadata rather than a second exhaustive UI match.
+    pub(crate) fn command_label(self) -> &'static str {
+        match self {
+            Self::Nebula => "Theme: Nebula",
+            Self::SilverLight => "Theme: Silver Light",
+            Self::SteelDark => "Theme: Steel Dark",
+            Self::LimestoneLight => "Theme: Limestone",
+            Self::CoalDark => "Theme: Coal Dark",
+            Self::LinenLight => "Theme: Linen Light",
+            Self::MossDark => "Theme: Moss Dark",
+            Self::Nord => "Theme: Nord",
+            Self::Paper => "Theme: Paper",
+            Self::BreezeLight => "Theme: Breeze Light",
+            Self::BreezeDark => "Theme: Breeze Dark",
+            Self::MintLight => "Theme: Mint Light",
+            Self::MintDark => "Theme: Mint Dark",
         }
     }
 
@@ -105,6 +136,10 @@ impl NebulaTheme {
             Self::MossDark => "MossDark",
             Self::Nord => "Nord",
             Self::Paper => "Paper",
+            Self::BreezeLight => "BreezeLight",
+            Self::BreezeDark => "BreezeDark",
+            Self::MintLight => "MintLight",
+            Self::MintDark => "MintDark",
         }
     }
 
@@ -121,6 +156,11 @@ impl NebulaTheme {
             "MossDark" => Self::MossDark,
             "Nord" => Self::Nord,
             "Paper" => Self::Paper,
+            "BreezeLight" => Self::BreezeLight,
+            "BreezeDark" => Self::BreezeDark,
+            "MintLight" => Self::MintLight,
+            "MintDark" => Self::MintDark,
+
             _ => return None,
         })
     }
@@ -148,6 +188,9 @@ impl NebulaTheme {
     /// themes a light one).
     pub(crate) fn accent(self) -> Rgb {
         match self {
+            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
+                rgb8(self.fresh_palette().unwrap().accent)
+            },
             Self::Nebula => Rgb::new(82, 168, 255),
             Self::SilverLight => Rgb::new(73, 80, 87),
             Self::SteelDark => Rgb::new(148, 163, 184),
@@ -170,6 +213,9 @@ impl NebulaTheme {
     /// at runtime — the cards use one fixed neutral stand-in so all dark cards
     /// preview alike regardless of the configured scheme.
     pub(crate) fn card_ink(self) -> CardInk {
+        if let Some(palette) = self.fresh_palette() {
+            return CardInk { fg: rgb8(palette.foreground) };
+        }
         match self {
             Self::Nord => return CardInk { fg: Rgb::new(0xe5, 0xe9, 0xf0) },
             Self::Paper => return CardInk { fg: Rgb::new(0x1a, 0x1a, 0x1a) },
@@ -187,11 +233,8 @@ impl NebulaTheme {
     /// Nord and Paper carry a complete terminal palette. Keeping the
     /// data in `nebula_settings` gives GPUI and the legacy renderer one source.
     pub(crate) fn exact_term_colors(self) -> Option<nebula_settings::ExactTermColors> {
-        match self {
-            Self::Nord => nebula_settings::ThemeName::Nord.term_theme().exact,
-            Self::Paper => nebula_settings::ThemeName::Paper.term_theme().exact,
-            _ => None,
-        }
+        nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
+            .and_then(|name| name.term_theme().exact)
     }
 
     /// Rebuild the terminal color table for this theme on top of the user's
@@ -297,6 +340,13 @@ impl NebulaTheme {
     /// theme switch retroactively, which users read as "the prompt is stuck").
     pub(crate) fn powerline_colors(self) -> [Rgb; 8] {
         match self {
+            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
+                nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
+                    .unwrap()
+                    .term_theme()
+                    .powerline
+                    .map(rgb8)
+            },
             Self::Nebula => [
                 Rgb::new(57, 75, 112),
                 Rgb::new(192, 202, 245),
@@ -390,8 +440,32 @@ impl NebulaTheme {
         }
     }
 
+    fn fresh_palette(self) -> Option<nebula_settings::FreshPalette> {
+        nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
+            .and_then(|name| name.fresh_palette())
+    }
+
     pub(crate) fn palette(self) -> NebulaPalette {
         match self {
+            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
+                let p = self.fresh_palette().unwrap();
+                let rgba = |rgb: [u8; 3], a| Rgba::new(rgb[0], rgb[1], rgb[2], a);
+                NebulaPalette {
+                    panel: rgba(p.shell, 255),
+                    pill: rgba(p.surface, 255),
+                    tab_stroke_l: rgba(p.muted, 32),
+                    tab_bg_l: rgba(p.surface, 255),
+                    tab_bg_r: rgba(p.surface, 255),
+                    edge_l: rgba(p.accent, 255),
+                    edge_r: rgba(p.accent, 255),
+                    edge_glow_l: rgba(p.accent, 0),
+                    glow_l: rgba(p.accent, 0),
+                    glow_r: rgba(p.accent, 0),
+                    is_light: p.is_light,
+                    term_bg: rgb8(p.surface),
+                    shell_bg: rgb8(p.shell),
+                }
+            },
             Self::Nebula => NebulaPalette {
                 panel: Rgba::new(34, 38, 48, 224),
                 pill: Rgba::new(43, 48, 59, 218),

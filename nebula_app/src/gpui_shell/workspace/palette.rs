@@ -225,6 +225,10 @@ impl NebulaWorkspace {
                         WorkspacePaletteAction::Shared(action) => {
                             this.run_palette_action(action, window, cx);
                         },
+                        WorkspacePaletteAction::LayoutRecipes => {
+                            this.dismiss_palette_state();
+                            this.open_layout_recipes(window, cx);
+                        },
                         WorkspacePaletteAction::FocusTab(tab) => {
                             this.dismiss_palette_state();
                             this.activate_tab(tab, window, cx);

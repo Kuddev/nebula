@@ -1,4 +1,4 @@
-//! 代码文件 Tab：普通文件只读查看；Git 冲突使用同一 Tab 体系打开三栏合并器。
+//! 代码文件 Tab：普通文件共用可保存的文本编辑器；Git 冲突使用三栏合并器。
 //!
 //! 普通代码继续走组件库的虚拟化 code editor。冲突页遵循 IntelliJ 一类合并器
 //! 的空间语义：左侧当前版本、中间可编辑结果、右侧传入版本；外侧两栏只读，
@@ -25,6 +25,7 @@ const MAX_CODE_BYTES: usize = 8 * 1024 * 1024;
 fn language_for_extension(extension: &str) -> Option<&'static str> {
     Some(match extension.to_ascii_lowercase().as_str() {
         "rs" => "rust",
+        "md" | "markdown" => "markdown",
         "py" | "pyi" => "python",
         "js" | "mjs" | "cjs" => "javascript",
         "ts" | "mts" | "cts" => "typescript",
@@ -63,7 +64,7 @@ fn language_for_extension(extension: &str) -> Option<&'static str> {
     })
 }
 
-fn language_for_path(path: &str) -> &'static str {
+pub(super) fn language_for_path(path: &str) -> &'static str {
     Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
@@ -80,6 +81,7 @@ pub fn viewable_file(path: &Path) -> bool {
 
 pub enum CodeTabViewEvent {
     GitConflictResolved,
+    Changed,
 }
 
 impl EventEmitter<CodeTabViewEvent> for CodeTabView {}
@@ -134,11 +136,13 @@ struct ConflictDocument {
 pub struct CodeTabView {
     pub path: PathBuf,
     pub title: String,
-    /// 普通文件的正文；冲突页中它就是唯一可编辑的中栏合并结果。
+    /// 冲突页的中栏合并结果；普通文件的缓冲区由 TextFileView 持有。
     input: Entity<InputState>,
     notice: Option<String>,
     lines: usize,
     merge: Option<MergeEditor>,
+    file: Option<Entity<super::file_editor::TextFileView>>,
+    _file_subscription: Option<gpui::Subscription>,
 }
 
 impl CodeTabView {
@@ -149,9 +153,37 @@ impl CodeTabView {
             .unwrap_or_else(|| path.display().to_string());
         let language = language_for_path(&path.to_string_lossy());
         let input = code_input(language, window, cx);
-        let mut this = Self { path, title, input, notice: None, lines: 0, merge: None };
-        this.reload(window, cx);
-        this
+        let file = cx.new(|cx| super::file_editor::TextFileView::new(path.clone(), window, cx));
+        let subscription = cx.subscribe(&file, |_, _, _, cx| {
+            cx.emit(CodeTabViewEvent::Changed);
+            cx.notify();
+        });
+        Self {
+            path,
+            title,
+            input,
+            notice: None,
+            lines: 0,
+            merge: None,
+            file: Some(file),
+            _file_subscription: Some(subscription),
+        }
+    }
+
+    pub(super) fn file_editor(&self) -> Option<Entity<super::file_editor::TextFileView>> {
+        self.file.clone()
+    }
+
+    pub(super) fn tab_title(&self, cx: &gpui::App) -> String {
+        self.file.as_ref().map_or_else(|| self.title.clone(), |file| file.read(cx).tab_title())
+    }
+
+    pub(super) fn focus_handle(&self, cx: &gpui::App) -> gpui::FocusHandle {
+        use gpui::Focusable as _;
+        self.file.as_ref().map_or_else(
+            || self.input.read(cx).focus_handle(cx),
+            |file| file.read(cx).focus_handle(cx),
+        )
     }
 
     pub fn new_git_merge(
@@ -176,6 +208,8 @@ impl CodeTabView {
             input,
             notice: None,
             lines: 0,
+            file: None,
+            _file_subscription: None,
             merge: Some(MergeEditor {
                 key: MergeKey { location, relative_path },
                 ours,
@@ -205,24 +239,9 @@ impl CodeTabView {
             self.reload_git_merge(window, cx);
             return;
         }
-        let (text, notice) = match std::fs::read(&self.path) {
-            Ok(bytes) => {
-                let truncated = bytes.len() > MAX_CODE_BYTES;
-                let slice = if truncated { &bytes[..MAX_CODE_BYTES] } else { &bytes[..] };
-                let text = String::from_utf8_lossy(slice).into_owned();
-                let notice = truncated.then(|| {
-                    format!("文件超过 {} MB，仅显示开头部分", MAX_CODE_BYTES / 1024 / 1024)
-                });
-                (text, notice)
-            },
-            Err(error) => {
-                (String::new(), Some(format!("无法读取 {}: {error}", self.path.display())))
-            },
-        };
-        self.lines = text.lines().count();
-        self.notice = notice;
-        self.input.update(cx, |input, cx| input.set_value(text, window, cx));
-        cx.notify();
+        if let Some(file) = &self.file {
+            file.update(cx, |file, cx| file.reload(window, cx));
+        }
     }
 
     pub fn reload_git_merge(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -328,90 +347,8 @@ impl CodeTabView {
         cx.notify();
     }
 
-    fn render_file(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let border = theme.border;
-        let warning = theme.warning;
-        let mono_family = theme.mono_font_family.clone();
-        let mono_size = theme.mono_font_size;
-        let path_label: SharedString = self.path.display().to_string().into();
-        let copy_path = self.path.display().to_string();
-        let meta: SharedString = format!("{} 行", self.lines).into();
-
-        v_flex()
-            .size_full()
-            .overflow_hidden()
-            .child(
-                h_flex()
-                    .h(px(32.0))
-                    .flex_shrink_0()
-                    .px(px(12.0))
-                    .items_center()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Icon::new(IconName::File).xsmall().text_color(muted))
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .font_family(mono_family.clone())
-                                    .text_size(px(12.0))
-                                    .text_color(muted)
-                                    .child(path_label),
-                            ),
-                    )
-                    .child(div().text_size(px(11.0)).text_color(muted).child(meta))
-                    .child(
-                        Button::new("code-copy-path")
-                            .icon(IconName::Copy)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("复制文件路径")
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
-                            })),
-                    )
-                    .child(
-                        Button::new("code-reload")
-                            .icon(IconName::Redo2)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("重新读取文件")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.reload(window, cx);
-                            })),
-                    ),
-            )
-            .when_some(self.notice.clone(), |root, notice| {
-                root.child(
-                    h_flex()
-                        .min_h(px(28.0))
-                        .flex_shrink_0()
-                        .px(px(12.0))
-                        .py_1()
-                        .border_b_1()
-                        .border_color(border)
-                        .text_size(px(11.0))
-                        .text_color(warning)
-                        .child(notice),
-                )
-            })
-            .child(div().flex_1().min_h_0().child(editor(
-                &self.input,
-                false,
-                mono_family,
-                mono_size,
-            )))
-            .into_any_element()
+    fn render_file(&self, _: &mut Context<Self>) -> gpui::AnyElement {
+        div().size_full().children(self.file.clone()).into_any_element()
     }
 
     fn render_merge(&self, cx: &mut Context<Self>) -> gpui::AnyElement {

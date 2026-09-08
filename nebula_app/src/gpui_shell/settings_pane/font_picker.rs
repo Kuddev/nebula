@@ -207,6 +207,18 @@ impl SettingsPane {
                     .w_full()
                     .when(self.active_section == 1, |input| input.h(px(36.0)))
                     .cleanable(false)
+                    .suffix(Button::new("font-picker-chevron")
+                            .debug_selector(|| "font-picker-chevron".to_owned()).ghost().xsmall()
+                        .icon(if self.font_picker_open { IconName::ChevronUp } else { IconName::ChevronDown })
+                        .tooltip(language.text(if self.font_picker_open { crate::i18n::Message::SettingsFontCollapse } else { crate::i18n::Message::SettingsFontExpand }))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| { cx.stop_propagation(); })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            let was_open = this.font_picker_open;
+                            this.font_family_input.update(cx, |input, cx| input.focus(window, cx));
+                            if was_open { this.close_font_picker(window, false, cx); } else { this.open_font_picker(cx); }
+                            cx.stop_propagation();
+                            cx.notify();
+                        })))
                     .aria_label(language.pick("终端字体", "Terminal font")),
             )
             // 弹层仍须取输入框的真实窗口坐标，才能正确处理滚动、缩放与 DPI。
@@ -388,7 +400,7 @@ impl SettingsPane {
                     families.iter().any(|family| family.eq_ignore_ascii_case(&entry.name));
                 h_flex()
                     .id(SharedString::from(format!("font-available-row-{index}")))
-                    .h(px(36.0))
+                    .h(px(38.0))
                     .w_full()
                     .min_w_0()
                     .px_2()
@@ -441,7 +453,7 @@ impl SettingsPane {
             // 与输入字段使用同一真实宽度，右缘和左右边界都不会跳变。
             .w(width)
             .max_w_full()
-            .p_2()
+            .p_3()
             .gap_2()
             .popover_style(cx)
             .occlude()
@@ -562,5 +574,68 @@ impl SettingsPane {
                 )
             },
         )
+    }
+}
+
+#[cfg(all(test, feature = "gpui-test-support"))]
+mod interaction_tests {
+    use super::*;
+    use gpui::{TestAppContext, point};
+    use gpui_component::Root;
+
+    #[gpui::test]
+    fn dropdown_arrow_toggles_and_search_filters_without_navigation_click(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::gpui_shell::config::Settings::load(
+                nebula_settings::ThemeName::Nord,
+            ));
+        });
+        let mut pane = None;
+        let (_, mut cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| SettingsPane::new(window, cx));
+            pane = Some(view.clone());
+            Root::new(view, window, cx)
+        });
+        let pane = pane.unwrap();
+        cx.simulate_resize(gpui::size(px(1280.0), px(1600.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds =
+            cx.debug_bounds("font-picker-chevron").expect("font field exposes a dropdown arrow");
+        let center = point(
+            bounds.origin.x + bounds.size.width * 0.5,
+            bounds.origin.y + bounds.size.height * 0.5,
+        );
+        cx.simulate_click(center, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(pane.read_with(cx, |pane, _| pane.font_picker_open));
+        cx.simulate_click(center, gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(!pane.read_with(cx, |pane, _| pane.font_picker_open));
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.settings_search_input
+                    .update(cx, |input, cx| input.replace_all("quick terminal", window, cx));
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            pane.read_with(cx, |pane, cx| (
+                pane.active_section,
+                pane.matching_settings_sections(cx)
+            )),
+            (7, vec![7])
+        );
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.settings_search_input
+                    .update(cx, |input, cx| input.replace_all("", window, cx));
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(pane.read_with(cx, |pane, _| pane.active_section), 1);
     }
 }

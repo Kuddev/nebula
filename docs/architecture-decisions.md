@@ -106,3 +106,43 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
 
 记录重大取舍而非每次小修复；事实与测试能推翻旧决定。规范误伤、安全修复与旧预算冲突时，
 先记录问题和最小修订，维护者审查后更新合同；不能将“只减不增”变成拒绝纠正规范的理由。
+
+## ADR-0005 — Editable documents, reusable layouts and pane drop targets
+
+- **Status:** Implemented in the working tree, 2026-09-08, for the requested editor,
+  recipe and quick-terminal workflows; pending normal maintainer review.
+- **Context:** The code viewer accepted edits without a save operation. Markdown
+  had a separate read-only lifecycle. Dragging a tab into a split workspace always
+  split the root. The quick window used fixed monitor dimensions on creation.
+- **Decision:** A GPUI file editor owns its input buffer, dirty state and scoped
+  asynchronous loads/saves. One renderer-independent document snapshot implements
+  UTF-8/BOM/newline handling, external-change checks and temporary-file replacement.
+  Partial/invalid previews cannot be saved. Preview image URL rewriting never
+  changes the source buffer. Markdown headings and source positions come from the
+  existing Markdown parser. Root blocks remain intact and receive reference
+  definitions when rendered as individually navigable preview blocks.
+- **Layout authority:** Recipes wrap the existing session schema with a name and
+  format version, stored under the application settings directory. They reuse
+  `restore_tab` with AI resume disabled and exclude agent identity from stored
+  trees. They save terminal layout/launch identity, not command history or output.
+  Reads and writes belong to the recipe view's background tasks. Restoring creates
+  a separate regular window. Bounds, count and version validation precede restore.
+- **Split authority:** `nebula_split::SplitTree::dock_at_leaf` owns subtree grafting.
+  Local/cross-window gestures carry a stable destination pane ID and direction;
+  preview rectangles use the same tree layout math as the resulting split.
+- **Preferences:** `nebula_settings` owns the quick-window mode and optional logical
+  dimensions. The window registry samples only normal, settled window bounds,
+  saves changes through the existing preference writer and clamps restored sizes
+  to the current display. Animation positions do not become saved dimensions.
+  New built-in terminal/chrome palette data also lives in the shared settings crate.
+- **Alternatives:** A second editor persistence implementation, Markdown source
+  modification for navigation, root-only docking, or replaying command history
+  from a layout would add inconsistent state or change the requested semantics.
+- **Validation:** Regression coverage targets conditional saves, BOM/CRLF and
+  Unicode, truncation, heading positions/references, recipe round trips, malformed
+  preferences, palette contrast and grafting a fifth pane without resizing the
+  three unrelated panes. Native product checks and actual UI results are reported
+  separately; this record does not assert release or service-side enforcement.
+- **Revisit condition:** Add command replay or externally imported recipes only
+  with a deliberate replay contract. Replace the preview block adapter when the
+  pinned TextView exposes an equivalent public heading/navigation API.

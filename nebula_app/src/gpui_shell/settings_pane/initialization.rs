@@ -55,6 +55,13 @@ impl SettingsPane {
             window,
             cx,
         );
+        add_select(
+            "quick_terminal_mode",
+            &["dedicated", "existing"],
+            runtime.quick_terminal_mode.settings_value(),
+            window,
+            cx,
+        );
         add_select("theme", &THEME_VALUES, runtime.theme.prompt_name(), window, cx);
         // 选项顺序与文案照抄旧壳 `CURSOR_SHAPE_OPTIONS` / `cursor_shape_label`。
         add_select(
@@ -446,12 +453,15 @@ impl SettingsPane {
         subscriptions.push(cx.subscribe_in(
             &settings_search_input,
             window,
-            |_this: &mut Self,
+            |this: &mut Self,
              _: &Entity<InputState>,
              event: &InputEvent,
              _: &mut Window,
              cx: &mut Context<Self>| {
                 if matches!(event, InputEvent::Change | InputEvent::Focus | InputEvent::Blur) {
+                    if matches!(event, InputEvent::Change) {
+                        this.update_settings_search(cx);
+                    }
                     cx.notify();
                 }
             },
@@ -469,7 +479,7 @@ impl SettingsPane {
             about_update_seq: 0,
             about_last_checked: None,
             settings_search_input,
-            settings_search_trigger_bounds: None,
+            search_origin_section: None,
             selects,
             shell_select,
             bg_picker_open: false,

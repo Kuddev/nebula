@@ -19,6 +19,10 @@ fn chrome_theme(name: ThemeName) -> NebulaTheme {
         ThemeName::MossDark => NebulaTheme::MossDark,
         ThemeName::Nord => NebulaTheme::Nord,
         ThemeName::Paper => NebulaTheme::Paper,
+        ThemeName::BreezeLight => NebulaTheme::BreezeLight,
+        ThemeName::BreezeDark => NebulaTheme::BreezeDark,
+        ThemeName::MintLight => NebulaTheme::MintLight,
+        ThemeName::MintDark => NebulaTheme::MintDark,
     }
 }
 
@@ -34,6 +38,10 @@ fn settings_theme_name(theme: NebulaTheme) -> ThemeName {
         NebulaTheme::MossDark => ThemeName::MossDark,
         NebulaTheme::Nord => ThemeName::Nord,
         NebulaTheme::Paper => ThemeName::Paper,
+        NebulaTheme::BreezeLight => ThemeName::BreezeLight,
+        NebulaTheme::BreezeDark => ThemeName::BreezeDark,
+        NebulaTheme::MintLight => ThemeName::MintLight,
+        NebulaTheme::MintDark => ThemeName::MintDark,
     }
 }
 
@@ -713,6 +721,10 @@ mod tests {
             resolve_theme_name(ThemeName::SilverLight, false, false),
             ThemeName::SilverLight
         );
+        assert_eq!(resolve_theme_name(ThemeName::BreezeLight, true, false), ThemeName::BreezeDark);
+        assert_eq!(resolve_theme_name(ThemeName::BreezeDark, true, true), ThemeName::BreezeLight);
+        assert_eq!(resolve_theme_name(ThemeName::MintLight, true, false), ThemeName::MintDark);
+        assert_eq!(resolve_theme_name(ThemeName::MintDark, true, true), ThemeName::MintLight);
         assert_eq!(resolve_theme_name(ThemeName::Nord, true, true), ThemeName::Paper);
         assert_eq!(resolve_theme_name(ThemeName::Paper, true, false), ThemeName::Nord);
     }

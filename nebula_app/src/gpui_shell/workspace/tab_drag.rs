@@ -7,7 +7,7 @@ use gpui::{Context, MouseButton, Pixels, Point, Window, px};
 use nebula_split::{SplitNav, SplitTree};
 
 use super::{
-    NebulaWorkspace, TAB_DRAG_THRESHOLD, WorkspaceTab, dock_tree,
+    NebulaWorkspace, TAB_DRAG_THRESHOLD, WorkspaceTab,
     windowing::{self, CrossWindowDropDestination, CrossWindowTabDrag},
 };
 
@@ -31,7 +31,7 @@ pub(super) struct TabDrag {
     pub(super) pitch: f32,
     pub(super) offset: f32,
     pub(super) active: bool,
-    pub(super) dock: Option<SplitNav>,
+    pub(super) dock: Option<DockTarget>,
 }
 
 impl NebulaWorkspace {
@@ -251,34 +251,47 @@ impl NebulaWorkspace {
         (x1 > x0 && y1 > y0).then(|| nebula_split::Rect::new(x0, y0, x1 - x0, y1 - y0))
     }
 
-    pub(crate) fn dock_nav_at(&self, x: f32, y: f32) -> Option<SplitNav> {
-        let area = self.active_terminal_area()?;
-        if !area.contains(x, y) {
-            return None;
+    pub(crate) fn dock_nav_at(&self, x: f32, y: f32) -> Option<DockTarget> {
+        let areas = self.dock_pane_areas();
+        dock_target_at(self.active_terminal_area()?, &areas, x, y)
+    }
+
+    fn dock_pane_areas(&self) -> Vec<(u64, nebula_split::Rect)> {
+        let Some(area) = self.active_terminal_area() else { return vec![] };
+        let Some(WorkspaceTab::Terminal { tree, zoomed, .. }) = self.tabs.get(self.active) else {
+            return vec![];
+        };
+        // A zoomed tree must be restored before adding a split, otherwise its post-drop
+        // geometry cannot match the visible full-pane preview.
+        if *zoomed && !tree.is_leaf() {
+            return vec![];
         }
-        let nx = (x - area.x) / area.w;
-        let ny = (y - area.y) / area.h;
-        let (dl, dr, dt, db) = (nx, 1.0 - nx, ny, 1.0 - ny);
-        let min = dl.min(dr).min(dt).min(db);
-        Some(if min == dl {
-            SplitNav::Left
-        } else if min == dr {
-            SplitNav::Right
-        } else if min == dt {
-            SplitNav::Up
+        tree.layout(area, 1.0, 1.0, nebula_split::DIVIDER_GAP, false).panes
+    }
+
+    pub(super) fn dock_preview_area(&self, target: DockTarget) -> Option<nebula_split::Rect> {
+        let area = if let Some(pane) = target.pane {
+            self.dock_pane_areas().into_iter().find(|(id, _)| *id == pane)?.1
         } else {
-            SplitNav::Down
-        })
+            self.active_terminal_area()?
+        };
+        SplitTree::leaf(0)
+            .joined(SplitTree::leaf(1), target.nav)
+            .layout(area, 1.0, 1.0, nebula_split::DIVIDER_GAP, false)
+            .panes
+            .into_iter()
+            .find(|(pane, _)| *pane == 1)
+            .map(|(_, area)| area)
     }
 
     fn dock_tab_into_active(
         &mut self,
         source: usize,
-        nav: SplitNav,
+        target: DockTarget,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.dock_allowed(source) {
+        if !self.dock_allowed(source) || !self.tabs.get(self.active).is_some_and(|tab| matches!(tab, WorkspaceTab::Terminal { tree, .. } if target.pane.is_none_or(|pane| tree.contains(pane)))) {
             return;
         }
         let Some((
@@ -298,8 +311,13 @@ impl NebulaWorkspace {
         else {
             unreachable!("dock_allowed 已保证 active 是 Terminal");
         };
-        let old = std::mem::replace(tree, SplitTree::leaf(src_focused));
-        *tree = dock_tree(old, src_tree, nav);
+        if let Some(pane) = target.pane {
+            tree.dock_at_leaf(pane, src_tree, target.nav)
+                .expect("destination checked before detaching source");
+        } else {
+            let previous = std::mem::replace(tree, SplitTree::leaf(src_focused));
+            *tree = previous.joined(src_tree, target.nav);
+        }
         panes.extend(src_panes);
         *focused = src_focused;
         *zoomed = false;
@@ -336,5 +354,83 @@ impl NebulaWorkspace {
         };
         self.focus_active(window, cx);
         cx.notify();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DockTarget {
+    pub(crate) pane: Option<u64>,
+    pub(crate) nav: SplitNav,
+}
+
+fn dock_target_at(
+    area: nebula_split::Rect,
+    panes: &[(u64, nebula_split::Rect)],
+    x: f32,
+    y: f32,
+) -> Option<DockTarget> {
+    if !area.contains(x, y) || panes.is_empty() {
+        return None;
+    }
+    // The outer rim retains full-height/full-width insertion; inside it, preview
+    // and insertion belong exclusively to the hovered leaf.
+    let rim = 14.0_f32.min(area.w * 0.05).min(area.h * 0.05);
+    if panes.len() > 1
+        && (x - area.x < rim
+            || area.x + area.w - x < rim
+            || y - area.y < rim
+            || area.y + area.h - y < rim)
+    {
+        return Some(DockTarget { pane: None, nav: nearest_edge(area, x, y) });
+    }
+    let (pane, area) = panes.iter().find(|(_, area)| area.contains(x, y))?;
+    Some(DockTarget { pane: Some(*pane), nav: nearest_edge(*area, x, y) })
+}
+
+fn nearest_edge(area: nebula_split::Rect, x: f32, y: f32) -> SplitNav {
+    let nx = (x - area.x) / area.w.max(1.0);
+    let ny = (y - area.y) / area.h.max(1.0);
+    [
+        (nx, SplitNav::Left),
+        (1.0 - nx, SplitNav::Right),
+        (ny, SplitNav::Up),
+        (1.0 - ny, SplitNav::Down),
+    ]
+    .into_iter()
+    .min_by(|a, b| a.0.total_cmp(&b.0))
+    .unwrap()
+    .1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn outer_rim_and_quadrant_drops_have_distinct_preview_targets() {
+        let area = nebula_split::Rect::new(0.0, 0.0, 1200.0, 800.0);
+        let panes = [
+            (1, nebula_split::Rect::new(0.0, 0.0, 599.0, 399.0)),
+            (2, nebula_split::Rect::new(601.0, 0.0, 599.0, 399.0)),
+            (3, nebula_split::Rect::new(0.0, 401.0, 599.0, 399.0)),
+            (4, nebula_split::Rect::new(601.0, 401.0, 599.0, 399.0)),
+        ];
+        assert_eq!(
+            dock_target_at(area, &panes, 610.0, 600.0),
+            Some(DockTarget { pane: Some(4), nav: SplitNav::Left })
+        );
+        assert_eq!(
+            dock_target_at(area, &panes, 1195.0, 600.0),
+            Some(DockTarget { pane: None, nav: SplitNav::Right })
+        );
+        assert_eq!(dock_target_at(area, &panes, 1250.0, 600.0), None);
+    }
+
+    #[test]
+    fn direction_is_relative_to_the_hovered_pane() {
+        let pane = nebula_split::Rect::new(600.0, 400.0, 600.0, 400.0);
+        assert_eq!(nearest_edge(pane, 610.0, 600.0), SplitNav::Left);
+        assert_eq!(nearest_edge(pane, 900.0, 410.0), SplitNav::Up);
+        assert_eq!(nearest_edge(pane, 1190.0, 600.0), SplitNav::Right);
+        assert_eq!(nearest_edge(pane, 900.0, 790.0), SplitNav::Down);
     }
 }

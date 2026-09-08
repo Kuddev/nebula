@@ -1,12 +1,5 @@
-//! 图片 / 文档（Markdown）Tab —— GPUI 壳的只读查看器。
-//!
-//! 图片：缩放/平移/锚点数学**复用旧壳** `display::image_viewer::ImageView`
-//! （单测锁定的几何状态机），渲染换成 GPUI `paint_image`（解码管线与壁纸
-//! 同款：RGBA → BGRA、后台线程解码）。
-//!
-//! 文档：文件读入后交组件库 `TextView::markdown`（解析、代码高亮、选择、
-//! 滚动都在组件内）。入口判定与旧壳同合同（`markdown_view::viewable_file`
-//! ∪ `image_viewer::viewable_file`，其余交系统处理器）。
+//! Image tab rendering, plus the shared editable Markdown tab entry point.
+//! Image zoom/pan continues to use the existing tested ImageView geometry.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -15,16 +8,14 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Bounds, ContentMask, Context, Corners, EventEmitter, InteractiveElement as _,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Point, Render, RenderImage, ScrollWheelEvent, SharedString, Styled as _, Window, div,
-    px,
+    Bounds, ContentMask, Context, Corners, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, RenderImage,
+    ScrollWheelEvent, Styled as _, Window, div, px,
 };
 use image::Frame;
 
 use crate::display::image_viewer::ImageView;
 use crate::gpui_shell::prelude::*;
-use gpui_component::text::{TextView, TextViewState, TextViewStyle};
 
 /// 双击路由：应用内能读的开 tab（图片/文档/源码），其余交系统处理器。
 /// 源码查看是 GPUI 壳新增能力，旧壳合同（`input/chrome.rs`）之上的超集。
@@ -33,10 +24,6 @@ pub fn openable_in_app(path: &Path) -> bool {
         || crate::display::markdown_view::viewable_file(path)
         || crate::gpui_shell::code_tab::viewable_file(path)
 }
-
-/// 文档一次性读入的上限。组件 TextView 是全量解析（没有旧壳 DocView 的
-/// 行虚拟化），大日志全量喂进去会卡帧；超限截断并在文首说明。
-const MAX_DOC_BYTES: usize = 1024 * 1024;
 
 pub struct ImageTabView {
     pub path: PathBuf,
@@ -225,178 +212,4 @@ impl Render for ImageTabView {
     }
 }
 
-pub struct DocTabView {
-    pub path: PathBuf,
-    pub title: String,
-    notice: Option<String>,
-    /// 必须保留组件的 managed state：真实鼠标选区、跨块文本提取和 Ctrl+C
-    /// 都由 TextView 维护，宿主只在右键时读取已经成立的选区。
-    text_view: gpui::Entity<TextViewState>,
-}
-
-pub enum DocTabViewEvent {
-    SelectionContextMenuRequested { position: Point<Pixels>, text: String },
-}
-
-impl DocTabView {
-    pub fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
-        let title = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let (content, notice) = load_doc_content(&path);
-        let text_view = cx.new(|cx| TextViewState::markdown(content.as_ref(), cx));
-        Self { path, title, notice, text_view }
-    }
-
-    pub fn reload(&mut self, cx: &mut Context<Self>) {
-        let (content, notice) = load_doc_content(&self.path);
-        self.notice = notice;
-        self.text_view.update(cx, |state, cx| state.set_text(content.as_ref(), cx));
-    }
-
-    fn on_right_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let text = self.text_view.read(cx).selected_text();
-        if text.trim().is_empty() {
-            return;
-        }
-        cx.emit(DocTabViewEvent::SelectionContextMenuRequested { position: event.position, text });
-        cx.stop_propagation();
-    }
-}
-
-impl EventEmitter<DocTabViewEvent> for DocTabView {}
-
-fn load_doc_content(path: &Path) -> (SharedString, Option<String>) {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let truncated = bytes.len() > MAX_DOC_BYTES;
-            let slice = if truncated { &bytes[..MAX_DOC_BYTES] } else { &bytes[..] };
-            let text = rewrite_doc_images(&String::from_utf8_lossy(slice), path.parent());
-            let notice =
-                truncated.then(|| format!("文件超过 {} KB，仅显示开头部分", MAX_DOC_BYTES / 1024));
-            (text.into(), notice)
-        },
-        Err(error) => {
-            (SharedString::default(), Some(format!("无法读取 {}: {error}", path.display())))
-        },
-    }
-}
-
-impl Render for DocTabView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let path_label: SharedString = self.path.display().to_string().into();
-
-        v_flex()
-            .size_full()
-            .p_3()
-            .gap_2()
-            .child(
-                h_flex()
-                    .h(px(28.0))
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(muted)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(path_label),
-                    )
-                    .child(
-                        Button::new("doc-reload")
-                            .icon(IconName::Redo2)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("重新读取文件")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload(cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .when_some(self.notice.clone(), |root, notice| {
-                root.child(div().text_xs().text_color(theme.warning).child(notice))
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
-                    .child(TextView::new(&self.text_view)
-                        .selectable(true)
-                        .scrollable(true)
-                        // image_base：相对图片路径（README 的 logo/截图）按
-                        // 文档所在目录解析；高亮主题跟当前壳主题走。
-                        .style(TextViewStyle {
-                            image_base: self.path.parent().map(Arc::from),
-                            highlight_theme: cx.theme().highlight_theme.clone(),
-                            is_dark: cx.theme().is_dark(),
-                            ..TextViewStyle::default()
-                        })),
-            )
-    }
-}
-
-/// 把文档里的本地 GIF / 动画 WebP 换成缓存里的单帧 PNG。
-/// 网络图走 HTTP 客户端同一套压帧；本地图不经过 HTTP，不换的话 gpui
-/// 仍会播 GIF，markdown 多图共用 element id 时越界 panic。
-fn rewrite_doc_images(text: &str, base: Option<&Path>) -> String {
-    use std::sync::LazyLock;
-    static MARKDOWN_IMG: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r#"(!\[[^\]]*\]\()([^)\s]+)"#).unwrap());
-    // `regex` crate 不支持反向引用 `\2`，双引号/单引号拆开写。
-    static HTML_IMG_DQ: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r#"(?i)(<img\b[^>]*?\bsrc\s*=\s*")([^"]+)""#).unwrap());
-    static HTML_IMG_SQ: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r#"(?i)(<img\b[^>]*?\bsrc\s*=\s*')([^']+)'"#).unwrap());
-    let rewritten = MARKDOWN_IMG.replace_all(text, |caps: &regex::Captures<'_>| {
-        format!("{}{}", &caps[1], flatten_local_image_url(&caps[2], base))
-    });
-    let rewritten = HTML_IMG_DQ.replace_all(&rewritten, |caps: &regex::Captures<'_>| {
-        format!(r#"{}{}""#, &caps[1], flatten_local_image_url(&caps[2], base))
-    });
-    HTML_IMG_SQ
-        .replace_all(&rewritten, |caps: &regex::Captures<'_>| {
-            format!("{}{}'", &caps[1], flatten_local_image_url(&caps[2], base))
-        })
-        .into_owned()
-}
-
-fn flatten_local_image_url(url: &str, base: Option<&Path>) -> String {
-    let lower = url.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("data:") {
-        return url.to_owned();
-    }
-    let path = Path::new(url);
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        match base {
-            Some(base) => base.join(path),
-            None => return url.to_owned(),
-        }
-    };
-    let Ok(bytes) = std::fs::read(&resolved) else {
-        return url.to_owned();
-    };
-    let Some(png) = crate::gpui_shell::http::flatten_animated_to_png(&bytes) else {
-        return url.to_owned();
-    };
-    let cache = std::env::temp_dir().join("nebula-md-img");
-    if std::fs::create_dir_all(&cache).is_err() {
-        return url.to_owned();
-    }
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&bytes, &mut hasher);
-    let dest = cache.join(format!("{:016x}.png", std::hash::Hasher::finish(&hasher)));
-    if !dest.exists() && std::fs::write(&dest, png).is_err() {
-        return url.to_owned();
-    }
-    dest.to_string_lossy().replace('\\', "/")
-}
+pub use super::file_editor::{TextFileEvent as DocTabViewEvent, TextFileView as DocTabView};

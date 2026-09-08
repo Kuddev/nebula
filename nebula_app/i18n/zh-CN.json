@@ -74,7 +74,9 @@
       "fallback_description": "第 1 项优先显示；缺失字形依次使用后续字体，内置 Maple 是最终安全兜底。",
       "group_description": "第 1 项是主字体，其余按顺序回退",
       "loading": "正在枚举系统字体…",
-      "no_matches": "没有匹配的字体"
+      "no_matches": "没有匹配的字体",
+      "expand": "展开字体列表",
+      "collapse": "收起字体列表"
     },
     "keymap": {
       "conflict": "{combo} 同时绑定了「{first}」与「{second}」——只有排前面的「{first}」会触发",
@@ -92,7 +94,14 @@
       "hide_config_host": "隐藏（config 源不可删除）",
       "empty_hint": "「+ 添加主机」或在 ~/.ssh/config 里维护别名",
       "shared_data_hint": "与旧壳共用同一份数据；config 别名删除即隐藏，可恢复"
-    }
+    },
+    "quick_terminal": {
+      "mode": "快速终端打开方式",
+      "description": "独立窗口会记住尺寸；唤起已有窗口不会新建标签页。",
+      "dedicated": "独立窗口",
+      "existing": "唤起已有窗口"
+    },
+    "search_empty": "没有匹配的设置"
   },
   "provider": {
     "test": {
@@ -252,5 +261,62 @@
     "yes": "是",
     "no": "否",
     "confirmation_expired": "确认请求已经变更或结束。"
+  },
+  "editor": {
+    "loading": "正在读取文件…",
+    "save": "保存",
+    "saving": "正在保存…",
+    "saved": "已保存",
+    "unsaved": "未保存",
+    "edit": "编辑",
+    "preview": "预览",
+    "outline": "目录",
+    "no_headings": "此文档还没有标题",
+    "copy_heading": "复制标题",
+    "reload": "重新读取文件",
+    "copy_path": "复制文件路径",
+    "read_only": "只读文件",
+    "truncated": "文件超过 8 MB，仅预览开头部分，无法编辑保存",
+    "encoding": "此文件不是完整的 UTF-8 文本，仅支持预览",
+    "conflict": "文件已被外部修改。编辑内容已保留，请复制需要的内容后重新读取文件。",
+    "read_failed": "读取失败：{error}",
+    "save_failed": "保存失败：{error}",
+    "discard_title": "放弃未保存的修改？",
+    "close_title": "保存文件修改？",
+    "discard": "放弃修改",
+    "cancel": "取消",
+    "lines": "{count} 行",
+    "save_shortcut": "保存（Ctrl+S / ⌘S）",
+    "info": "文件信息",
+    "type": "类型",
+    "size": "文件大小",
+    "modified": "修改时间",
+    "characters": "字符数",
+    "line_count": "行数",
+    "encoding_label": "编码",
+    "line_ending": "换行符",
+    "status": "状态",
+    "copy_name": "复制文件名",
+    "reveal": "在文件管理器中显示",
+    "open_external": "用默认应用打开"
+  },
+  "recipe": {
+    "title": "布局配方",
+    "name": "布局名称",
+    "save": "保存布局",
+    "tab": "当前标签",
+    "window": "当前窗口",
+    "empty": "还没有保存的布局。排列好标签和分屏后，为它起个名字。",
+    "description": "保存标签、分屏比例和工作目录。恢复时在新窗口创建终端。",
+    "open": "恢复",
+    "delete": "删除",
+    "loading": "正在读取布局…",
+    "saved": "布局已保存",
+    "failed": "操作失败：{error}",
+    "delete_title": "删除此布局配方？",
+    "open_failed": "布局恢复失败",
+    "count": "{tabs} 个标签 · {panes} 个分屏",
+    "save_window": "保存当前窗口布局…",
+    "open_library": "打开布局配方…"
   }
 }
