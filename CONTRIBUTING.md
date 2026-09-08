@@ -127,9 +127,13 @@ with GPUI test support. This compiles the two feature configurations while avoid
 the previous repeated workspace/product/dialog test builds. The profiles used for
 normal interactive development and release optimization remain separate.
 
-Rust dependency caches are separated by operating system, architecture and
-core/product/release role. Preview and stable packages share the release cache.
-The CI profile and macOS deployment target participate in their cache keys.
+Cargo downloads are shared once per operating system and architecture. Compiled
+targets are cached separately for core/product/release roles, so a large Git
+dependency is not stored three times per platform and evicts another platform's
+build. Preview and stable packages share the release target cache. The pinned
+compiler, SDK, build flags, manifests and CI profile participate in target keys;
+Cargo still validates its own fingerprints. Complete downloads and compiled
+targets are saved separately, retaining completed compilation after a test fails.
 Already compressed package artifacts are uploaded without another compression pass.
 Release builds retain O3 for the product and thin LTO; the large product crate uses
 16 codegen units to parallelize LLVM compilation. Native package validation still

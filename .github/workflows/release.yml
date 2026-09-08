@@ -156,15 +156,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         with:
-          shared-key: release-v2
-          cache-workspace-crates: true
-          cache-on-failure: true
-          cache-bin: false
-          env-vars: MACOSX_DEPLOYMENT_TARGET
+          key: release
+          legacy-key: release-v2
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-key }}
       - name: Download pinned linuxdeploy
         env:
           LINUXDEPLOY: ${{ runner.temp }}/linuxdeploy-x86_64.AppImage
@@ -281,15 +285,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         with:
-          shared-key: release-v2
-          cache-workspace-crates: true
-          cache-on-failure: true
-          cache-bin: false
-          env-vars: MACOSX_DEPLOYMENT_TARGET
+          key: release
+          legacy-key: release-v2
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-key }}
       - name: Import Developer ID signing credentials
         if: ${{ env.MACOS_SIGNING == 'developer-id' }}
         env:
@@ -402,6 +410,7 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item scripts/prepare-windows-runtime.ps1 "$env:RUNNER_TEMP/prepare-windows-runtime.ps1"
+          Copy-Item .github/actions/rust-cache "$env:RUNNER_TEMP/rust-cache-action" -Recurse
           New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/runtime-tests" -Force | Out-Null
           Copy-Item scripts/tests/windows-runtime.tests.ps1 "$env:RUNNER_TEMP/runtime-tests/windows-runtime.tests.ps1"
       - name: Verify the previous Windows test result
@@ -431,19 +440,23 @@ jobs:
         if: ${{ inputs.source_commit != '' }}
         with:
           ref: ${{ inputs.source_commit }}
+      - name: Restore the cache helper for selected-source recovery
+        if: ${{ inputs.source_commit != '' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .github/actions/rust-cache | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/rust-cache-action/action.yml" .github/actions/rust-cache/action.yml -Force
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         with:
-          shared-key: release-v2
-          cache-workspace-crates: true
-          cache-on-failure: true
-          cache-bin: false
-          env-vars: MACOSX_DEPLOYMENT_TARGET
+          key: release
+          legacy-key: release-v2
       - name: Prepare pinned Windows console runtime
         shell: pwsh
         run: |
@@ -456,6 +469,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
           exit $LASTEXITCODE
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-key }}
       - name: Retain built Windows runtime before packaging
         uses: actions/upload-artifact@v4
         with:

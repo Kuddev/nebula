@@ -37,7 +37,7 @@ def main():
             if not step.get("started_at") or not step.get("completed_at"):
                 continue
             duration = seconds(step["started_at"], step["completed_at"])
-            if "rust-cache" in step["name"]:
+            if "rust-cache" in step["name"] or step["name"] == "Save compiled targets":
                 cache += duration
             if (step["name"] == "Compile the product and run complete affected crate suites"
                     or step["name"].startswith("Build GPUI")):

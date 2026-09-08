@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - name: Install native dependencies
         run: |
           sudo apt-get update
@@ -33,14 +36,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         with:
-          shared-key: legacy-ci-v1-${{ hashFiles('.github/ci-profile.toml') }}
-          cache-workspace-crates: true
-          cache-bin: false
+          key: legacy
+          legacy-key: legacy-ci-v1-${{ hashFiles('.github/ci-profile.toml') }}
       - name: Test Lua configuration on Wayland and X11 build
         run: |
           cargo test --locked --config .github/ci-profile.toml --profile ci \
             -p nebula --no-default-features --features legacy-shell config::
       - name: Check Linux release build
         run: cargo check --workspace --release
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-key }}

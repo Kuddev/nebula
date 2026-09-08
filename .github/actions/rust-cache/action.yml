@@ -1,0 +1,102 @@
+name: Cargo downloads and compiled targets
+description: Share downloads across jobs without duplicating them in every target cache
+
+inputs:
+  key:
+    description: Compiled workload (core, product, release or legacy)
+    required: true
+  target:
+    description: Cargo target directory
+    default: target
+  legacy-key:
+    description: Previous combined cache key, restored only during migration
+    default: ""
+
+outputs:
+  cache-key:
+    description: Key to use when saving compiled targets
+    value: ${{ steps.identity.outputs.key }}
+  cache-hit:
+    description: Whether the compiled target cache matched exactly
+    value: ${{ steps.target.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Identify compiler and build environment
+      id: identity
+      shell: bash
+      env:
+        CACHE_OS: ${{ runner.os }}
+        CACHE_ARCH: ${{ runner.arch }}
+        CACHE_WORKLOAD: ${{ inputs.key }}
+        CACHE_MANIFESTS: ${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', '**/.cargo/config.toml', '.github/ci-profile.toml') }}
+      run: |
+        python - <<'PY'
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+        facts = {"rustc": subprocess.check_output(["rustc", "-vV"], text=True)}
+        prefixes = ("CARGO_PROFILE_", "CFLAGS", "CXXFLAGS", "RUSTFLAGS")
+        names = {"CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER",
+                 "CC", "CXX", "ImageOS", "MACOSX_DEPLOYMENT_TARGET", "SDKROOT", "DEVELOPER_DIR"}
+        facts["environment"] = {key: value for key, value in os.environ.items()
+                                if key in names or key.startswith(prefixes)}
+        if os.environ["CACHE_OS"] == "macOS":
+            facts["sdk"] = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-version"], text=True)
+        fingerprint = hashlib.sha256(json.dumps(facts, sort_keys=True).encode()).hexdigest()[:16]
+        prefix = "cargo-targets-v1-" + "-".join(os.environ[name] for name in
+                                              ("CACHE_OS", "CACHE_ARCH", "CACHE_WORKLOAD"))
+        prefix += "-" + fingerprint + "-"
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write("key=" + prefix + os.environ["CACHE_MANIFESTS"] + "\n")
+            output.write("restore-key=" + prefix + "\n")
+            output.write("cargo-home=" + os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")) + "\n")
+        PY
+    - name: Restore shared Cargo downloads
+      id: downloads
+      uses: actions/cache/restore@v4
+      with:
+        # Keep the immutable archives/Git objects once per native platform.
+        # Cargo recreates checkouts and extracted registry sources from these.
+        path: |
+          ${{ steps.identity.outputs.cargo-home }}/registry/index
+          ${{ steps.identity.outputs.cargo-home }}/registry/cache
+          ${{ steps.identity.outputs.cargo-home }}/git/db
+        key: cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}
+        restore-keys: cargo-downloads-v1-${{ runner.os }}-${{ runner.arch }}-
+    - name: Restore compiled targets
+      id: target
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ inputs.target }}
+        key: ${{ steps.identity.outputs.key }}
+        restore-keys: ${{ steps.identity.outputs.restore-key }}
+    - name: Recover an existing combined cache during migration
+      if: steps.target.outputs.cache-matched-key == '' && inputs.legacy-key != ''
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.legacy-key }}
+        workspaces: . -> ${{ inputs.target }}
+        env-vars: MACOSX_DEPLOYMENT_TARGET
+        cache-bin: false
+        cache-on-failure: true
+        save-if: false
+    - name: Populate complete downloads before sharing the cache
+      if: steps.downloads.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        host_target="$(rustc -vV | sed -n 's/^host: //p')"
+        test -n "$host_target"
+        cargo fetch --locked --target "$host_target"
+    - name: Save complete shared Cargo downloads
+      if: steps.downloads.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ steps.identity.outputs.cargo-home }}/registry/index
+          ${{ steps.identity.outputs.cargo-home }}/registry/cache
+          ${{ steps.identity.outputs.cargo-home }}/git/db
+        key: ${{ steps.downloads.outputs.cache-primary-key }}

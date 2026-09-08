@@ -44,7 +44,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Test selection and workflow contracts
-        run: python -m unittest scripts.tests.test_ci -v
+        run: python -m unittest scripts.tests.test_ci scripts.tests.test_ci_cache -v
       - name: Select changed crates and their consumers
         id: select
         env:
@@ -114,17 +114,21 @@ jobs:
         if: toJSON(matrix.packages) != '[]'
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         if: toJSON(matrix.packages) != '[]'
         with:
-          shared-key: ci-v1-${{ matrix.suite }}-${{ hashFiles('.github/ci-profile.toml') }}
-          workspaces: . -> target/ci-${{ matrix.suite }}
-          cache-workspace-crates: true
-          cache-on-failure: true
-          cache-bin: false
-          env-vars: MACOSX_DEPLOYMENT_TARGET
+          key: ci-${{ matrix.suite }}
+          target: target/ci-${{ matrix.suite }}
+          legacy-key: ci-v1-${{ matrix.suite }}-${{ hashFiles('.github/ci-profile.toml') }}
       - name: Compile the product and run complete affected crate suites
         run: python -m scripts.ci test
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/ci-${{ matrix.suite }}
+          key: ${{ steps.rust-cache.outputs.cache-key }}
 
   ci-complete:
     name: ci-complete

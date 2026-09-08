@@ -168,16 +168,21 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         with:
-          shared-key: release-v2
-          cache-workspace-crates: true
-          cache-on-failure: true
-          cache-bin: false
-          env-vars: MACOSX_DEPLOYMENT_TARGET
+          key: release
+          legacy-key: release-v2
 
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-key }}
 
       - name: Download pinned linuxdeploy
         env:
@@ -336,16 +341,21 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         with:
-          shared-key: release-v2
-          cache-workspace-crates: true
-          cache-on-failure: true
-          cache-bin: false
-          env-vars: MACOSX_DEPLOYMENT_TARGET
+          key: release
+          legacy-key: release-v2
 
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-key }}
 
       - name: Import signing credentials into a temporary keychain
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_signing == 'developer-id' }}
@@ -477,15 +487,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
+        id: rust-cache
         with:
-          shared-key: release-v2
-          cache-workspace-crates: true
-          cache-on-failure: true
-          cache-bin: false
-          env-vars: MACOSX_DEPLOYMENT_TARGET
+          key: release
+          legacy-key: release-v2
       - name: Build GPUI comparison binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+      - name: Save compiled targets
+        if: always() && steps.rust-cache.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: ${{ steps.rust-cache.outputs.cache-key }}
       - name: Run Windows conformance
         env:
           NEBULA_RESIZE_TRACE: "1"
