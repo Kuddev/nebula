@@ -20,7 +20,7 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from conformance.harness import ConformanceContext, ResolvedApp, RuntimeClient, require
+from conformance.harness import ApiFailure, ConformanceContext, ConformanceError, ResolvedApp, RuntimeClient, require
 
 
 def verify_rendered_text(ctx: ConformanceContext, probe: Path, log: BinaryIO) -> None:
@@ -65,6 +65,24 @@ def owned_processes(executable: Path) -> dict[int, str]:
             if birth:
                 result[process_id] = birth
     return result
+
+
+def close_installed_app(ctx: ConformanceContext, executable: Path, launcher, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    for window in ctx.snapshot().get("windows", []):
+        try:
+            ctx.api("window.close", {"window_id": window["id"]})
+        except ApiFailure:
+            raise
+        except (OSError, ConformanceError):
+            # The final window can close its listener before acknowledging.
+            # The checks below still require this installed copy to exit.
+            pass
+    while time.monotonic() < deadline and owned_processes(executable):
+        time.sleep(0.1)
+    require(not owned_processes(executable), "installed application did not quit after closing its windows")
+    require(launcher.wait(timeout=max(0.1, deadline - time.monotonic())) == 0,
+            "LaunchServices reported an unsuccessful application exit")
 
 
 def main() -> int:
@@ -129,13 +147,7 @@ def main() -> int:
                     ctx.wait_for_line(re.compile(r"NEBULA_GUI_CWD=" + re.escape(str(Path.home())) + r"_END"))
                     verify_rendered_text(ctx, text_probe, log)
                     report.update(screenshot="captured", rendered_text=True)
-                    for window in ctx.snapshot().get("windows", []):
-                        ctx.api("window.close", {"window_id": window["id"]})
-                    deadline = time.monotonic() + 5
-                    while time.monotonic() < deadline and owned_processes(app.executable):
-                        time.sleep(0.1)
-                    require(not owned_processes(app.executable), "installed application did not quit after closing its windows")
-                    launcher.wait(timeout=5)
+                    close_installed_app(ctx, app.executable, launcher)
                     report.update(status="passed", utf8_locale=True, home_cwd=True)
                 finally:
                     for process_id, birth in owned_processes(app.executable).items():

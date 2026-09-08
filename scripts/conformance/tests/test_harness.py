@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 from pathlib import Path
 
@@ -18,6 +18,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from conformance.harness import (  # noqa: E402
+    ApiFailure,
     ConformanceError,
     ConformanceContext,
     ResolvedApp,
@@ -30,7 +31,7 @@ from conformance.harness import (  # noqa: E402
     shell_category,
     SkipCase,
 )
-from conformance.macos_launch import capture_screenshot
+from conformance.macos_launch import capture_screenshot, close_installed_app
 
 
 class NormalizationTests(unittest.TestCase):
@@ -229,6 +230,34 @@ class ArchiveSafetyTests(unittest.TestCase):
 
 
 class LaunchCaptureTests(unittest.TestCase):
+    def test_close_accepts_lost_ack_only_when_the_owned_app_exits(self):
+        ctx = SimpleNamespace(snapshot=lambda: {"windows": [{"id": 1}]},
+                              api=Mock(side_effect=ConformanceError("connection closed")))
+        launcher = SimpleNamespace(wait=Mock(return_value=0))
+        with patch("conformance.macos_launch.owned_processes", return_value={}):
+            close_installed_app(ctx, Path("/private/fixture/pebrel"), launcher)
+        ctx.api.assert_called_once_with("window.close", {"window_id": 1})
+        launcher.wait.assert_called_once()
+
+    def test_close_cannot_hide_an_app_that_is_still_running(self):
+        ctx = SimpleNamespace(snapshot=lambda: {"windows": [{"id": 1}]},
+                              api=Mock(side_effect=ConformanceError("connection closed")))
+        launcher = SimpleNamespace(wait=Mock(return_value=0))
+        with patch("conformance.macos_launch.owned_processes", return_value={1234: "birth"}):
+            with self.assertRaisesRegex(ConformanceError, "did not quit"):
+                close_installed_app(ctx, Path("/private/fixture/pebrel"), launcher, timeout=0)
+        launcher.wait.assert_not_called()
+
+    def test_close_preserves_api_failures_and_launcher_exit_status(self):
+        ctx = SimpleNamespace(snapshot=lambda: {"windows": [{"id": 1}]}, api=Mock())
+        launcher = SimpleNamespace(wait=Mock(return_value=7))
+        with patch("conformance.macos_launch.owned_processes", return_value={}):
+            with self.assertRaisesRegex(ConformanceError, "unsuccessful"):
+                close_installed_app(ctx, Path("/private/fixture/pebrel"), launcher)
+        ctx.api.side_effect = ApiFailure("window.close", {"code": "DENIED", "message": "denied"})
+        with self.assertRaises(ApiFailure):
+            close_installed_app(ctx, Path("/private/fixture/pebrel"), launcher)
+
     def test_screenshot_requires_success_and_a_nonempty_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
