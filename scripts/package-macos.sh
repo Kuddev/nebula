@@ -297,7 +297,7 @@ if hdiutil create \
   -size "${size_mib}m" \
   -srcfolder "$stage" \
   -ov \
-  -format UDZO \
+  -format ULMO \
   "$dmg_path"; then
   :
 else

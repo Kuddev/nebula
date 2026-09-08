@@ -57,7 +57,7 @@ class DmgSizingTests(unittest.TestCase):
             subprocess.run([
                 "hdiutil", "create", "-volname", "Pebrel Preview", "-fs", "HFS+",
                 "-size", f"{image_size_mib(stage)}m", "-srcfolder", str(stage),
-                "-format", "UDZO", str(image),
+                "-format", "ULMO", str(image),
             ], check=True, capture_output=True)
             mount = root / "mount"
             mount.mkdir()

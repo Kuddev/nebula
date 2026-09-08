@@ -52,6 +52,10 @@ UninstallDisplayIcon={app}\pebrel.exe
 OutputDir={#RepoRoot}\dist
 OutputBaseFilename={#PackageBrand}-v{#AppVersion}-windows-x64-setup
 Compression=lzma2/max
+; The font is embedded in pebrel.exe and also offered for system installation.
+; Its matching bytes can be over 64 MiB apart in the solid input stream (1.6.0).
+; A 128 MiB dictionary lets LZMA reuse them without removing either font path.
+LZMADictionarySize=131072
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes

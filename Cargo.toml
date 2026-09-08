@@ -38,7 +38,11 @@ smol = { opt-level = 3 }
 gpui = { opt-level = 3 }
 gpui-component = { opt-level = 3 }
 nebula_terminal = { opt-level = 3 }
-nebula = { opt-level = 3 }
+# The product contains the UI and protocol code in one binary crate. One LLVM
+# codegen unit made its Intel Mac release compile/link take over 18 minutes after
+# dependencies finished (Actions 34112627486). Keep O3 and thin LTO while allowing
+# independent units to compile in parallel; packaging tests still check size.
+nebula = { opt-level = 3, codegen-units = 16 }
 image = { opt-level = 3 }
 
 # Debug 壳仍要承担真实终端负载：GPUI 布局/字体塑形和 VT 解析若以

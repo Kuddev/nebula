@@ -5,10 +5,13 @@ run-name: >-
 
 on:
   pull_request:
-    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "nebula_app/res/**", "assets/**", "packaging/**", "scripts/**", ".github/workflows/preview-packages.yml"]
+    paths: ["**/*.rs", "**/Cargo.toml", "**/Cargo.lock", "rust-toolchain.toml", "nebula_app/**", "assets/**", "extra/**", "third_party/**", "packaging/**", "scripts/**", "architecture/**", ".github/**"]
   push:
     branches: [main]
-    paths: ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "nebula_app/res/**", "assets/**", "packaging/**", "scripts/**", ".github/workflows/preview-packages.yml"]
+    paths: ["**/*.rs", "**/Cargo.toml", "**/Cargo.lock", "rust-toolchain.toml", "nebula_app/**", "assets/**", "extra/**", "third_party/**", "packaging/**", "scripts/**", "architecture/**", ".github/**"]
+  merge_group:
+  schedule:
+    - cron: "23 21 * * 0"
   workflow_dispatch:
     inputs:
       preview_id:
@@ -32,6 +35,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,6 +45,12 @@ env:
   PYTHONUTF8: "1"
 
 jobs:
+  tests:
+    name: Native tests
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+
   prepare:
     name: Validate Preview inputs
     runs-on: ubuntu-22.04
@@ -157,16 +167,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
-
-      - name: Test workspace natively
-        run: cargo test --locked --workspace
-
-      - name: Test real Bash and Zsh startup contracts
-        run: python3 -m unittest scripts.tests.test_shell_integration -v
-
-      - name: Test SSH confirmation and password dialogs
-        run: cargo test --locked -p nebula --features gpui-test-support dialog
+          shared-key: release-v2
+          cache-workspace-crates: true
+          cache-bin: false
+          env-vars: MACOSX_DEPLOYMENT_TARGET
 
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
@@ -278,6 +282,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: preview-package-linux-x86_64
+          compression-level: 0
           path: |
             dist/*.AppImage
             dist/*.deb
@@ -323,34 +328,16 @@ jobs:
       - name: Verify native runner architecture
         run: test "$(uname -m)" = "${{ matrix.native_architecture }}"
 
-      - name: Test native DMG capacity and mounted contents
-        run: python3 -m unittest scripts.tests.test_macos_dmg -v
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
-
-      - name: Test workspace natively
-        run: cargo test --locked --workspace
-
-      - name: Test native shell startup and harness process ownership
-        run: >-
-          python3 -m unittest scripts.tests.test_shell_integration
-          scripts.conformance.tests.test_posix_lifecycle -v
-
-      - name: Test SSH confirmation and password dialogs
-        run: cargo test --locked -p nebula --features gpui-test-support dialog
-
-      - name: Release completed test artifacts before building the package
-        run: |
-          df -h . "${TMPDIR:-/tmp}"
-          du -sh target/debug
-          cargo clean --profile dev --package nebula
-          df -h . "${TMPDIR:-/tmp}"
+          shared-key: release-v2
+          cache-workspace-crates: true
+          cache-bin: false
+          env-vars: MACOSX_DEPLOYMENT_TARGET
 
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
@@ -458,6 +445,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: preview-package-macos-${{ matrix.architecture }}
+          compression-level: 0
           path: dist/*.dmg
           if-no-files-found: error
           retention-days: 14
@@ -481,21 +469,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Test native harness process ownership and completion markers
-        run: >-
-          python -m unittest
-          scripts.conformance.tests.test_lifecycle
-          scripts.conformance.tests.test_scrollback
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
-      - name: Test workspace natively
-        run: cargo test --locked --workspace
-      - name: Test SSH confirmation and password dialogs
-        run: cargo test --locked -p nebula --features gpui-test-support dialog
+          shared-key: release-v2
+          cache-workspace-crates: true
+          cache-bin: false
+          env-vars: MACOSX_DEPLOYMENT_TARGET
       - name: Build GPUI comparison binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
       - name: Run Windows conformance
@@ -515,12 +497,11 @@ jobs:
 
   aggregate:
     name: Compare native evidence and verify Preview packages
-    needs: [prepare, linux, macos, windows]
+    needs: [prepare, linux, macos, windows, tests]
     runs-on: ubuntu-22.04
     env:
       PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
       PREVIEW_ID: ${{ needs.prepare.outputs.preview_id }}
-      ASSET_VERSION: ${{ needs.prepare.outputs.asset_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -557,10 +538,20 @@ jobs:
             --evidence-dir preview-evidence \
             --macos-signing "$MACOS_SIGNING" "${notes_args[@]}"
 
+      - name: Report complete CI duration and package sizes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >"$RUNNER_TEMP/ci-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" >"$RUNNER_TEMP/ci-jobs.json"
+          python3 -m scripts.ci_timings --artifacts release-dist \
+            --run-json "$RUNNER_TEMP/ci-run.json" --jobs-json "$RUNNER_TEMP/ci-jobs.json"
+
       - name: Upload complete Preview set
         uses: actions/upload-artifact@v4
         with:
           name: Pebrel-v${{ needs.prepare.outputs.asset_version }}
+          compression-level: 0
           path: release-dist
           if-no-files-found: error
           retention-days: 14

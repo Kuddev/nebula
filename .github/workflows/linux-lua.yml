@@ -1,27 +1,23 @@
 name: Linux Lua configuration
 
 on:
-  push:
-    paths:
-      - "**/*.rs"
-      - "**/Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/linux-lua.yml"
-  pull_request:
-    paths:
-      - "**/*.rs"
-      - "**/Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".github/workflows/linux-lua.yml"
+  # Lua/config tests run in the affected product suite on all four platforms.
+  # Retain the explicit legacy-shell compatibility check as a weekly/manual job.
+  workflow_dispatch:
+  schedule:
+    - cron: "41 21 * * 0"
 
 permissions:
   contents: read
 
+concurrency:
+  group: linux-legacy-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ubuntu-24-04:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install native dependencies
@@ -38,8 +34,13 @@ jobs:
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: legacy-ci-v1-${{ hashFiles('.github/ci-profile.toml') }}
+          cache-workspace-crates: true
+          cache-bin: false
       - name: Test Lua configuration on Wayland and X11 build
         run: |
-          cargo test --locked -p nebula config::
+          cargo test --locked --config .github/ci-profile.toml --profile ci \
+            -p nebula --no-default-features --features legacy-shell config::
       - name: Check Linux release build
         run: cargo check --workspace --release

@@ -89,15 +89,15 @@ if (-not $SkipBuild) {
     $previousTargetDirectory = $env:CARGO_TARGET_DIR
     try {
         $env:CARGO_TARGET_DIR = $cargoTargetRoot
-        $workspaceArgs = @('build', '--workspace', '--exclude', 'nebula', '--locked')
+        $hookArgs = @('build', '-p', 'nebula_hook', '--bin', 'pebrel-hook', '--locked')
         $gpuiArgs = @('build', '-p', 'nebula', '--bin', 'pebrel', '--features', 'gpui-shell', '--locked')
         if ($Configuration -eq 'release') {
-            $workspaceArgs += '--release'
+            $hookArgs += '--release'
             $gpuiArgs += '--release'
         }
-        & cargo @workspaceArgs
+        & cargo @hookArgs
         if ($LASTEXITCODE -ne 0) {
-            throw "Cargo workspace build failed with exit code $LASTEXITCODE"
+            throw "Cargo hook build failed with exit code $LASTEXITCODE"
         }
         & cargo @gpuiArgs
         if ($LASTEXITCODE -ne 0) {

@@ -42,6 +42,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -51,12 +52,19 @@ env:
   MACOS_SIGNING: ${{ inputs.macos_signing || 'adhoc' }}
 
 jobs:
+  tests:
+    name: Native tests
+    if: ${{ inputs.source_commit == '' }}
+    uses: ./.github/workflows/ci.yml
+    with:
+      full: true
+      windows_only: ${{ inputs.windows_only || false }}
+
   prepare:
     name: Validate stable release inputs
     runs-on: ubuntu-22.04
     outputs:
       version: ${{ steps.metadata.outputs.version }}
-      asset_version: ${{ steps.metadata.outputs.asset_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -98,7 +106,6 @@ jobs:
           PY
           {
             echo "version=$version"
-            echo "asset_version=$version"
           } >>"$GITHUB_OUTPUT"
       - name: Check architecture and release helper contracts
         run: |
@@ -150,13 +157,10 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
-      - name: Test workspace and startup contracts
-        run: |
-          cargo test --locked --workspace
-          cargo test --locked -p nebula --bin pebrel --features gpui-shell
-          python3 -m unittest scripts.tests.test_shell_integration
-          cargo test --locked -p nebula --features gpui-test-support dialog
+          shared-key: release-v2
+          cache-workspace-crates: true
+          cache-bin: false
+          env-vars: MACOSX_DEPLOYMENT_TARGET
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
       - name: Download pinned linuxdeploy
@@ -228,6 +232,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: stable-package-linux-x64
+          compression-level: 0
           path: |
             dist/*.AppImage
             dist/*.deb
@@ -271,20 +276,15 @@ jobs:
           python-version: "3.13"
       - name: Verify native runner architecture
         run: test "$(uname -m)" = "${{ matrix.native_architecture }}"
-      - name: Test native DMG capacity and mounted contents
-        run: python3 -m unittest scripts.tests.test_macos_dmg -v
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
-      - name: Test workspace and native startup contracts
-        run: |
-          cargo test --locked --workspace
-          cargo test --locked -p nebula --bin pebrel --features gpui-shell
-          python3 -m unittest scripts.tests.test_shell_integration scripts.conformance.tests.test_posix_lifecycle
-          cargo test --locked -p nebula --features gpui-test-support dialog
+          shared-key: release-v2
+          cache-workspace-crates: true
+          cache-bin: false
+          env-vars: MACOSX_DEPLOYMENT_TARGET
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
       - name: Import Developer ID signing credentials
@@ -370,6 +370,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: stable-package-macos-${{ matrix.asset_architecture }}
+          compression-level: 0
           path: dist/*.dmg
           if-no-files-found: error
           retention-days: 14
@@ -418,7 +419,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Cannot verify prior native tests.' }
           $windows = @($jobs.jobs | Where-Object name -eq 'Windows x64 stable package')
           $tests = @($windows.steps | Where-Object { $_.name -eq 'Test workspace and native harness' -and $_.conclusion -eq 'success' })
-          if ($windows.Count -ne 1 -or $tests.Count -ne 1) { throw 'Prior Windows native tests did not pass.' }
+          $nativeCore = @($jobs.jobs | Where-Object { $_.name -eq 'Native tests / windows-x64 / core' -and $_.conclusion -eq 'success' })
+          $nativeProduct = @($jobs.jobs | Where-Object { $_.name -eq 'Native tests / windows-x64 / product' -and $_.conclusion -eq 'success' })
+          $legacyPassed = $windows.Count -eq 1 -and $tests.Count -eq 1
+          $parallelPassed = $run.path -eq '.github/workflows/release.yml' -and $nativeCore.Count -eq 1 -and $nativeProduct.Count -eq 1
+          if (-not ($legacyPassed -or $parallelPassed)) { throw 'Prior Windows native tests did not pass.' }
       - uses: actions/checkout@v4
         if: ${{ inputs.source_commit != '' }}
         with:
@@ -431,19 +436,15 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
-          cache-on-failure: true
+          shared-key: release-v2
+          cache-workspace-crates: true
+          cache-bin: false
+          env-vars: MACOSX_DEPLOYMENT_TARGET
       - name: Prepare pinned Windows console runtime
         shell: pwsh
         run: |
           & "$env:RUNNER_TEMP/prepare-windows-runtime.ps1" -Destination assets/windows/conhost
           & "$env:RUNNER_TEMP/runtime-tests/windows-runtime.tests.ps1" -ArchivePath (Join-Path ([IO.Path]::GetTempPath()) 'pebrel-conpty-source-v1.5.0.zip')
-      - name: Test workspace and native harness
-        if: ${{ inputs.source_commit == '' }}
-        run: |
-          python -m unittest scripts.conformance.tests.test_lifecycle scripts.conformance.tests.test_scrollback
-          cargo test --locked --workspace
-          cargo test --locked -p nebula --bin pebrel --features gpui-shell
-          cargo test --locked -p nebula --features gpui-test-support dialog
       - name: Build GPUI release binary
         shell: pwsh
         run: |
@@ -495,6 +496,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: stable-package-windows-x64
+          compression-level: 0
           path: |
             dist/Pebrel-v${{ needs.prepare.outputs.version }}-windows-x64.zip
             dist/Pebrel-v${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
@@ -513,7 +515,7 @@ jobs:
   aggregate:
     name: Verify stable assets and upload complete set
     if: ${{ !inputs.windows_only }}
-    needs: [prepare, linux, macos, windows]
+    needs: [prepare, linux, macos, windows, tests]
     runs-on: ubuntu-22.04
     env:
       PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
@@ -549,10 +551,20 @@ jobs:
             --changelog CHANGELOG.md \
             --write-checksums release-dist/SHA256SUMS \
             --write-notes release-dist/RELEASE_NOTES.md
+      - name: Report complete CI duration and package sizes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >"$RUNNER_TEMP/ci-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" >"$RUNNER_TEMP/ci-jobs.json"
+          python3 -m scripts.ci_timings --artifacts release-dist \
+            --run-json "$RUNNER_TEMP/ci-run.json" --jobs-json "$RUNNER_TEMP/ci-jobs.json"
+
       - name: Upload complete stable release set
         uses: actions/upload-artifact@v4
         with:
           name: Pebrel-v${{ needs.prepare.outputs.version }}
+          compression-level: 0
           path: release-dist
           if-no-files-found: error
           retention-days: 30

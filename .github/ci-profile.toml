@@ -1,0 +1,21 @@
+# Test compilation only. Pass this file explicitly; packaging keeps profile.release.
+# Inherited, named package overrides take precedence over "*", so reset those too.
+[profile.ci]
+inherits = "dev"
+opt-level = 0
+debug = 0
+split-debuginfo = "off"
+incremental = false
+codegen-units = 256
+lto = false
+
+[profile.ci.package]
+"*" = { opt-level = 0 }
+resvg = { opt-level = 0 }
+rustybuzz = { opt-level = 0 }
+taffy = { opt-level = 0 }
+ttf-parser = { opt-level = 0 }
+smol = { opt-level = 0 }
+gpui = { opt-level = 0 }
+gpui_macros = { opt-level = 0 }
+nebula_terminal = { opt-level = 0 }

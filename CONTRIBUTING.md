@@ -104,6 +104,56 @@ does not test real window layout, every OS integration, or the full application.
 Existing platform build/package checks still apply. Never turn a metadata-only
 compile check into a claim that UI tests or a packaged application were run.
 
+## CI feedback and package builds
+
+The Preview workflow starts package builds and native tests concurrently on Linux,
+Windows, Apple Silicon and Intel macOS. Tests run in separate core/product jobs;
+package aggregation requires every native test job and every packaged conformance
+check to pass. Stable releases always request the complete workspace test suite.
+
+For pushes and PRs, `python -m scripts.ci plan --base <base-commit>` selects complete
+test suites for changed crates and all transitive consumers, including build, dev,
+optional and platform dependencies. PRs compare against the merge base; pushes
+compare the entire pushed range. Renames cover both old and new owners. Changes to
+manifests, lockfiles, shared infrastructure or unclassified inputs select every
+crate. Unavailable history also selects the full suite. The architecture job still
+runs for every PR. Weekly Preview and manual full runs cover the whole workspace;
+the separate weekly/manual Linux job also exercises the explicit legacy shell.
+
+Tests use `.github/ci-profile.toml`: no debug information, no LTO, and unoptimized
+dependencies, including the named overrides inherited from the development profile.
+The product's normal GPUI configuration is checked before the complete test suite
+with GPUI test support. This compiles the two feature configurations while avoiding
+the previous repeated workspace/product/dialog test builds. The profiles used for
+normal interactive development and release optimization remain separate.
+
+Rust dependency caches are separated by operating system, architecture and
+core/product/release role. Preview and stable packages share the release cache.
+The CI profile and macOS deployment target participate in their cache keys.
+Already compressed package artifacts are uploaded without another compression pass.
+Release builds retain O3 for the product and thin LTO; the large product crate uses
+16 codegen units to parallelize LLVM compilation. Native package validation still
+checks the real product binary, signing, manifests and conformance evidence.
+
+The target is less than ten minutes for all platforms, including packages, once
+caches are populated. The Actions summaries report actual time, cache cost and
+package bytes; cold compilation, runner queues and Apple notarization can exceed
+that objective. A timeout or omitted test is never reported as meeting it. Compare
+completed runs before claiming the target has been achieved.
+
+Package size changes retain the bundled fonts and licenses. macOS DMGs use LZMA
+(`ULMO`, supported by the minimum macOS 14 target); Windows uses a 128 MiB LZMA
+dictionary so the embedded and installable copies of the font can share compressed
+data. Windows packaging builds the product and hook without linking the unshipped
+component lab. Package helper tests and native mounts/install layouts remain part
+of verification.
+
+The Windows compression comparison on 2026-09-08 used the same published 1.6.0
+payload and Inno Setup 6.7.1 for both runs: the default dictionary produced
+30,275,390 bytes in 39.4 seconds; 128 MiB produced 22,953,293 bytes in 49.8 seconds
+(24.18% smaller). This isolates compression cost; it does not predict the size of
+a newly compiled version or timings on GitHub runners.
+
 ## Review and enforcement
 
 `architecture-contracts` is the stable PR job name. Maintainers must enable it as

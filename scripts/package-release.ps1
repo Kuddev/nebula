@@ -148,19 +148,18 @@ if (-not $SkipBuild) {
     $previousTargetDirectory = $env:CARGO_TARGET_DIR
     try {
         $env:CARGO_TARGET_DIR = $cargoTargetRoot
-        # Never build nebula without gpui-shell first: a workspace default
-        # binary overwrites the product exe with the legacy winit shell.
-        # Exclude nebula from the workspace build, then link GPUI last.
+        # Build exactly the executables in the package. The component acceptance
+        # lab is not shipped and would trigger another large GPUI link.
         if ($Configuration -eq 'release') {
-            & cargo build --workspace --release --exclude nebula --locked
+            & cargo build -p nebula_hook --bin pebrel-hook --release --locked
             if ($LASTEXITCODE -ne 0) {
-                throw "Cargo workspace build failed with exit code $LASTEXITCODE"
+                throw "Cargo hook build failed with exit code $LASTEXITCODE"
             }
             & cargo build -p nebula --bin pebrel --release --features gpui-shell --locked
         } else {
-            & cargo build --workspace --exclude nebula --locked
+            & cargo build -p nebula_hook --bin pebrel-hook --locked
             if ($LASTEXITCODE -ne 0) {
-                throw "Cargo workspace build failed with exit code $LASTEXITCODE"
+                throw "Cargo hook build failed with exit code $LASTEXITCODE"
             }
             & cargo build -p nebula --bin pebrel --features gpui-shell --locked
         }

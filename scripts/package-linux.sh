@@ -301,7 +301,7 @@ tar \
   --numeric-owner \
   --transform="s|^Pebrel.AppDir|$archive_root|" \
   -C "$work" \
-  -cf - Pebrel.AppDir | gzip -n >"$tar_path"
+  -cf - Pebrel.AppDir | gzip -9n >"$tar_path"
 
 mkdir -p "$deb_root"
 cp -a "$common_root/." "$deb_root/"

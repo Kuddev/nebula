@@ -44,8 +44,8 @@ try {
     if ($scriptBody -notmatch '--bin pebrel') {
         throw 'Release packaging must build the Pebrel product executable.'
     }
-    if ($scriptBody -notmatch '--exclude nebula') {
-        throw 'Release packaging must exclude nebula from the workspace build so the default-feature binary cannot overwrite the GPUI shell.'
+    if ($scriptBody -match 'cargo build --workspace' -or $scriptBody -notmatch '--bin pebrel-hook') {
+        throw 'Release packaging must build only the GPUI product and its hook, without another workspace/lab binary.'
     }
 
     if ($scriptBody -notmatch 'Assert-FreshBinaries') {

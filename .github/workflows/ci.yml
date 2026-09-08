@@ -1,0 +1,141 @@
+name: Cross-platform CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Run every crate on all four native platforms
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      full:
+        type: boolean
+        default: true
+      windows_only:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: native-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref_type == 'branch') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHONUTF8: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test selection and workflow contracts
+        run: python -m unittest scripts.tests.test_ci -v
+      - name: Select changed crates and their consumers
+        id: select
+        env:
+          CI_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          CI_FULL: ${{ inputs.full || false }}
+          CI_WINDOWS_ONLY: ${{ inputs.windows_only || false }}
+        run: python -m scripts.ci plan
+
+  native:
+    name: ${{ matrix.platform }} / ${{ matrix.suite }}
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    # Allow cache population to finish on a cold runner. Report the actual
+    # ten-minute objective in ci-complete instead of declaring a timeout a pass.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      CARGO_TARGET_DIR: target/ci-${{ matrix.suite }}
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      CI_PACKAGES: ${{ toJSON(matrix.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install native Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zsh
+          if [[ "$CI_SUITE" == product ]]; then
+            sudo apt-get install -y --no-install-recommends \
+              build-essential cmake pkg-config libasound2-dev libdbus-1-dev libudev-dev \
+              libfontconfig1-dev libfreetype6-dev libegl1-mesa-dev libgl1-mesa-dev \
+              libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+              libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+              libxcb-xinput-dev libxcb-xkb-dev libxi-dev
+          fi
+        env:
+          CI_SUITE: ${{ matrix.suite }}
+      - name: Test native shell and process contracts
+        if: matrix.suite == 'core'
+        run: >-
+          python -m unittest
+          scripts.tests.test_shell_integration
+          scripts.tests.test_macos_dmg
+          scripts.conformance.tests.test_lifecycle
+          scripts.conformance.tests.test_posix_lifecycle
+          scripts.conformance.tests.test_resize
+          scripts.conformance.tests.test_scrollback
+      - uses: dtolnay/rust-toolchain@stable
+        if: toJSON(matrix.packages) != '[]'
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@v2
+        if: toJSON(matrix.packages) != '[]'
+        with:
+          shared-key: ci-v1-${{ matrix.suite }}-${{ hashFiles('.github/ci-profile.toml') }}
+          workspaces: . -> target/ci-${{ matrix.suite }}
+          cache-workspace-crates: true
+          cache-bin: false
+          env-vars: MACOSX_DEPLOYMENT_TARGET
+      - name: Compile the product and run complete affected crate suites
+        run: python -m scripts.ci test
+
+  ci-complete:
+    name: ci-complete
+    if: always()
+    needs: [plan, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Report all-platform duration and cache performance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" >"$RUNNER_TEMP/ci-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" >"$RUNNER_TEMP/ci-jobs.json"
+          python3 -m scripts.ci_timings --label 'Native tests' \
+            --run-json "$RUNNER_TEMP/ci-run.json" --jobs-json "$RUNNER_TEMP/ci-jobs.json"
+      - name: Require successful selection and every native job
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: test "$PLAN_RESULT" = success && test "$NATIVE_RESULT" = success
