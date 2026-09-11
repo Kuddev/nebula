@@ -16,6 +16,8 @@ pub mod dirs;
 pub(crate) mod environment;
 pub(crate) mod file_drag;
 pub mod file_manager;
+#[cfg(feature = "gpui-shell")]
+pub(crate) mod file_picker;
 pub(crate) mod file_preview;
 #[cfg(feature = "gpui-shell")]
 pub mod fonts;

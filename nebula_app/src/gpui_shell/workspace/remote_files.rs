@@ -909,44 +909,6 @@ fn format_transfer_bytes(bytes: u64) -> String {
     unreachable!()
 }
 
-#[cfg(windows)]
-fn remote_dialog_owner(window: &Window) -> usize {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    HasWindowHandle::window_handle(window)
-        .ok()
-        .and_then(|handle| match handle.as_raw() {
-            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as usize),
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
-#[cfg(windows)]
-fn pick_remote_upload_files(window: &Window) -> futures::channel::oneshot::Receiver<Vec<PathBuf>> {
-    let owner = remote_dialog_owner(window);
-    let (tx, rx) = futures::channel::oneshot::channel();
-    std::thread::spawn(move || {
-        let paths = crate::display::file_dialog::pick_upload_files_with_hwnd(owner as _);
-        let _ = tx.send(paths);
-    });
-    rx
-}
-
-#[cfg(windows)]
-fn pick_remote_directory(
-    window: &Window,
-    title: &'static str,
-) -> futures::channel::oneshot::Receiver<Option<PathBuf>> {
-    let owner = remote_dialog_owner(window);
-    let (tx, rx) = futures::channel::oneshot::channel();
-    std::thread::spawn(move || {
-        let path = crate::display::file_dialog::pick_folder_with_hwnd(owner as _, title);
-        let _ = tx.send(path);
-    });
-    rx
-}
-
 /// 把一次网络 runtime 上的调用桥到 GPUI 的执行器。
 ///
 /// 返回 `None` 表示网络 runtime 起不来或任务被丢弃——调用方据此报"连接不

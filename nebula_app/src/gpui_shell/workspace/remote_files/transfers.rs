@@ -428,24 +428,14 @@ impl NebulaWorkspace {
         cx: &mut Context<'_, Self>,
     ) {
         let Some(target) = self.current_remote_transfer_target() else { return };
-        #[cfg(windows)]
-        let picked = pick_remote_upload_files(window);
-        #[cfg(not(windows))]
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some(workspace_ui_language().text(Message::TransferChooseFiles).into()),
-        });
+        let picked = crate::platform::file_picker::files(
+            window,
+            cx,
+            workspace_ui_language().text(Message::TransferChooseFiles),
+        );
 
         cx.spawn_in(window, async move |this, cx| {
-            #[cfg(windows)]
-            let Ok(paths) = picked.await else { return };
-            #[cfg(not(windows))]
-            let paths = {
-                let Ok(Ok(Some(paths))) = picked.await else { return };
-                paths
-            };
+            let paths = picked.await;
             if paths.is_empty() {
                 return;
             }
@@ -467,30 +457,14 @@ impl NebulaWorkspace {
         cx: &mut Context<'_, Self>,
     ) {
         let Some(target) = self.current_remote_transfer_target() else { return };
-        #[cfg(windows)]
-        let picked = pick_remote_directory(
+        let picked = crate::platform::file_picker::directory(
             window,
+            cx,
             workspace_ui_language().text(Message::TransferChooseUploadDirectory),
         );
-        #[cfg(not(windows))]
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some(
-                workspace_ui_language().text(Message::TransferChooseUploadDirectory).into(),
-            ),
-        });
 
         cx.spawn_in(window, async move |this, cx| {
-            #[cfg(windows)]
-            let Ok(Some(path)) = picked.await else { return };
-            #[cfg(not(windows))]
-            let path = {
-                let Ok(Ok(Some(paths))) = picked.await else { return };
-                let Some(path) = paths.into_iter().next() else { return };
-                path
-            };
+            let Some(path) = picked.await else { return };
             let _ = this.update_in(cx, |workspace, window, cx| {
                 workspace.request_remote_transfer_at(
                     PendingRemoteTransfer::Upload(vec![path]),
@@ -510,30 +484,14 @@ impl NebulaWorkspace {
     ) {
         let Some(target) = self.current_remote_transfer_target() else { return };
         let Some(entry) = self.selected_remote_entry() else { return };
-        #[cfg(windows)]
-        let picked = pick_remote_directory(
+        let picked = crate::platform::file_picker::directory(
             window,
+            cx,
             workspace_ui_language().text(Message::TransferChooseDownloadDirectory),
         );
-        #[cfg(not(windows))]
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some(
-                workspace_ui_language().text(Message::TransferChooseDownloadDirectory).into(),
-            ),
-        });
 
         cx.spawn_in(window, async move |this, cx| {
-            #[cfg(windows)]
-            let Ok(Some(local_directory)) = picked.await else { return };
-            #[cfg(not(windows))]
-            let local_directory = {
-                let Ok(Ok(Some(paths))) = picked.await else { return };
-                let Some(path) = paths.into_iter().next() else { return };
-                path
-            };
+            let Some(local_directory) = picked.await else { return };
             let _ = this.update_in(cx, |workspace, window, cx| {
                 workspace.request_remote_transfer_at(
                     PendingRemoteTransfer::Download { entry, local_directory },
