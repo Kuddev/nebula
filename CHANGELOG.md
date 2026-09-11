@@ -47,7 +47,7 @@ Windows packages include an installer and portable ZIP. Linux x64 packages and m
 
 - 修复 macOS 未配置 Shell 时，“默认 Shell”设置和新建终端菜单推荐 PowerShell 的问题。两处现在与终端后端共用宿主默认 Shell 解析。由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#110](https://github.com/Kuddev/pebrel/pull/110) 中贡献。
 - 修复不同 Shell 图标使设置菜单行高不一致的问题；没有品牌图片的 Shell 在新建终端菜单中也会显示图标。由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#111](https://github.com/Kuddev/pebrel/pull/111) 中贡献。
-- 缩短长通知和多行通知的预览，同时在日志中保留通知原文。部分修复由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#112](https://github.com/Kuddev/pebrel/pull/112) 中贡献。
+- 缩短长通知和多行通知的预览，同时在日志中保留通知原文。普通驻留通知可点击卡片关闭。部分修复由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#112](https://github.com/Kuddev/pebrel/pull/112) 中贡献。
 - 改进浅色终端背景上的文字对比度，同时保留原本可读的配色。对应 [#104](https://github.com/Kuddev/nebula/issues/104)。
 - 修复 macOS 从 Finder 启动、缺少语言环境变量时，“跟随系统”回退到英文的问题。
 - 修正 Antigravity 状态识别：普通回答不再误报为等待确认，实际的问题选择框和文件审核框能识别为等待输入。对应 [#100](https://github.com/Kuddev/nebula/issues/100)。由 [@821869798](https://github.com/821869798) 在 [#101](https://github.com/Kuddev/pebrel/pull/101) 中贡献。
