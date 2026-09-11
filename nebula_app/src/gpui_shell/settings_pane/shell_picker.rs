@@ -75,12 +75,15 @@ pub(super) fn shell_select_items(
         .map(|shell| ShellSelectItem::new(shell.id, shell.name, scale_factor))
         .collect();
     if items.is_empty() {
-        // 非 Windows 构建不做安装探测，但历史配置仍支持这两个由 PTY
-        // 集成层负责启动的稳定 id，设置页不能因此变成空下拉。
-        items = vec![
-            ShellSelectItem::new("powershell".into(), "PowerShell".into(), scale_factor),
-            ShellSelectItem::new("bash".into(), "Git Bash".into(), scale_factor),
-        ];
+        // 探测不到任何已安装 shell 时也要给出一行——用宿主默认 id，而不是
+        // 写死的 PowerShell/Git Bash：没有安装探测结果的 Unix 机器（例如
+        // `$SHELL` 与 `/etc/shells` 都读不到）默认是登录 shell，不是 PS。
+        let id = crate::platform::shell::default_shell_id();
+        items = vec![ShellSelectItem::new(
+            id.clone(),
+            crate::shell_detect::display_name_for_id(&id),
+            scale_factor,
+        )];
     }
     // 导入的终端目录：`merge_terminal_profiles` 已把它们并进配置的 profile
     // 列表，这里让设置页也能直接选为默认 Shell——否则导入完看不见结果。

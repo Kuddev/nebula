@@ -3194,10 +3194,10 @@ impl NebulaWorkspace {
     /// 三点 / Ctrl+K：旧壳 `NewTabMenu` → `open_shell_menu` → `PaletteMode::Profiles`。
     fn open_shell_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_manager_open = false;
-        let default_shell_id = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
-            .and_then(|settings| settings.shell_id.clone())
-            .unwrap_or_else(|| "powershell".to_owned());
+        let default_shell_id = crate::platform::shell::effective_shell_id(
+            cx.try_global::<crate::gpui_shell::config::Settings>()
+                .and_then(|settings| settings.shell_id.as_deref()),
+        );
         let language = workspace_ui_language();
         let rows = shell_palette_rows(
             crate::shell_detect::detect_shells(),
