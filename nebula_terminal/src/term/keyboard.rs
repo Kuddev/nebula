@@ -1,7 +1,9 @@
-//! Conversion between terminal flags and the keyboard protocol reported to applications.
+//! Keyboard protocol flag conversion and application to the active terminal mode.
 
-use super::TermMode;
-use crate::vte::ansi::KeyboardModes;
+use log::trace;
+
+use super::{Term, TermMode};
+use crate::vte::ansi::{KeyboardModes, KeyboardModesApplyBehavior};
 
 const KEYBOARD_FLAGS: [(KeyboardModes, TermMode); 5] = [
     (KeyboardModes::DISAMBIGUATE_ESC_CODES, TermMode::DISAMBIGUATE_ESC_CODES),
@@ -28,5 +30,20 @@ impl From<TermMode> for KeyboardModes {
             mode.set(keyboard_flag, value.contains(terminal_flag));
         }
         mode
+    }
+}
+
+impl<T> Term<T> {
+    #[inline]
+    pub(super) fn set_keyboard_mode(&mut self, mode: TermMode, apply: KeyboardModesApplyBehavior) {
+        let active_mode = self.mode & TermMode::KITTY_KEYBOARD_PROTOCOL;
+        self.mode &= !TermMode::KITTY_KEYBOARD_PROTOCOL;
+        let new_mode = match apply {
+            KeyboardModesApplyBehavior::Replace => mode,
+            KeyboardModesApplyBehavior::Union => active_mode.union(mode),
+            KeyboardModesApplyBehavior::Difference => active_mode.difference(mode),
+        };
+        trace!("Setting keyboard mode to {new_mode:?}");
+        self.mode |= new_mode;
     }
 }

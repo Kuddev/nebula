@@ -164,7 +164,7 @@ use crate::polling::{IoListener, ipc};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // No worker threads exist yet; import the new override names for legacy readers.
-    unsafe { brand::import_environment_aliases() };
+    unsafe { platform::environment::import_environment_aliases() };
     // OpenSSH AskPass reuses the GUI executable as a credential helper. It
     // must exit before CLI parsing or window initialization because ssh passes
     // the human-readable prompt as an argument, not as a Nebula subcommand.
@@ -186,8 +186,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Load command line options.
     let options = Options::new();
     if let Err(error) = nebula_settings::migrate_legacy_data() {
-        #[cfg(windows)]
-        panic::report_startup_error(&error, options.subcommands.is_none());
+        platform::startup::report_error(&error, options.subcommands.is_none());
         return Err(error.into());
     }
     #[cfg(windows)]

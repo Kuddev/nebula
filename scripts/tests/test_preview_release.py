@@ -199,10 +199,18 @@ class PreviewReleaseTests(unittest.TestCase):
                 (root / f"macos-{architecture}-launch.json").write_text(json.dumps({
                     "status": "passed", "commit": "a" * 40, "architecture": architecture,
                     "launch_method": "launchservices", "utf8_locale": True, "home_cwd": True,
+                    "screenshot": "captured", "rendered_text": True,
                 }), encoding="utf-8")
             validate_evidence(root, "a" * 40)
             with self.assertRaisesRegex(ManifestError, "source commit"):
                 validate_evidence(root, "b" * 40)
+            launch_path = root / "macos-aarch64-launch.json"
+            launch = json.loads(launch_path.read_text(encoding="utf-8"))
+            for field, value in (("rendered_text", False), ("screenshot", "unavailable")):
+                with self.subTest(field=field):
+                    launch_path.write_text(json.dumps({**launch, field: value}), encoding="utf-8")
+                    with self.assertRaisesRegex(ManifestError, "LaunchServices"):
+                        validate_evidence(root, "a" * 40)
             (root / "macos-aarch64-launch.json").write_text('{}', encoding="utf-8")
             with self.assertRaisesRegex(ManifestError, "LaunchServices"):
                 validate_evidence(root, "a" * 40)

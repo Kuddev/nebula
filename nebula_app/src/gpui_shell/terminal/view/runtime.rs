@@ -51,6 +51,49 @@ impl TerminalView {
         )
     }
 
+    pub(super) fn on_command_start(&mut self, cx: &mut Context<Self>) {
+        self.answers.begin_command();
+        // 程序身份来自 Enter 时捕获的完整命令行；直接启动和
+        // npx/node/uvx 等包装启动都会归一成 Agent slug。它是 WSL
+        // 看不见来宾进程时的主通道，hook 信封仍是更准的覆盖层。
+        let identity = crate::ai_agents::AgentKind::parse_command(&self.suggest.last_committed)
+            .map(|agent| agent.slug().to_owned())
+            .or_else(|| crate::display::extract_program(&self.suggest.last_committed));
+        // A probe belongs to one foreground command. Invalidate it
+        // before replacing the command identity so a slow WSL result
+        // from Codex A cannot become the identity of Codex B.
+        self.invalidate_ai_session_probe();
+        if identity != self.running_program {
+            self.running_program = identity;
+            self.ai_session = None;
+            cx.emit(TerminalViewEvent::TitleChanged);
+        }
+        if self.running_program.as_deref().and_then(crate::ai_agents::AgentKind::parse).is_some()
+            && !self.agent_hook_seen
+        {
+            self.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
+            self.agent_status_rule = None;
+        }
+        self.mark_command_running();
+        self.probe_missing_codex_session(cx);
+        // 首个词就是一个交互式 shell（`cmd`、`wsl`、裸 `bash`）：133;C
+        // 是真的，但这条「命令」其实是一个新提示符，133;D 永远不会来
+        // ——那个 shell 接管了终端，而我们的集成不在它里面。立刻按「已被
+        // 进程树反证」处理，转圈不必等 3 秒节流窗口。
+        //
+        // 这不是把状态钉死：后续对账双向纠正，真在那个 shell 里跑起活儿
+        // 会多出一个子进程，进程树看得见，状态会被拉回运行中。
+        if crate::process_tree::is_interactive_shell_command(&self.suggest.last_committed) {
+            self.command_running_disproved = true;
+        }
+        if let Some(run) = &mut self.active_run
+            && run.phase == crate::runtime_api::RuntimeRunPhase::Submitted
+        {
+            run.phase = crate::runtime_api::RuntimeRunPhase::Started;
+        }
+        cx.notify();
+    }
+
     pub(super) fn invalidate_ai_session_probe(&mut self) {
         self.ai_session_probe_epoch = self.ai_session_probe_epoch.wrapping_add(1);
         self.ai_session_probe_pending = false;
@@ -91,6 +134,7 @@ impl TerminalView {
             self.running_program.take().is_some() || self.ai_session.take().is_some();
         self.invalidate_ai_session_probe();
         self.primary_agent_pid = None;
+        self.ai_session_from_probe = false;
         self.agent_status = crate::ai_agents::AgentStatus::Unknown;
         self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
         self.agent_status_rule = None;
@@ -657,14 +701,24 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Fill a missing Codex identity from the active rollout file. Hook events
-    /// remain authoritative; this only repairs panes whose Codex process was
-    /// already running before the hook was installed or before Nebula saw its
-    /// first event. The blocking probe is isolated on GPUI's background
-    /// executor and its result is accepted only for the same foreground epoch.
+    pub(crate) fn prepare_ai_session_save(&mut self, cx: &mut Context<Self>) {
+        if self.ai_session_from_probe {
+            self.ai_session = None;
+        }
+        self.last_ai_session_probe = None;
+        self.probe_missing_codex_session(cx);
+    }
+
+    pub(crate) fn ai_session_save_pending(&self) -> bool {
+        self.ai_session_probe_pending
+    }
+
+    /// Read the active conversation metadata when its hook has not reported an ID.
+    /// File and process operations run on the background executor. Only results
+    /// for the same foreground command are applied; hook identities take priority.
     pub(super) fn probe_missing_codex_session(&mut self, cx: &mut Context<Self>) {
         if self.exited.is_some()
-            || self.ai_session.is_some()
+            || (self.agent_hook_seen && !self.ai_session_from_probe && self.ai_session.is_some())
             || self.ai_session_probe_pending
             || !self
                 .running_program
@@ -674,10 +728,10 @@ impl TerminalView {
         {
             return;
         }
-        if self
-            .last_ai_session_probe
-            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
-        {
+        if self.last_ai_session_probe.is_some_and(|at| {
+            at.elapsed()
+                < std::time::Duration::from_secs(if self.ai_session.is_some() { 10 } else { 2 })
+        }) {
             return;
         }
         let Some(exec_context) = self.exec_context.clone() else { return };
@@ -691,21 +745,26 @@ impl TerminalView {
         cx.spawn(async move |this, cx| {
             let session_id = work.await;
             let _ = this.update(cx, |view, cx| {
+                if view.ai_session_probe_epoch == epoch {
+                    view.ai_session_probe_pending = false;
+                }
                 if !probe_result_is_current(
                     view.ai_session_probe_epoch,
                     epoch,
-                    view.ai_session.is_some(),
+                    view.agent_hook_seen
+                        && !view.ai_session_from_probe
+                        && view.ai_session.is_some(),
                     view.running_program.as_deref(),
                 ) {
                     return;
                 }
-                view.ai_session_probe_pending = false;
                 if let Some(session_id) = session_id {
                     log::debug!("agent session identity from active rollout: pane={pane_id}");
                     view.ai_session = Some(crate::display::AiSessionIdentity {
                         source: "codex".to_owned(),
                         session_id,
                     });
+                    view.ai_session_from_probe = true;
                     cx.emit(TerminalViewEvent::TitleChanged);
                     cx.notify();
                 }
@@ -852,6 +911,7 @@ impl TerminalView {
                     self.agent_runtime_submit_pending = false;
                 }
                 if from_primary_agent && let Some(id) = event.session_id.as_deref() {
+                    self.ai_session_from_probe = false;
                     self.ai_session = Some(crate::display::AiSessionIdentity {
                         source: event.source.clone(),
                         session_id: id.to_owned(),

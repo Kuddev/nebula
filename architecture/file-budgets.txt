@@ -19,4 +19,4 @@ nebula_app/src/event.rs 3594
 nebula_app/src/gpui_shell/terminal/view.rs 2416
 nebula_app/src/gpui_shell/workspace.rs 4798
 nebula_app/src/window_context.rs 3735
-nebula_terminal/src/term/mod.rs 2716
+nebula_terminal/src/term/mod.rs 2713

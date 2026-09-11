@@ -3,6 +3,9 @@
 //! 只编码控制键与带修饰组合；普通可打印字符（含中文 IME 提交文本）走
 //! `EntityInputHandler::replace_text_in_range`，避免同一按键被编码两次。
 
+#[cfg(windows)]
+mod win32;
+
 use gpui::Keystroke;
 use nebula_terminal::term::TermMode;
 
@@ -88,161 +91,6 @@ fn ctrl_char(c: char) -> Option<u8> {
 /// （口径逐字同旧壳 `input::terminal_input::use_win32_input_mode`）。
 fn use_win32_input_mode(mode: &TermMode) -> bool {
     crate::input::terminal_input::use_win32_input_mode(*mode)
-}
-
-/// 无修饰的字母/数字/空格必须交给 IME / `TranslateMessage`，不能编进 PTY。
-///
-/// GPUI 的 Windows 后端：`on_key_down` 一旦 `stop_propagation`，就不会再
-/// `TranslateMessage`。IME 组字（微软拼音）是 TranslateMessage 喂进去的；
-/// 把 `n`/`i` 编成 KEY_EVENT_RECORD 等于把拼音当英文写进 shell，中文永远
-/// 起不来。旧壳对应合同是 `keyboard.rs`：`ime.preedit()` 期间直接 return。
-#[cfg(windows)]
-fn win32_encodes_keystroke(ks: &Keystroke) -> bool {
-    if ks.modifiers.control || ks.modifiers.alt || ks.modifiers.platform {
-        return true;
-    }
-    let key = ks.key.as_str();
-    if key == "space" {
-        return false;
-    }
-    let mut chars = key.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) if c.is_ascii_alphanumeric() => false,
-        _ => true,
-    }
-}
-
-/// GPUI 键名 → Win32 虚拟键码。
-///
-/// 旧壳从 winit fork 的 `RawKeyEventInfo` 直接拿到系统报的 VK；GPUI 的
-/// `Keystroke` 只有键名，所以这里按名字反查。表只覆盖**编码器会处理的键**
-/// （控制键、方向、功能键）——可打印字符在 GPUI 走 IME 管道，不经这里。
-#[cfg(windows)]
-fn virtual_key_of(key: &str) -> Option<u16> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LEFT,
-        VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
-    };
-
-    let vk = match key {
-        "escape" => VK_ESCAPE,
-        "enter" => VK_RETURN,
-        "tab" => VK_TAB,
-        "backspace" => VK_BACK,
-        "space" => VK_SPACE,
-        "up" => VK_UP,
-        "down" => VK_DOWN,
-        "left" => VK_LEFT,
-        "right" => VK_RIGHT,
-        "home" => VK_HOME,
-        "end" => VK_END,
-        "insert" => VK_INSERT,
-        "delete" => VK_DELETE,
-        "pageup" => VK_PRIOR,
-        "pagedown" => VK_NEXT,
-        // F1..F24 在 VK 表里连号。
-        key if key.starts_with('f') => {
-            let index: u16 = key[1..].parse().ok()?;
-            if !(1..=24).contains(&index) {
-                return None;
-            }
-            VK_F1 + index - 1
-        },
-        // 单个字符（Ctrl+C 一族）：ASCII 字母数字的 VK 就是它的大写码点。
-        key => {
-            let mut chars = key.chars();
-            let (Some(c), None) = (chars.next(), chars.next()) else { return None };
-            if !c.is_ascii_alphanumeric() {
-                return None;
-            }
-            c.to_ascii_uppercase() as u16
-        },
-    };
-    Some(vk)
-}
-
-/// 控制键必须携带真实 `KEY_EVENT_RECORD` 的字符值（Esc=0x1B、Enter=0x0D、
-/// Tab=0x09、Backspace=0x08）：OpenConsole 1.22 的 VT 翻译层会丢弃 uChar=0
-/// 的 VK_ESCAPE，于是读字节流的那类应用（Claude Code）收不到 Esc。修饰键与
-/// 功能键保持 0，与真实键盘一致。逐条同旧壳 `control_char_fallback`。
-#[cfg(windows)]
-fn unicode_char_of(ks: &Keystroke) -> u16 {
-    // 平台已经判出文本的（含 Ctrl 变体）以它为准，与 WM_CHAR 语义一致。
-    // `key_char` 若是 NUL，当作没文本：真实键盘的 Esc 不会写出 U+0000。
-    if let Some(text) = ks.key_char.as_deref() {
-        let mut units = text.encode_utf16();
-        if let (Some(first), None) = (units.next(), units.next()) {
-            if first != 0 {
-                return first;
-            }
-        }
-    }
-    match ks.key.as_str() {
-        "escape" => 0x1b,
-        "enter" => b'\r' as u16,
-        "tab" => b'\t' as u16,
-        // 真实控制台的 Ctrl+Backspace 记录携带 Uc=DEL（0x7f，WM_CHAR 语义），
-        // PSReadLine 的原生 Ctrl+Backspace=BackwardKillWord 绑定按此匹配。
-        // 给 0x08 会跌进 KeyChar 分发被当成 Ctrl+H——只删一个字符。
-        "backspace" => {
-            if ks.modifiers.control {
-                0x7f
-            } else {
-                0x08
-            }
-        },
-        "space" => b' ' as u16,
-        _ => 0,
-    }
-}
-
-/// 一条 ConPTY Win32 input 记录：`CSI Vk;Sc;Uc;Kd;Cs;Rc_`。
-///
-/// 认不出 VK 的键返回 `None`，调用方回落到传统 VT 编码——宁可少一条记录，
-/// 也不要编一个 Vk=0 的假记录，那会让子进程读到一个不存在的键。
-#[cfg(windows)]
-fn win32_input_record(ks: &Keystroke, key_down: bool) -> Option<Vec<u8>> {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW};
-
-    const SHIFT_PRESSED: u32 = 0x0010;
-    const LEFT_ALT_PRESSED: u32 = 0x0002;
-    const LEFT_CTRL_PRESSED: u32 = 0x0008;
-
-    let vk = virtual_key_of(ks.key.as_str())?;
-    // 扫描码问系统要，不硬编码：非 US 布局与笔记本键盘上这张表并不通用。
-    let scan_code = unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) };
-    let mut control_key_state = 0u32;
-    if ks.modifiers.shift {
-        control_key_state |= SHIFT_PRESSED;
-    }
-    if ks.modifiers.alt {
-        control_key_state |= LEFT_ALT_PRESSED;
-    }
-    if ks.modifiers.control {
-        control_key_state |= LEFT_CTRL_PRESSED;
-    }
-    let key_down = u8::from(key_down);
-    Some(
-        format!(
-            "\x1b[{};{};{};{key_down};{};1_",
-            vk,
-            scan_code,
-            unicode_char_of(ks),
-            control_key_state
-        )
-        .into_bytes(),
-    )
-}
-
-/// GPUI 的终端视图只接到 key-down。旧壳对 9001 会再写一条 Kd=0 的抬起
-/// （`keyboard.rs` 的 `key_release` + `escape_carries_its_control_character_both_directions`）。
-/// 真实键盘也是 down+up：Codex 按 VK 看按下就够了，Claude Code / Ink 吃的是
-/// OpenConsole 翻译出的字节流，缺抬起时 Esc 常常一个字节都到不了。
-#[cfg(windows)]
-fn win32_press_and_release(ks: &Keystroke) -> Option<Vec<u8>> {
-    let mut sequence = win32_input_record(ks, true)?;
-    sequence.extend(win32_input_record(ks, false)?);
-    Some(sequence)
 }
 
 /// 子进程是否请求过 kitty 键盘协议（三位标志任一）。kitty 是线上合同，
@@ -382,8 +230,8 @@ pub fn encode(ks: &Keystroke, mode: &TermMode) -> Option<Vec<u8>> {
     // OpenConsole 的翻译层反译成 KEY_EVENT_RECORD，而它会丢掉 uChar=0 的
     // VK_ESCAPE——读字节流的应用（Claude Code）因此收不到 Esc。
     #[cfg(windows)]
-    if use_win32_input_mode(mode) && win32_encodes_keystroke(ks) {
-        if let Some(record) = win32_press_and_release(ks) {
+    if use_win32_input_mode(mode) && win32::win32_encodes_keystroke(ks) {
+        if let Some(record) = win32::win32_press_and_release(ks) {
             return Some(record);
         }
     }
@@ -561,10 +409,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn unknown_keys_fall_back_instead_of_forging_a_record() {
-        assert_eq!(virtual_key_of("f99"), None);
-        assert_eq!(virtual_key_of("capslock"), None);
+        assert_eq!(win32::virtual_key_of("f99"), None);
+        assert_eq!(win32::virtual_key_of("capslock"), None);
         // 方向键在 win32 模式下仍要出记录（它们有确定的 VK）。
-        assert!(win32_input_record(&keystroke("up"), true).is_some());
+        assert!(win32::win32_input_record(&keystroke("up"), true).is_some());
     }
 
     /// 9001 记录路径与真实控制台同构：Ctrl+Backspace 的记录 Uc=DEL（0x7f），
@@ -576,7 +424,7 @@ mod tests {
         let mut ks = keystroke("backspace");
         ks.modifiers.control = true;
         assert_eq!(
-            win32_press_and_release(&ks),
+            win32::win32_press_and_release(&ks),
             Some(b"\x1b[8;14;127;1;8;1_\x1b[8;14;127;0;8;1_".to_vec())
         );
     }
@@ -696,6 +544,7 @@ mod tests {
             (false, false, false, None, 13, 0),
             (true, false, false, None, 13, 16),
             (true, false, false, Some("\r"), 13, 16),
+            (false, true, false, None, 10, 8),
             (false, true, false, Some("\n"), 10, 8),
             (false, false, true, Some("\r"), 13, 2),
             (true, true, false, Some("\n"), 10, 24),
@@ -739,6 +588,18 @@ mod tests {
             let mut key = keystroke(name);
             key.modifiers.shift = true;
             assert!(!preserves_enter_modifiers(&key, &pi_keyboard_mode()));
+        }
+    }
+
+    #[test]
+    fn ctrl_j_keeps_its_newline_identity_across_protocol_negotiation() {
+        let mut key = keystroke("j");
+        key.modifiers.control = true;
+        assert_eq!(encode(&key, &TermMode::default()), Some(b"\n".to_vec()));
+        assert!(!preserves_enter_modifiers(&key, &TermMode::default()));
+        for mode in [pi_keyboard_mode(), pi_keyboard_mode() | TermMode::WIN32_INPUT_MODE] {
+            assert_eq!(encode(&key, &mode), Some(b"\x1b[106;5u".to_vec()));
+            assert!(!preserves_enter_modifiers(&key, &mode));
         }
     }
 
@@ -865,6 +726,48 @@ mod tests {
                 self.0.borrow_mut().push(reply);
             }
         }
+    }
+
+    #[test]
+    fn antigravity_startup_queries_applied_flags_and_preserves_newline_chords() {
+        use nebula_terminal::term::Config;
+        use nebula_terminal::vte::ansi::Processor;
+
+        let size = super::super::session::GridSize { columns: 80, screen_lines: 24 };
+        let recorder = KeyboardReplyRecorder::default();
+        let mut term = nebula_terminal::Term::new(
+            Config { kitty_keyboard: true, ..Config::default() },
+            &size,
+            recorder.clone(),
+        );
+        let mut parser: Processor = Processor::new();
+        // Captured from AGY 1.1.7's outer ConPTY stream before authentication.
+        // The host's 9001 mode must not override the later Kitty negotiation.
+        parser.advance(&mut term, b"\x1b[?9001h\x1b[=0;1u\x1b[=1;1u\x1b[?u");
+        assert!(term.mode().contains(TermMode::WIN32_INPUT_MODE));
+        assert_eq!(
+            *term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL,
+            TermMode::DISAMBIGUATE_ESC_CODES
+        );
+        for (name, shift, control, expected) in [
+            ("enter", false, false, "\r"),
+            ("enter", true, false, "\x1b[13;2u"),
+            ("enter", false, true, "\x1b[13;5u"),
+            ("j", false, true, "\x1b[106;5u"),
+        ] {
+            let mut key = keystroke(name);
+            key.modifiers.shift = shift;
+            key.modifiers.control = control;
+            assert_eq!(encode(&key, term.mode()), Some(expected.as_bytes().to_vec()));
+        }
+
+        // A later reset must restore the legacy path without a stale reply.
+        parser.advance(&mut term, b"\x1b[=0;1u\x1b[?u\x1b[?9001l");
+        assert_eq!(recorder.0.borrow().as_slice(), ["\x1b[?1u", "\x1b[?0u"]);
+        assert_eq!(encode(&keystroke("enter"), term.mode()), Some(b"\r".to_vec()));
+        let mut ctrl_j = keystroke("j");
+        ctrl_j.modifiers.control = true;
+        assert_eq!(encode(&ctrl_j, term.mode()), Some(b"\n".to_vec()));
     }
 
     #[test]

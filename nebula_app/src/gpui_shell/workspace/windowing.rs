@@ -129,6 +129,7 @@ pub(crate) struct WindowRegistry {
     entries: Vec<WindowEntry>,
     runtime_hub: crate::runtime_api::RuntimeHub,
     session_persistence: SessionPersistence,
+    quit_pending: bool,
     #[cfg(windows)]
     quick_terminal: Option<QuickTerminalWindow>,
     #[cfg(windows)]
@@ -204,6 +205,7 @@ pub(crate) fn initialize(cx: &mut App, runtime_hub: crate::runtime_api::RuntimeH
         entries: Vec::new(),
         runtime_hub,
         session_persistence: SessionPersistence::default(),
+        quit_pending: false,
         #[cfg(windows)]
         quick_terminal: None,
         #[cfg(windows)]
@@ -293,10 +295,24 @@ pub(super) fn open_recipe_window(session: crate::session::Session, cx: &mut App)
 fn workspace_window_options(cx: &mut App, focus: bool, role: WindowRole) -> WindowOptions {
     match role {
         WindowRole::Regular => {
-            let bounds = Bounds::centered(None, size(px(1080.0), px(720.0)), cx);
+            let preferred = size(px(1080.0), px(720.0));
+            let bounds = cx.primary_display().map_or_else(
+                || Bounds::centered(None, preferred, cx),
+                |display| {
+                    let visible = display.visible_bounds();
+                    let fitted = preferred.min(&visible.size);
+                    Bounds::new(
+                        point(
+                            visible.origin.x + (visible.size.width - fitted.width) / 2.0,
+                            visible.origin.y + (visible.size.height - fitted.height) / 2.0,
+                        ),
+                        fitted,
+                    )
+                },
+            );
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(760.0), px(540.0))),
+                window_min_size: Some(size(px(760.0), px(540.0)).min(&bounds.size)),
                 titlebar: Some(TitleBar::title_bar_options()),
                 app_id: Some("pebrel".to_owned()),
                 window_background: crate::gpui_shell::wallpaper::initial_background_appearance(),
@@ -1260,6 +1276,27 @@ pub(super) fn save_current_window_session(
 }
 
 pub(crate) fn quit_all(cx: &mut App) {
+    if cx.global::<WindowRegistry>().quit_pending {
+        return;
+    }
+    cx.global_mut::<WindowRegistry>().quit_pending = true;
+    let entries = cx.global::<WindowRegistry>().entries.clone();
+    let panes = entries
+        .iter()
+        .filter(|entry| entry.role == WindowRole::Regular)
+        .filter_map(|entry| {
+            entry.workspace.update(cx, |workspace, cx| workspace.prepare_session_save(cx)).ok()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    cx.spawn(async move |cx| {
+        super::closing::wait_for_session_ids(&panes, cx).await;
+        cx.update(finish_quit_all);
+    })
+    .detach();
+}
+
+fn finish_quit_all(cx: &mut App) {
     save_combined_session(cx, true);
     prune_entries(cx);
     let entries = cx.global::<WindowRegistry>().entries.clone();

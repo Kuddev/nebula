@@ -57,7 +57,7 @@ if ([string]::IsNullOrWhiteSpace($TargetDirectory)) {
 }
 $cargoTargetRoot = [System.IO.Path]::GetFullPath($TargetDirectory)
 $targetRoot = Join-Path $cargoTargetRoot $Configuration
-$setupPath = Join-Path $outputRoot "$PackageBrand-$Version-windows-x64-setup.exe"
+$setupPath = Join-Path $outputRoot "$PackageBrand-v$Version-windows-x64-setup.exe"
 
 $requiredFiles = @(
     (Join-Path $targetRoot 'pebrel.exe'),
@@ -65,6 +65,7 @@ $requiredFiles = @(
     (Join-Path $targetRoot 'conpty.dll'),
     (Join-Path $targetRoot 'OpenConsole.exe'),
     (Join-Path $repo 'README.md'),
+    (Join-Path $repo 'README.zh-CN.md'),
     (Join-Path $repo 'CHANGELOG.md'),
     (Join-Path $repo 'INSTALL.md'),
     (Join-Path $repo 'docs\lua-configuration.md'),

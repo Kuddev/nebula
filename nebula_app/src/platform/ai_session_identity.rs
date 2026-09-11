@@ -1,12 +1,13 @@
-//! Recover an AI CLI session identity when the CLI hook was not present.
+//! Find the current Codex conversation when no session ID was reported by its hook.
 //!
 //! Codex keeps the active rollout open, and its process environment carries
-//! the pane id injected by the PTY launcher.  That gives us an exact binding
-//! between a pane and a rollout without guessing from cwd or modification
-//! time.  The probe is intentionally small and is only called by a background
+//! the pane ID supplied by the PTY launcher. This links a pane to its rollout
+//! without relying on working-directory matches or file modification
+//! time. Only the first metadata record is read, without conversation content.
+//! The lookup is bounded and is only called by a background
 //! task; UI code must never scan `/proc` or start `wsl.exe` synchronously.
 
-use std::io::{self, BufRead as _, Read};
+use std::io::{self, Read, Seek as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ pane="$1"
 instance="$2"
 for proc in /proc/[0-9]*; do
     pid=${proc##*/}
-    comm=$(cat "$proc/comm" 2>/dev/null || true)
+    IFS= read -r comm < "$proc/comm" 2>/dev/null || continue
     case "$comm" in
         codex|codex.exe|codex-*) ;;
         *) continue ;;
@@ -44,7 +45,7 @@ for proc in /proc/[0-9]*; do
         link=$(readlink "$fd" 2>/dev/null || true)
         case "$link" in
             "$codex_root"/sessions/*/rollout-*.jsonl)
-                first=$(head -n 1 "$fd" 2>/dev/null || true)
+                first=$(head -c 65536 "$fd" 2>/dev/null | head -n 1)
                 [ -n "$first" ] || continue
                 printf '%s\t%s\t%s\t%s\n' "$pid" "${fd##*/}" "$link" "$first"
                 ;;
@@ -64,11 +65,9 @@ struct ProbeRecord {
 /// Probe the active Codex rollout for one pane.
 ///
 /// WSL panes are inspected inside the guest because Windows Toolhelp cannot
-/// see Linux descendants or their `/proc/<pid>/fd` handles.  Unix hosts use
-/// the same exact environment/fd contract directly.  Windows-native Codex is
-/// deliberately left to the hook path: there is no safe, dependency-free
-/// equivalent of `/proc/<pid>/fd` for proving which open rollout belongs to a
-/// pane.
+/// see Linux processes or their open session files. Linux hosts use the same
+/// process metadata directly. Native Windows and macOS sessions continue to
+/// use hook-reported identities; this fallback requires Linux procfs.
 pub(crate) fn probe_codex_session(
     pane_id: u64,
     exec_context: Option<&crate::runtime_exec::PaneExecContext>,
@@ -207,35 +206,22 @@ fn wsl_probe_args(
     args
 }
 
-/// Run the guest probe without allowing a broken WSL instance to hold a
-/// background executor worker forever.  stdout is drained on a helper thread
-/// so a noisy or malformed process cannot deadlock on a full pipe; the result
-/// is capped before it reaches the parser.
+/// Bound the guest lookup by time and output size. A temporary file avoids a
+/// reader thread surviving when a descendant keeps the output handle open.
 fn run_probe_command(mut command: Command) -> Option<String> {
-    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut output = tempfile::tempfile().ok()?;
+    command.stdin(Stdio::null()).stdout(output.try_clone().ok()?).stderr(Stdio::null());
     let mut child = command.spawn().ok()?;
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    };
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    let reader = std::thread::Builder::new().name("pebrel-ai-session-probe-read".to_owned()).spawn(
-        move || {
-            let result = read_bounded(stdout, MAX_PROBE_OUTPUT);
-            let _ = sender.send(result);
-        },
-    );
-    if reader.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    }
     let deadline = Instant::now() + PROBE_TIMEOUT;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
+            Ok(None)
+                if Instant::now() < deadline
+                    && output
+                        .metadata()
+                        .is_ok_and(|meta| meta.len() <= MAX_PROBE_OUTPUT as u64) =>
+            {
                 std::thread::sleep(Duration::from_millis(10));
             },
             Ok(None) => {
@@ -250,12 +236,8 @@ fn run_probe_command(mut command: Command) -> Option<String> {
             },
         }
     };
-    // A descendant can inherit stdout after wsl.exe itself exits.  Waiting on
-    // the reader join handle here would make a successful probe unbounded, so
-    // use the same deadline for the bounded reader result and abandon it if
-    // the pipe never closes.
-    let output =
-        receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())).ok()?.ok()?;
+    output.rewind().ok()?;
+    let output = read_bounded(output, MAX_PROBE_OUTPUT).ok()?;
     status.success().then(|| parse_probe_records(&String::from_utf8_lossy(&output)))?
 }
 
@@ -277,9 +259,13 @@ fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
 
 #[cfg(unix)]
 fn probe_local_proc(pane_id: &str, instance: &str) -> Option<String> {
+    let deadline = Instant::now() + PROBE_TIMEOUT;
     let mut output = String::new();
     let mut records = 0;
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+        if Instant::now() >= deadline {
+            return None;
+        }
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
@@ -319,11 +305,8 @@ fn probe_local_proc(pane_id: &str, instance: &str) -> Option<String> {
             let _ = writeln!(output, "{pid}\t{fd_number}\t{}\t{first_line}", link.display());
             records += 1;
             if records >= MAX_PROBE_RECORDS || output.len() >= MAX_PROBE_OUTPUT {
-                break;
+                return None;
             }
-        }
-        if records >= MAX_PROBE_RECORDS || output.len() >= MAX_PROBE_OUTPUT {
-            break;
         }
     }
     parse_probe_records(&output)
@@ -341,7 +324,7 @@ fn environment_has_value(environment: &[u8], key: &[u8], expected: &[u8]) -> boo
     prefix.push(b'=');
     environment
         .split(|byte| *byte == 0)
-        .any(|item| item.strip_prefix(&prefix).is_some_and(|value| value == expected))
+        .any(|item| item.strip_prefix(prefix.as_slice()).is_some_and(|value| value == expected))
 }
 
 #[cfg(unix)]
@@ -351,7 +334,7 @@ fn environment_value<'a>(environment: &'a [u8], key: &[u8]) -> Option<&'a [u8]> 
     prefix.push(b'=');
     environment
         .split(|byte| *byte == 0)
-        .find_map(|item| item.strip_prefix(&prefix))
+        .find_map(|item| item.strip_prefix(prefix.as_slice()))
         .filter(|value| !value.is_empty())
 }
 
@@ -384,7 +367,7 @@ fn is_rollout_link(link: &Path, codex_home: &Path) -> bool {
 
 #[cfg(unix)]
 fn read_first_line(path: &Path) -> std::io::Result<String> {
-    use std::io::BufReader;
+    use std::io::{BufRead as _, BufReader};
     let file = std::fs::File::open(path)?;
     let mut line = String::new();
     BufReader::new(file).take(MAX_PROBE_LINE as u64).read_line(&mut line)?;
@@ -400,6 +383,22 @@ mod tests {
 
     const ROOT_ID: &str = "01a079fa-4a9b-7d93-8a4a-4a7a9edaf247";
     const GUARDIAN_ID: &str = "01a079f7-7e36-7232-882b-f06d3bde9df8";
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_lookup_returns_within_its_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 10"]);
+        let started = Instant::now();
+        assert_eq!(run_probe_command(command), None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn oversized_output_is_rejected_instead_of_selecting_a_partial_candidate() {
+        assert_eq!(read_bounded(&b"1234"[..], 4).unwrap(), b"1234");
+        assert!(read_bounded(&b"12345"[..], 4).is_err());
+    }
 
     #[test]
     fn selects_cli_user_rollout_and_rejects_guardian_thread() {

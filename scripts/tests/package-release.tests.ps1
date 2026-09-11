@@ -71,6 +71,7 @@ try {
 
     $expected = @(
         'README.md'
+        'README.zh-CN.md'
         'docs/CHANGELOG.md'
         'docs/INSTALL.md'
         'docs/lua-configuration.md'
@@ -94,8 +95,8 @@ try {
     }
 
     $rootFiles = @($actual | Where-Object { -not $_.Contains('/') })
-    if (@(Compare-Object -ReferenceObject @('README.md', 'pebrel.exe') -DifferenceObject $rootFiles).Count -ne 0) {
-        throw "ZIP root must contain only README.md and pebrel.exe"
+    if (@(Compare-Object -ReferenceObject @('README.md', 'README.zh-CN.md', 'pebrel.exe') -DifferenceObject $rootFiles).Count -ne 0) {
+        throw "ZIP root must contain the English and Chinese READMEs and pebrel.exe"
     }
 
     & $packageScript -Version 'unreleased' -PackageBrand NebulaTerminal -SkipBuild -AllowStale -OutputDirectory $resolvedOutput -TargetDirectory $TargetDirectory

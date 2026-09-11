@@ -510,6 +510,9 @@ pub fn wsl_launch_user<'a>(program: &str, args: &'a [String]) -> Option<&'a str>
         return None;
     }
     for (index, arg) in args.iter().enumerate() {
+        if matches!(arg.as_str(), "--" | "--exec" | "-e") {
+            break;
+        }
         if matches!(arg.as_str(), "-u" | "--user") {
             return args.get(index + 1).map(String::as_str).filter(|user| !user.is_empty());
         }
@@ -806,6 +809,10 @@ mod tests {
         assert_eq!(super::wsl_launch_user("wsl.exe", &owned(&["--user", "hello"])), Some("hello"));
         assert_eq!(super::wsl_launch_user("wsl.exe", &owned(&["--user=hello"])), Some("hello"));
         assert_eq!(super::wsl_launch_user("wsl.exe", &owned(&["--user"])), None);
+        assert_eq!(
+            super::wsl_launch_user("wsl.exe", &owned(&["--exec", "tool", "--user", "remote"])),
+            None
+        );
         assert_eq!(super::wsl_launch_user("pwsh.exe", &owned(&["--user", "hello"])), None);
     }
 

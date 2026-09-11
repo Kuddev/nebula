@@ -31,6 +31,8 @@ pub mod cell;
 pub mod color;
 mod damage;
 mod keyboard;
+#[cfg(test)]
+mod keyboard_contract_tests;
 mod renderable;
 pub mod search;
 
@@ -1248,19 +1250,6 @@ impl<T> Term<T> {
             Point::new(self.grid.cursor.point.line.0 as usize, self.grid.cursor.point.column);
         self.damage.damage_point(point);
     }
-
-    #[inline]
-    fn set_keyboard_mode(&mut self, mode: TermMode, apply: KeyboardModesApplyBehavior) {
-        let active_mode = self.mode & TermMode::KITTY_KEYBOARD_PROTOCOL;
-        self.mode &= !TermMode::KITTY_KEYBOARD_PROTOCOL;
-        let new_mode = match apply {
-            KeyboardModesApplyBehavior::Replace => mode,
-            KeyboardModesApplyBehavior::Union => active_mode.union(mode),
-            KeyboardModesApplyBehavior::Difference => active_mode.difference(mode),
-        };
-        trace!("Setting keyboard mode to {new_mode:?}");
-        self.mode |= new_mode;
-    }
 }
 
 impl<T> Dimensions for Term<T> {
@@ -1523,7 +1512,7 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Pushing `{mode:?}` keyboard mode into the stack");
 
         if self.keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH {
-            let removed = self.title_stack.remove(0);
+            let removed = self.keyboard_mode_stack.remove(0);
             trace!(
                 "Removing '{removed:?}' from bottom of keyboard mode stack that exceeds its \
                  maximum depth"
@@ -1556,6 +1545,14 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         self.set_keyboard_mode(mode.into(), apply);
+        // CSI = changes the current frame, including the implicit base frame.
+        // Nested applications and screen switches must restore the changed flags.
+        let active = KeyboardModes::from(self.mode);
+        if let Some(frame) = self.keyboard_mode_stack.last_mut() {
+            *frame = active;
+        } else {
+            self.keyboard_mode_stack.push(active);
+        }
     }
 
     #[inline]

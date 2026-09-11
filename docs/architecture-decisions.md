@@ -102,7 +102,34 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
 - **Revisit condition:** Remove compatibility readers only after support for old
   clients and persisted configurations is explicitly retired.
 
-## ADR-0004 - Molecular diagrams and file hover previews
+## ADR-0004 - Current conversation identity at workspace save
+
+- **Status:** Implemented for the maintainer-reported restore defect, 2026-09-07;
+  validation is part of the 1.6.0 release candidate checks.
+- **Context:** A Codex pane can identify its foreground program without receiving
+  a session ID from the CLI hook. Saving only the program restores the tab but
+  cannot construct an exact conversation resume command.
+- **Decision:** Keep hook identities authoritative. For WSL and Linux, match the
+  process environment to both the Pebrel instance and pane, then read only the
+  first metadata record of open Codex rollout files. Accept one main conversation
+  whose filename and metadata agree. Do not choose by working directory or time.
+  Native Windows and macOS keep the existing hook path.
+- **Lifecycle:** Queries use the existing background executor, a two-second time
+  limit and bounded output. Results carry the foreground command generation.
+  Window close and the application Quit action allow up to three seconds before
+  saving and stopping panes; the UI thread remains responsive. A refreshed
+  inferred identity is required at close. Hook identities are not replaced.
+- **Persistence:** Reuse the existing optional `source` and `session_id` fields;
+  there is no new file format or dependency. A missing or ambiguous ID cannot
+  launch a different conversation as a fallback. Existing autosave and the final
+  operating-system shutdown callback save the identities already available.
+- **Validation:** File save/load and exact resume commands, primary-thread
+  metadata selection, WSL user arguments, pane/instance isolation, output limits,
+  stale-result rejection, and a subprocess deadline have focused regressions.
+- **Revisit condition:** Replace the procfs fallback when a supported CLI session
+  identity API covers these launches consistently.
+
+## ADR-0005 - Molecular diagrams and file hover previews
 
 - **Status:** Requested in the current working session, 2026-09-08; implementation
   and validation in progress, pending normal review.
@@ -133,7 +160,7 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
 - **Revisit condition:** Remove or replace an adapter when upstream support covers
   the same behavior, or measured parsing/rendering cost exceeds the bounded use.
 
-## ADR-0005 — Remote file workflows and persistent host organization
+## ADR-0006 — Remote file workflows and persistent host organization
 
 - **Status:** Implemented in the working tree on 2026-09-08 for the maintainer's
   requested workflows. Native compilation and focused regression checks passed;
@@ -187,7 +214,7 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
 记录重大取舍而非每次小修复；事实与测试能推翻旧决定。规范误伤、安全修复与旧预算冲突时，
 先记录问题和最小修订，维护者审查后更新合同；不能将“只减不增”变成拒绝纠正规范的理由。
 
-## ADR-0006 — Editable documents, reusable layouts and pane drop targets
+## ADR-0007 — Editable documents, reusable layouts and pane drop targets
 
 - **Status:** Implemented in the working tree, 2026-09-08, for the requested editor,
   recipe and quick-terminal workflows; pending normal maintainer review.
@@ -227,7 +254,7 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
   with a deliberate replay contract. Replace the preview block adapter when the
   pinned TextView exposes an equivalent public heading/navigation API.
 
-## ADR-0007 — Formula bitmap admission and preview view lifetime
+## ADR-0008 — Formula bitmap admission and preview view lifetime
 
 - **Status:** Implemented for the maintainer's memory reduction request,
   2026-09-09; validation and normal review tracked separately.
@@ -255,7 +282,7 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
   are enabled/profiled; add viewport eviction only with preserved selection and
   measured parsed-view accounting. No 50 MB process-wide guarantee is implied.
 
-## ADR-0008 — Optional in-app AI message toasts
+## ADR-0009 — Optional in-app AI message toasts
 
 - **Status:** Requested by the maintainer, 2026-09-11; implemented in the working
   tree, with native validation pending.

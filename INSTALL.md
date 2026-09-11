@@ -7,21 +7,20 @@ application at startup.
 
 ## Linux Preview
 
-Cross-platform Preview runs provide three Linux x86_64 assets. They are test
-builds rather than stable releases.
+The 1.6.0 release provides three Linux x64 Preview packages.
 
 - Debian/Ubuntu: install
-  `Pebrel-v<version>-preview.<id>-linux-x86_64.deb` with
-  `sudo apt install ./Pebrel-v<version>-preview.<id>-linux-x86_64.deb`.
-  Remove it with `sudo apt remove pebrel-preview`.
+  `Pebrel-v<version>-linux-x64-preview.deb` with
+  `sudo apt install ./Pebrel-v<version>-linux-x64-preview.deb`.
+  Remove it with `sudo apt remove pebrel`.
 - AppImage: make
-  `Pebrel-v<version>-preview.<id>-linux-x86_64.AppImage` executable and
+  `Pebrel-v<version>-linux-x64-preview.AppImage` executable and
   run it directly. It does not register itself with the system package manager.
 - Portable archive: extract the `tar.gz` and run its `AppRun` launcher. Keep
   the AppDir layout intact so bundled libraries are found correctly.
 
-The initial Preview target is Linux x86_64 with glibc 2.35 or newer. The
-Preview workflow is configured to build on Ubuntu 22.04 and run the same
+The Linux target is x86_64 with glibc 2.35 or newer. The
+release workflow builds on Ubuntu 22.04 and runs the same
 Runtime API conformance suite against the final AppImage under X11 and
 Wayland, and against the installed Debian package under X11.
 
@@ -35,15 +34,15 @@ the current connection instead; Pebrel does not silently claim to save it.
 
 Download the DMG matching the Mac architecture:
 
-- `macos-aarch64.dmg` for Apple Silicon Macs.
-- `macos-x86_64.dmg` for Intel Macs.
+- `Pebrel-v<version>-macos-arm64-preview.dmg` for Apple Silicon Macs.
+- `Pebrel-v<version>-macos-x64-preview.dmg` for Intel Macs.
 
-Open the DMG and drag **Pebrel Preview** into Applications. These
-Preview builds default to ad-hoc signing, without Apple notarization. For a
+Open the DMG and drag **Pebrel** into Applications. The 1.6.0
+packages use ad-hoc signing, without Apple notarization. For a
 download you have verified and trust, macOS may require **System Settings →
 Privacy & Security → Open Anyway** after an initial launch is blocked. Do not
 disable Gatekeeper globally. Developer ID/notarized builds are explicitly
-identified in their Preview notes; that mode requires the maintainer's Apple
+identified in their release notes; that mode requires the maintainer's Apple
 credentials and fails rather than falling back to ad-hoc signing.
 
 The workflow builds both architectures on native macOS 15 runners. It checks
@@ -57,16 +56,21 @@ a UTF-8 locale and starts from the home directory when launched from `/`, while
 an explicit working directory is preserved. Both platforms use the embedded
 Maple Mono terminal font without requiring a system font installation.
 
-Preview is not full Windows feature parity: tray/close-to-background residency,
+Linux/macOS do not yet provide full Windows feature parity: tray/close-to-background residency,
 global quick-terminal hotkeys, automatic update installation, and automatic
 local AI-hook configuration are not enabled on Linux/macOS. Native IME, display
 scaling, notification permissions, and interactive SSH/SFTP still need native
 user testing. The release procedure and acceptance checklist are in
 [`docs/preview-release-checklist.md`](docs/preview-release-checklist.md).
 
+Earlier CI Preview archives may contain `-preview.<id>` and use `x86_64` /
+`aarch64` filenames; those older builds use the Debian package name
+`pebrel-preview` and the macOS bundle name **Pebrel Preview**. The 1.6.0 platform
+Preview packages use `pebrel` and **Pebrel**, as described above.
+
 ## Windows installer (recommended)
 
-1. Download `Pebrel-<version>-windows-x64-setup.exe` from the
+1. Download `Pebrel-v<version>-windows-x64-setup.exe` from the
    [Releases](https://github.com/Kuddev/pebrel/releases/latest) page.
 2. Follow the wizard to choose the installation directory and optional desktop
    or Windows sign-in shortcuts. The default per-user installation does not
@@ -121,8 +125,10 @@ Keep the extracted directory structure intact:
 
 ## Build from source
 
-Requirements: Windows 10 1809+ / 11 and [rustup](https://rustup.rs). The
-repository pins Rust 1.97.1 in `rust-toolchain.toml`.
+Install [rustup](https://rustup.rs) and the build dependencies for your platform.
+The repository pins Rust 1.97.1 in `rust-toolchain.toml`. Linux dependency packages
+are listed in `.github/workflows/release.yml`; macOS requires Xcode command-line
+tools. Windows requires Windows 10 1809+ / 11 and a supported Rust linker toolchain.
 
 ```powershell
 git clone https://github.com/Kuddev/pebrel

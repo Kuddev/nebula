@@ -66,7 +66,7 @@ pub enum SplitAxis {
 }
 
 /// 快照瞬间仍在一个 pane 前台运行的 AI CLI 对话。冷恢复用它接续会话：
-/// 身份来自 hook 直报（claude `session_id` / codex `thread-id`），缺 id 的
+/// 身份来自 hook 直报或当前 Codex 会话元数据，缺 id 的
 /// claude 退化成 `--continue`（按 cwd 找最近对话，恰好匹配恢复语义）。
 ///
 /// 只存「安全启动描述」——来源名 + id，不存正文、不存启动参数原文。
@@ -513,6 +513,35 @@ mod tests {
             })
             .collect();
         assert_eq!(cwds, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn codex_conversations_survive_file_save_and_resume_by_exact_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("workspace.json");
+        let ids = ["01a079fa-4a9b-7d93-8a4a-4a7a9edaf247", "01a079f7-7e36-7232-882b-f06d3bde9df8"];
+        let tabs = ids
+            .iter()
+            .map(|id| {
+                let mut tab = TabSession::single("/home/user/project".into(), None, None);
+                tab.layout = Some(LayoutSession::Pane {
+                    cwd: "/home/user/project".into(),
+                    agent: Some(AgentSession {
+                        source: "codex".into(),
+                        session_id: Some((*id).into()),
+                    }),
+                });
+                tab
+            })
+            .collect();
+        save_to(&path, &Session::new(0, tabs)).unwrap();
+        let restored = load_from(&path).unwrap();
+        for (tab, id) in restored.tabs.iter().zip(ids) {
+            let Some(LayoutSession::Pane { agent: Some(agent), .. }) = &tab.layout else {
+                panic!("saved pane lost its conversation identity");
+            };
+            assert_eq!(agent.resume_command(), Some(format!("codex resume {id}")));
+        }
     }
 
     #[test]

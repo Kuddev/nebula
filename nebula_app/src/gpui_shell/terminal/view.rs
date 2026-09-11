@@ -358,6 +358,7 @@ pub struct TerminalView {
     /// rollout probe runs in the background and uses this generation to reject
     /// a result from a previous foreground command.
     pub(super) ai_session_probe_pending: bool,
+    pub(super) ai_session_from_probe: bool,
     pub(super) ai_session_probe_epoch: u64,
     pub(super) last_ai_session_probe: Option<std::time::Instant>,
     error: Option<String>,
@@ -809,6 +810,7 @@ impl TerminalView {
             ssh_connect_last_step: std::time::Instant::now(),
             ai_session: None,
             ai_session_probe_pending: false,
+            ai_session_from_probe: false,
             ai_session_probe_epoch: 0,
             last_ai_session_probe: None,
             error,
@@ -973,53 +975,7 @@ impl TerminalView {
                     Err(error) => log::warn!("terminal image dropped: {error}"),
                 }
             },
-            TermEvent::CommandStart => {
-                self.answers.begin_command();
-                // 程序身份来自 Enter 时捕获的完整命令行；直接启动和
-                // npx/node/uvx 等包装启动都会归一成 Agent slug。它是 WSL
-                // 看不见来宾进程时的主通道，hook 信封仍是更准的覆盖层。
-                let identity =
-                    crate::ai_agents::AgentKind::parse_command(&self.suggest.last_committed)
-                        .map(|agent| agent.slug().to_owned())
-                        .or_else(|| crate::display::extract_program(&self.suggest.last_committed));
-                // A probe belongs to one foreground command. Invalidate it
-                // before replacing the command identity so a slow WSL result
-                // from Codex A cannot become the identity of Codex B.
-                self.invalidate_ai_session_probe();
-                if identity != self.running_program {
-                    self.running_program = identity;
-                    self.ai_session = None;
-                    cx.emit(TerminalViewEvent::TitleChanged);
-                }
-                if self
-                    .running_program
-                    .as_deref()
-                    .and_then(crate::ai_agents::AgentKind::parse)
-                    .is_some()
-                    && !self.agent_hook_seen
-                {
-                    self.agent_status_source = crate::ai_agents::AgentStatusSource::Process;
-                    self.agent_status_rule = None;
-                }
-                self.mark_command_running();
-                self.probe_missing_codex_session(cx);
-                // 首个词就是一个交互式 shell（`cmd`、`wsl`、裸 `bash`）：133;C
-                // 是真的，但这条「命令」其实是一个新提示符，133;D 永远不会来
-                // ——那个 shell 接管了终端，而我们的集成不在它里面。立刻按「已被
-                // 进程树反证」处理，转圈不必等 3 秒节流窗口。
-                //
-                // 这不是把状态钉死：后续对账双向纠正，真在那个 shell 里跑起活儿
-                // 会多出一个子进程，进程树看得见，状态会被拉回运行中。
-                if crate::process_tree::is_interactive_shell_command(&self.suggest.last_committed) {
-                    self.command_running_disproved = true;
-                }
-                if let Some(run) = &mut self.active_run
-                    && run.phase == crate::runtime_api::RuntimeRunPhase::Submitted
-                {
-                    run.phase = crate::runtime_api::RuntimeRunPhase::Started;
-                }
-                cx.notify();
-            },
+            TermEvent::CommandStart => self.on_command_start(cx),
             // 退出码接到「上一条命令失败」的未读徽章上（⚠ 三角）；`Some(0)` 与
             // `None`（没带退出码的 133;D）都算过关。记在下面那道 barrier 之后：
             // 属于上一轮/初始化的那个边沿不能改写徽章。

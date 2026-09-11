@@ -226,6 +226,29 @@ impl Element for TerminalElement {
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
 
         let view = self.view.read(cx);
+        // Bounded, opt-in evidence that a real layout reached this pane. PTY
+        // resize traces alone cannot distinguish missing prepaint from a
+        // viewport which still matches the spawn grid.
+        static TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static TRACE_SAMPLES: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        if *TRACE_ENABLED.get_or_init(|| std::env::var_os("NEBULA_RESIZE_TRACE").is_some())
+            && TRACE_SAMPLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 256
+        {
+            crate::gpui_shell::try_write_stderr(format_args!(
+                "[nebula:resize-trace] prepaint pane={} origin=({:.2},{:.2}) content={:.2}x{:.2} cell={:.2}x{:.2} scale={:.2} viewport={}x{}",
+                view.pane_id,
+                bounds.origin.x.as_f32(),
+                bounds.origin.y.as_f32(),
+                bounds.size.width.as_f32(),
+                bounds.size.height.as_f32(),
+                cell_width.as_f32(),
+                line_height.as_f32(),
+                scale,
+                view.grid_cols(),
+                view.grid_rows(),
+            ));
+        }
         TermLayout {
             cell_width,
             line_height,

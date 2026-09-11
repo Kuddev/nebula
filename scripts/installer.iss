@@ -50,7 +50,7 @@ LicenseFile={#RepoRoot}\LICENSE
 SetupIconFile={#RepoRoot}\nebula_app\windows\nebula.ico
 UninstallDisplayIcon={app}\pebrel.exe
 OutputDir={#RepoRoot}\dist
-OutputBaseFilename={#PackageBrand}-{#AppVersion}-windows-x64-setup
+OutputBaseFilename={#PackageBrand}-v{#AppVersion}-windows-x64-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -98,6 +98,7 @@ Name: "autostart"; Description: "{cm:AutoStart}"; GroupDescription: "{cm:Additio
 [Files]
 Source: "{#BuildRoot}\pebrel.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#RepoRoot}\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\README.zh-CN.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildRoot}\pebrel-hook.exe"; DestDir: "{app}\runtime"; Flags: ignoreversion
 Source: "{#BuildRoot}\conpty.dll"; DestDir: "{app}\runtime"; Flags: ignoreversion
 Source: "{#BuildRoot}\OpenConsole.exe"; DestDir: "{app}\runtime"; Flags: ignoreversion

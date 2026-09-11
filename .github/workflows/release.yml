@@ -1,0 +1,625 @@
+name: Pebrel stable release
+
+run-name: >-
+  Pebrel ${{ inputs.version || github.ref_name }} stable release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable Cargo package version to build and publish
+        required: true
+        type: string
+      publish:
+        description: Create the public GitHub Release after every package check passes
+        required: true
+        default: false
+        type: boolean
+      windows_only:
+        description: Build only the missing Windows package, retaining other platform artifacts
+        type: boolean
+        default: false
+      source_commit:
+        description: Exact previously tested source commit for Windows-only packaging
+        type: string
+        default: ""
+      validated_run:
+        description: Existing stable run whose Windows native tests passed for source_commit
+        type: string
+        default: ""
+      macos_signing:
+        description: macOS signing mode; Developer ID also requires notarization secrets
+        required: true
+        type: choice
+        options: [adhoc, developer-id]
+        default: adhoc
+
+concurrency:
+  group: stable-release-${{ github.ref }}-${{ inputs.windows_only || false }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUST_TOOLCHAIN: "1.97.1"
+  PYTHONUTF8: "1"
+  MACOS_SIGNING: ${{ inputs.macos_signing || 'adhoc' }}
+
+jobs:
+  prepare:
+    name: Validate stable release inputs
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      asset_version: ${{ steps.metadata.outputs.asset_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Resolve and validate package metadata
+        id: metadata
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version="$(python3 scripts/preview_release.py --print-package-version nebula_app/Cargo.toml)"
+          if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$version" ]]; then
+            echo "requested version $REQUESTED_VERSION does not match Cargo package version $version" >&2
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == push && "$REF_NAME" != "v$version" ]]; then
+            echo "release tag $REF_NAME does not match Cargo package version $version" >&2
+            exit 1
+          fi
+          VERSION="$version" python3 - <<'PY'
+          import os
+          from scripts.stable_release import validate_version
+          validate_version(os.environ["VERSION"])
+          if "-" in os.environ["VERSION"] or "+" in os.environ["VERSION"]:
+              raise SystemExit("stable releases require a plain semver without prerelease or build suffix")
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
+          from scripts.stable_release import validate_changelog, validate_notes
+          import subprocess
+          version = subprocess.check_output(
+              ["python3", "scripts/preview_release.py", "--print-package-version", "nebula_app/Cargo.toml"],
+              text=True,
+          ).strip()
+          validate_notes(Path(f"docs/release-notes/v{version}.md"), version)
+          validate_changelog(Path("CHANGELOG.md"), version)
+          PY
+          {
+            echo "version=$version"
+            echo "asset_version=$version"
+          } >>"$GITHUB_OUTPUT"
+      - name: Check architecture and release helper contracts
+        run: |
+          python3 scripts/check_architecture.py
+          python3 scripts/check_platform_cfg.py
+          python3 -m unittest \
+            scripts.tests.test_stable_release \
+            scripts.tests.test_preview_release \
+            scripts.tests.test_macos_dmg \
+            scripts.tests.test_ai_session_probe \
+            scripts.tests.test_platform_cfg \
+            scripts.tests.test_windows_resources \
+            scripts.tests.test_pebrel_branding \
+            scripts.tests.test_app_icons \
+            scripts.tests.test_git_attributes \
+            scripts.tests.test_xplat
+          bash -n scripts/package-linux.sh scripts/package-macos.sh
+          python3 -m py_compile scripts/stable_release.py scripts/preview_release.py
+
+  linux:
+    name: Linux x86_64 stable package
+    if: ${{ !inputs.windows_only }}
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      LINUXDEPLOY_VERSION: 1-alpha-20251107-1
+      LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install build, package, and headless runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            appstream build-essential cmake curl desktop-file-utils dpkg-dev \
+            imagemagick libasound2-dev libdbus-1-dev libegl1-mesa-dev \
+            libfontconfig1-dev libfreetype6-dev libgl1-mesa-dev libudev-dev \
+            libvulkan1 libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxcb-xinput-dev libxcb-xkb-dev libxcb1-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev mesa-vulkan-drivers \
+            patchelf pkg-config weston xauth xvfb zsh
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Test workspace and startup contracts
+        run: |
+          cargo test --locked --workspace
+          cargo test --locked -p nebula --bin pebrel --features gpui-shell
+          python3 -m unittest scripts.tests.test_shell_integration
+          cargo test --locked -p nebula --features gpui-test-support dialog
+          cargo test --locked -p nebula --bin pebrel --features gpui-test-support gpui_shell::
+      - name: Build GPUI release binary
+        run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+      - name: Download pinned linuxdeploy
+        env:
+          LINUXDEPLOY: ${{ runner.temp }}/linuxdeploy-x86_64.AppImage
+        run: |
+          curl --fail --location --retry 3 --retry-all-errors --show-error \
+            --output "$LINUXDEPLOY" \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_VERSION/linuxdeploy-x86_64.AppImage"
+          echo "$LINUXDEPLOY_SHA256  $LINUXDEPLOY" | sha256sum --check --strict
+          chmod 0755 "$LINUXDEPLOY"
+          echo "LINUXDEPLOY=$LINUXDEPLOY" >>"$GITHUB_ENV"
+      - name: Package stable Linux assets
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export SOURCE_DATE_EPOCH
+          bash scripts/package-linux.sh \
+            --channel stable \
+            --binary target/release/pebrel \
+            --version "$PACKAGE_VERSION" \
+            --output-directory dist \
+            --linuxdeploy "$LINUXDEPLOY" \
+            --force
+      - name: Run AppImage conformance under X11
+        env:
+          NEBULA_RESIZE_TRACE: "1"
+        run: |
+          xvfb-run -a -s "-screen 0 1600x1000x24" \
+            python3 scripts/conformance/run.py \
+              --app "dist/Pebrel-v$PACKAGE_VERSION-linux-x64.AppImage" \
+              --platform linux-x86_64-appimage \
+              --output dist/conformance/linux-appimage-report.json
+      - name: Run AppImage conformance under Wayland
+        env:
+          NEBULA_RESIZE_TRACE: "1"
+        run: |
+          xvfb-run -a -s "-screen 0 1600x1000x24" bash -euo pipefail <<'WAYLAND_SESSION'
+          runtime_directory="$RUNNER_TEMP/pebrel-wayland-runtime"
+          mkdir -p "$runtime_directory" dist/conformance
+          chmod 0700 "$runtime_directory"
+          XDG_RUNTIME_DIR="$runtime_directory" weston --backend=x11-backend.so \
+            --use-pixman --no-config --socket=wayland-pebrel --width=1600 --height=1000 \
+            --idle-time=0 --log=dist/conformance/weston.log &
+          weston_pid=$!
+          trap 'kill "$weston_pid" >/dev/null 2>&1 || true; wait "$weston_pid" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 100); do
+            [[ -S "$runtime_directory/wayland-pebrel" ]] && break
+            kill -0 "$weston_pid" >/dev/null 2>&1 || exit 1
+            sleep 0.1
+          done
+          test -S "$runtime_directory/wayland-pebrel"
+          DISPLAY='' XDG_RUNTIME_DIR="$runtime_directory" WAYLAND_DISPLAY=wayland-pebrel \
+            python3 scripts/conformance/run.py \
+              --app "dist/Pebrel-v$PACKAGE_VERSION-linux-x64.AppImage" \
+              --platform linux-x86_64-appimage-wayland \
+              --output dist/conformance/linux-appimage-wayland-report.json
+          WAYLAND_SESSION
+      - name: Install and run Debian conformance
+        env:
+          NEBULA_RESIZE_TRACE: "1"
+        run: |
+          sudo apt-get install -y "./dist/Pebrel-v$PACKAGE_VERSION-linux-x64.deb"
+          test "$(dpkg-query -W -f='${Status}' pebrel)" = "install ok installed"
+          xvfb-run -a -s "-screen 0 1600x1000x24" \
+            python3 scripts/conformance/run.py --app /usr/bin/pebrel \
+              --platform linux-x86_64-deb --output dist/conformance/linux-deb-report.json
+      - name: Upload Linux stable assets
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-package-linux-x64
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Linux conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-evidence-linux-x64
+          path: dist/conformance
+          if-no-files-found: warn
+          retention-days: 14
+
+  macos:
+    name: macOS ${{ matrix.architecture }} stable package
+    if: ${{ !inputs.windows_only }}
+    needs: prepare
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: aarch64
+            native_architecture: arm64
+            asset_architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+            native_architecture: x86_64
+            asset_architecture: x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify native runner architecture
+        run: test "$(uname -m)" = "${{ matrix.native_architecture }}"
+      - name: Test native DMG capacity and mounted contents
+        run: python3 -m unittest scripts.tests.test_macos_dmg -v
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Test workspace and native startup contracts
+        run: |
+          cargo test --locked --workspace
+          cargo test --locked -p nebula --bin pebrel --features gpui-shell
+          python3 -m unittest scripts.tests.test_shell_integration scripts.conformance.tests.test_posix_lifecycle
+          cargo test --locked -p nebula --features gpui-test-support dialog
+          cargo test --locked -p nebula --bin pebrel --features gpui-test-support gpui_shell::
+      - name: Build GPUI release binary
+        run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+      - name: Import Developer ID signing credentials
+        if: ${{ env.MACOS_SIGNING == 'developer-id' }}
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          export SIGNING_DIRECTORY="$RUNNER_TEMP/pebrel-signing"
+          mkdir -m 0700 "$SIGNING_DIRECTORY"
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+          required = ["APPLE_CERTIFICATE_BASE64", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY",
+                      "APPLE_API_KEY_BASE64", "APPLE_API_KEY_ID", "APPLE_API_ISSUER"]
+          if any(not os.environ.get(name) for name in required):
+              raise SystemExit("missing required Developer ID signing secret")
+          root = Path(os.environ["SIGNING_DIRECTORY"])
+          for name, filename in [("APPLE_CERTIFICATE_BASE64", "certificate.p12"), ("APPLE_API_KEY_BASE64", "AuthKey.p8")]:
+              path = root / filename
+              path.write_bytes(base64.b64decode(os.environ[name], validate=True))
+              path.chmod(0o600)
+          PY
+          keychain="$SIGNING_DIRECTORY/release.keychain-db"
+          password="$(openssl rand -hex 32)"
+          echo "::add-mask::$password"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$SIGNING_DIRECTORY/certificate.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          xcrun notarytool store-credentials pebrel-release --keychain "$keychain" \
+            --key "$SIGNING_DIRECTORY/AuthKey.p8" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+          echo "PEBREL_SIGNING_KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+      - name: Package stable macOS DMG
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          signing_args=()
+          if [[ "$MACOS_SIGNING" == developer-id ]]; then
+            test -n "$PEBREL_SIGNING_KEYCHAIN"
+            signing_args=(--sign-identity "$APPLE_SIGNING_IDENTITY" --notary-profile pebrel-release --signing-keychain "$PEBREL_SIGNING_KEYCHAIN")
+          fi
+          bash scripts/package-macos.sh \
+            --channel stable \
+            --binary target/release/pebrel \
+            --version "$PACKAGE_VERSION" \
+            --architecture "${{ matrix.architecture }}" \
+            --build-number "$GITHUB_RUN_NUMBER" \
+            --output-directory dist --force "${signing_args[@]}"
+      - name: Mount DMG and run conformance
+        env:
+          NEBULA_RESIZE_TRACE: "1"
+        run: |
+          dmg="dist/Pebrel-v$PACKAGE_VERSION-macos-${{ matrix.asset_architecture }}.dmg"
+          mount_point="$RUNNER_TEMP/pebrel-stable-${{ matrix.architecture }}"
+          mkdir -p "$mount_point"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
+          trap 'hdiutil detach "$mount_point" >/dev/null 2>&1 || hdiutil detach "$mount_point" -force >/dev/null 2>&1 || true' EXIT
+          app="$mount_point/Pebrel.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$app/Contents/Info.plist")" = "io.github.kuddev.pebrel"
+          test "$(lipo -archs "$app/Contents/MacOS/pebrel")" = "${{ matrix.native_architecture }}"
+          python3 scripts/conformance/run.py --app "$app" --platform "macos-${{ matrix.architecture }}" \
+            --output "dist/conformance/macos-${{ matrix.architecture }}-report.json"
+          python3 scripts/conformance/macos_launch.py --app "$app" \
+            --output "dist/conformance/macos-${{ matrix.architecture }}-launch.json"
+      - name: Remove temporary signing credentials
+        if: ${{ always() && env.MACOS_SIGNING == 'developer-id' }}
+        run: |
+          if [[ -f "$RUNNER_TEMP/pebrel-signing/release.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/pebrel-signing/release.keychain-db"
+          fi
+          rm -rf -- "$RUNNER_TEMP/pebrel-signing"
+      - name: Upload macOS stable asset
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-package-macos-${{ matrix.asset_architecture }}
+          path: dist/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload macOS conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-evidence-macos-${{ matrix.architecture }}
+          path: dist/conformance
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows:
+    name: Windows x64 stable package
+    needs: prepare
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retain runtime preparation tool for the selected source
+        shell: pwsh
+        run: |
+          Copy-Item scripts/prepare-windows-runtime.ps1 "$env:RUNNER_TEMP/prepare-windows-runtime.ps1"
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP/runtime-tests" -Force | Out-Null
+          Copy-Item scripts/tests/windows-runtime.tests.ps1 "$env:RUNNER_TEMP/runtime-tests/windows-runtime.tests.ps1"
+      - name: Verify the previous Windows test result
+        if: ${{ inputs.source_commit != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_COMMIT: ${{ inputs.source_commit }}
+          VALIDATED_RUN: ${{ inputs.validated_run }}
+          WINDOWS_ONLY: ${{ inputs.windows_only }}
+        run: |
+          if ($env:WINDOWS_ONLY -ne 'true' -or $env:SELECTED_COMMIT -notmatch '^[0-9a-f]{40}$' -or $env:VALIDATED_RUN -notmatch '^[0-9]+$') {
+            throw 'Selecting old source requires Windows-only mode, an exact commit, and a validated run.'
+          }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $run = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:VALIDATED_RUN" -Headers $headers -ErrorAction Stop
+          if ($run.head_sha -ne $env:SELECTED_COMMIT) { throw 'Validated run source differs.' }
+          $jobs = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:VALIDATED_RUN/jobs?per_page=100" -Headers $headers -ErrorAction Stop
+          $windows = @($jobs.jobs | Where-Object name -eq 'Windows x64 stable package')
+          $tests = @($windows.steps | Where-Object { $_.name -eq 'Test workspace and native harness' -and $_.conclusion -eq 'success' })
+          if ($windows.Count -ne 1 -or $tests.Count -ne 1) { throw 'Prior Windows native tests did not pass.' }
+      - uses: actions/checkout@v4
+        if: ${{ inputs.source_commit != '' }}
+        with:
+          ref: ${{ inputs.source_commit }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Prepare pinned Windows console runtime
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP/prepare-windows-runtime.ps1" -Destination assets/windows/conhost
+          & "$env:RUNNER_TEMP/runtime-tests/windows-runtime.tests.ps1" -ArchivePath (Join-Path ([IO.Path]::GetTempPath()) 'pebrel-conpty-source-v1.5.0.zip')
+      - name: Test workspace and native harness
+        if: ${{ inputs.source_commit == '' }}
+        shell: pwsh
+        run: |
+          python -m unittest scripts.conformance.tests.test_lifecycle scripts.conformance.tests.test_scrollback
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nebula --bin pebrel --features gpui-shell
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nebula --features gpui-test-support dialog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p nebula --bin pebrel --features gpui-test-support gpui_shell::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build GPUI release binary
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p nebula_hook --bin pebrel-hook
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
+          exit $LASTEXITCODE
+      - name: Retain built Windows runtime before packaging
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-runtime-windows-x64
+          path: |
+            target/release/pebrel.exe
+            target/release/pebrel-hook.exe
+            target/release/conpty.dll
+            target/release/OpenConsole.exe
+          if-no-files-found: error
+          retention-days: 30
+      - name: Test Windows packaging scripts
+        shell: pwsh
+        run: |
+          ./scripts/tests/installer.tests.ps1 -TargetDirectory target
+          ./scripts/tests/package-release.tests.ps1 -TargetDirectory target
+      - name: Package ZIP and installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/package-release.ps1 -Version $env:PACKAGE_VERSION -PackageBrand Pebrel -OutputDirectory dist -TargetDirectory target -Force
+          ./scripts/build-installer.ps1 -Version $env:PACKAGE_VERSION -PackageBrand Pebrel -OutputDirectory dist -TargetDirectory target -Force
+          $canonical = Join-Path (Resolve-Path dist) "Pebrel-v$env:PACKAGE_VERSION-windows-x64-setup.exe"
+          $legacy = Join-Path (Resolve-Path dist) "NebulaTerminal-$env:PACKAGE_VERSION-windows-x64-setup.exe"
+          Copy-Item -LiteralPath $canonical -Destination $legacy -Force
+          $canonicalHash = (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash
+          $legacyHash = (Get-FileHash -LiteralPath $legacy -Algorithm SHA256).Hash
+          if ($canonicalHash -ne $legacyHash) { throw 'legacy installer alias differs from canonical installer' }
+      - name: Run Windows conformance
+        shell: pwsh
+        env:
+          NEBULA_RESIZE_TRACE: "1"
+          SELECTED_COMMIT: ${{ inputs.source_commit || github.sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($actual -ne $env:SELECTED_COMMIT) { throw 'Checked-out source differs from the requested build.' }
+          $env:GITHUB_SHA = $actual
+          python scripts/conformance/run.py --app target/release/pebrel.exe --platform windows-x86_64 --output dist/conformance/windows-report.json
+          exit $LASTEXITCODE
+      - name: Upload Windows stable assets
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-package-windows-x64
+          path: |
+            dist/Pebrel-v${{ needs.prepare.outputs.version }}-windows-x64.zip
+            dist/Pebrel-v${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+            dist/NebulaTerminal-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload Windows conformance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-evidence-windows-x64
+          path: dist/conformance
+          if-no-files-found: warn
+          retention-days: 14
+
+  aggregate:
+    name: Verify stable assets and upload complete set
+    if: ${{ !inputs.windows_only }}
+    needs: [prepare, linux, macos, windows]
+    runs-on: ubuntu-22.04
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stable-package-*
+          merge-multiple: true
+          path: release-dist
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: stable-evidence-*
+          merge-multiple: true
+          path: stable-evidence
+      - name: Validate conformance evidence and stable manifest
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.preview_release import validate_evidence
+          validate_evidence(Path("stable-evidence"), os.environ["SOURCE_COMMIT"])
+          PY
+          python3 scripts/stable_release.py release-dist \
+            --version "$PACKAGE_VERSION" \
+            --mark-platform-previews \
+            --notes "docs/release-notes/v$PACKAGE_VERSION.md" \
+            --changelog CHANGELOG.md \
+            --write-checksums release-dist/SHA256SUMS \
+            --write-notes release-dist/RELEASE_NOTES.md
+      - name: Upload complete stable release set
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pebrel-v${{ needs.prepare.outputs.version }}
+          path: release-dist
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish verified GitHub Release
+    if: ${{ !inputs.windows_only && (github.event_name == 'push' || inputs.publish == true) }}
+    needs: [prepare, aggregate]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: Pebrel-v${{ needs.prepare.outputs.version }}
+          path: release-dist
+      - name: Create public stable Release
+        run: |
+          tag="v$PACKAGE_VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "refusing to replace existing Release: $tag" >&2
+            exit 1
+          fi
+          existing_tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha' 2>/dev/null || true)"
+          existing_tag_commit=""
+          if [[ -n "$existing_tag_ref" ]]; then
+            read -r existing_tag_type existing_tag_object <<<"$existing_tag_ref"
+            if [[ "$existing_tag_type" == tag ]]; then
+              existing_tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$existing_tag_object" --jq .object.sha)"
+            else
+              existing_tag_commit="$existing_tag_object"
+            fi
+          fi
+          if [[ -n "$existing_tag_commit" && "$existing_tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "tag $tag already points to $existing_tag_commit, expected $GITHUB_SHA" >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            release-dist/*.AppImage release-dist/*.deb release-dist/*.dmg \
+            release-dist/*.tar.gz release-dist/*.zip release-dist/*-setup.exe \
+            release-dist/SHA256SUMS \
+            --target "$GITHUB_SHA" --title "Pebrel $PACKAGE_VERSION" \
+            --notes-file release-dist/RELEASE_NOTES.md
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >"$RUNNER_TEMP/stable-release.json"
+          tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha')"
+          read -r tag_type tag_object <<<"$tag_ref"
+          if [[ "$tag_type" == tag ]]; then
+            tag_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq .object.sha)"
+          else
+            tag_commit="$tag_object"
+          fi
+          python3 scripts/stable_release.py release-dist --version "$PACKAGE_VERSION" \
+            --verify-release "$RUNNER_TEMP/stable-release.json" \
+            --commit "$GITHUB_SHA" --tag-commit "$tag_commit"

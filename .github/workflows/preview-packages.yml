@@ -50,6 +50,9 @@ jobs:
       asset_version: ${{ steps.metadata.outputs.asset_version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Resolve package metadata
         id: metadata
@@ -98,12 +101,19 @@ jobs:
         run: >-
           python3 -m unittest
           scripts.tests.test_preview_release
+          scripts.tests.test_macos_dmg
+          scripts.tests.test_ai_session_probe
           scripts.tests.test_platform_cfg
           scripts.tests.test_windows_resources
           scripts.tests.test_pebrel_branding
           scripts.tests.test_app_icons
           scripts.tests.test_git_attributes
+          scripts.tests.test_xplat
           scripts.conformance.tests.test_harness
+          scripts.conformance.tests.test_resize
+          scripts.conformance.tests.test_scrollback
+          scripts.conformance.tests.test_lifecycle
+          scripts.conformance.tests.test_posix_lifecycle
 
       - name: Compile Python helpers
         run: python3 -m compileall -q scripts/preview_release.py scripts/conformance
@@ -124,6 +134,9 @@ jobs:
       LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Install build, package, and headless runtime dependencies
         run: |
@@ -143,6 +156,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Test workspace natively
         run: cargo test --locked --workspace
@@ -187,6 +202,8 @@ jobs:
           tar -tzf "$archive" "$root/usr/share/applications/io.github.kuddev.pebrel.preview.desktop"
 
       - name: Run AppImage conformance under X11
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
           xvfb-run -a -s "-screen 0 1600x1000x24" \
             python3 scripts/conformance/run.py \
@@ -195,13 +212,20 @@ jobs:
               --output dist/conformance/linux-appimage-report.json
 
       - name: Run AppImage conformance under Wayland
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
+          # Weston headless has no wl_seat. A private X11 backend provides
+          # input devices while DISPLAY is cleared for the Wayland client.
+          xvfb-run -a -s "-screen 0 1600x1000x24" bash -euo pipefail <<'WAYLAND_SESSION'
           runtime_directory="$RUNNER_TEMP/pebrel-wayland-runtime"
           mkdir -p "$runtime_directory" dist/conformance
           chmod 0700 "$runtime_directory"
           XDG_RUNTIME_DIR="$runtime_directory" \
             weston \
-              --backend=headless-backend.so \
+              --backend=x11-backend.so \
+              --use-pixman \
+              --no-config \
               --socket=wayland-pebrel \
               --width=1600 \
               --height=1000 \
@@ -233,8 +257,11 @@ jobs:
               --app "dist/Pebrel-v$ASSET_VERSION-linux-x86_64.AppImage" \
               --platform linux-x86_64-appimage-wayland \
               --output dist/conformance/linux-appimage-wayland-report.json
+          WAYLAND_SESSION
 
       - name: Install and run Debian package conformance under X11
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
           sudo apt-get install -y \
             "./dist/Pebrel-v$ASSET_VERSION-linux-x86_64.deb"
@@ -289,24 +316,41 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - name: Verify native runner architecture
         run: test "$(uname -m)" = "${{ matrix.native_architecture }}"
+
+      - name: Test native DMG capacity and mounted contents
+        run: python3 -m unittest scripts.tests.test_macos_dmg -v
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
       - name: Test workspace natively
         run: cargo test --locked --workspace
 
-      - name: Test native shell startup contracts
-        run: python3 -m unittest scripts.tests.test_shell_integration -v
+      - name: Test native shell startup and harness process ownership
+        run: >-
+          python3 -m unittest scripts.tests.test_shell_integration
+          scripts.conformance.tests.test_posix_lifecycle -v
 
       - name: Test SSH confirmation and password dialogs
         run: cargo test --locked -p nebula --features gpui-test-support dialog
+
+      - name: Release completed test artifacts before building the package
+        run: |
+          df -h . "${TMPDIR:-/tmp}"
+          du -sh target/debug
+          cargo clean --profile dev --package nebula
+          df -h . "${TMPDIR:-/tmp}"
 
       - name: Build GPUI release binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
@@ -371,6 +415,8 @@ jobs:
             --force "${signing_args[@]}"
 
       - name: Mount final DMG and run conformance
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: |
           dmg="dist/Pebrel-v$ASSET_VERSION-macos-${{ matrix.architecture }}.dmg"
           mount_point="$RUNNER_TEMP/pebrel-preview-${{ matrix.architecture }}"
@@ -432,10 +478,20 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test native harness process ownership and completion markers
+        run: >-
+          python -m unittest
+          scripts.conformance.tests.test_lifecycle
+          scripts.conformance.tests.test_scrollback
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Test workspace natively
         run: cargo test --locked --workspace
       - name: Test SSH confirmation and password dialogs
@@ -443,6 +499,8 @@ jobs:
       - name: Build GPUI comparison binary
         run: cargo build --locked --release -p nebula --bin pebrel --features gpui-shell
       - name: Run Windows conformance
+        env:
+          NEBULA_RESIZE_TRACE: "1"
         run: >-
           python scripts/conformance/run.py --app target/release/pebrel.exe
           --platform windows-x86_64 --output dist/conformance/windows-report.json
@@ -465,6 +523,9 @@ jobs:
       ASSET_VERSION: ${{ needs.prepare.outputs.asset_version }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
 
       - uses: actions/download-artifact@v4
         with:
@@ -517,6 +578,9 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
       - uses: actions/download-artifact@v4
         with:
           name: Pebrel-v${{ needs.prepare.outputs.asset_version }}
