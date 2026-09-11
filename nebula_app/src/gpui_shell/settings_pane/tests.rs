@@ -137,3 +137,60 @@ fn cached_semantic_statuses_render_in_the_current_language() {
     assert_eq!(ssh.text(crate::display::UiLanguage::ZhCn), "正在打开 server.example…");
     assert_eq!(ssh.text(crate::display::UiLanguage::EnUs), "Opening server.example…");
 }
+
+/// Every row, including the import action, has the same icon slot height.
+/// The virtual list measures its first visible item; filtering must not change
+/// the row geometry when that item changes from an action to a shell.
+#[cfg(feature = "gpui-test-support")]
+mod shell_row_geometry {
+    use super::*;
+    use gpui::TestAppContext;
+
+    struct ShellRowProbe {
+        rows: Vec<(&'static str, ShellSelectItem)>,
+    }
+
+    impl Render for ShellRowProbe {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            // 把继承字号压到图标槽以下，让行高只由图标槽决定。这样断言测的
+            // 就是「行高与图标种类无关」这条不变量本身，而不是某套字体度量。
+            // 真实弹出列表与搜索另由 shell_picker_tests 覆盖。
+            v_flex().w(px(240.0)).text_size(px(8.0)).children(self.rows.iter().map(
+                |(selector, item)| {
+                    div()
+                        .debug_selector(move || (*selector).to_owned())
+                        .child(item.render(window, cx))
+                },
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn every_row_shares_one_icon_slot_height(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let rows = vec![
+            (
+                "shell-probe-import",
+                ShellSelectItem::import_action(crate::display::UiLanguage::ZhCn),
+            ),
+            (
+                "shell-probe-brand",
+                ShellSelectItem::new("pwsh".to_owned(), "PowerShell 7".to_owned(), 1.0),
+            ),
+            ("shell-probe-glyph", ShellSelectItem::new("zsh".to_owned(), "Zsh".to_owned(), 1.0)),
+        ];
+        let (_, cx) = cx.add_window_view(|_, _| ShellRowProbe { rows });
+        let heights: Vec<f32> = ["shell-probe-import", "shell-probe-brand", "shell-probe-glyph"]
+            .iter()
+            .map(|selector| {
+                f32::from(cx.debug_bounds(selector).expect("shell row bounds").size.height)
+            })
+            .collect();
+        assert_eq!(heights[1], heights[2], "品牌图标行与字形回落行必须等高: {heights:?}");
+        assert_eq!(heights[1], SHELL_ROW_ICON_SIZE, "普通行的图标槽即整行高度: {heights:?}");
+        assert_eq!(
+            heights[0], heights[1],
+            "导入行和 Shell 行必须等高，搜索改变首行时不得改变行距: {heights:?}"
+        );
+    }
+}

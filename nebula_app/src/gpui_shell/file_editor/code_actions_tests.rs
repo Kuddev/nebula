@@ -24,6 +24,18 @@ fn open(path: PathBuf, cx: &mut TestAppContext) -> (Entity<TextFileView>, Visual
     (file.unwrap(), window.clone())
 }
 
+fn press(key: &str, cx: &mut VisualTestContext) {
+    let keystroke = gpui::Keystroke::parse(key).unwrap();
+    cx.simulate_event(gpui::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    // Div's keyboard click is committed on release. simulate_keystrokes only
+    // sends KeyDown, which cannot exercise the real click lifecycle.
+    cx.simulate_event(gpui::KeyUpEvent { keystroke });
+}
+
 #[gpui::test]
 fn picker_trigger_popup_search_and_rows_keep_html_geometry(cx: &mut TestAppContext) {
     let directory = tempfile::tempdir().unwrap();
@@ -103,9 +115,15 @@ fn language_picker_keeps_mouse_and_keyboard_activation_distinct(cx: &mut TestApp
     // Closing by Escape restores the trigger focus. Enter must then activate
     // the same control through its keyboard click path, not through a mouse
     // focus side effect.
-    cx.simulate_keystrokes("escape");
+    press("escape", &mut cx);
     assert!(cx.update(|window, _| window.last_input_was_keyboard()));
-    cx.simulate_keystrokes("enter");
+    press("enter", &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("markdown-language-popup").is_some());
+    press("escape", &mut cx);
+    press("space", &mut cx);
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });

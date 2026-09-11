@@ -4,6 +4,85 @@ Every release entry is provided in English and Simplified Chinese.
 
 每个版本条目均同时提供英文和简体中文说明。
 
+## 1.7.0 - 2026-09-11
+
+### English
+
+#### Added
+
+- Added an AI message toast switch in Settings → Terminal → Alerts. Turning it off dismisses in-app AI cards and suppresses new ones, while retaining system notifications and tab status indicators. Addresses [#107](https://github.com/Kuddev/nebula/issues/107).
+- Added editable local and SSH text documents with save operations, changed-file checks, and preservation of unsaved text when a save fails.
+- Added reusable terminal layouts that open in a separate window and retain terminal launch settings without replaying command history.
+- Added dragging files from the system file manager into local and WSL terminals to insert quoted paths without executing them. Local files for SSH sessions can be uploaded through Remote Files. Addresses [#106](https://github.com/Kuddev/nebula/issues/106).
+- Expanded the built-in theme picker to 13 palettes, including Breeze, Mint, Catppuccin Mocha/Latte, and Glass light/dark variants. Glass uses static colors and does not automatically enable background blur.
+
+#### Fixed
+
+- Fixed the Default Shell setting and the new-terminal menu recommending PowerShell on macOS when no shell is configured. Both now use the same host-default resolver as the terminal backend. Contributed by [@YinBuLiao](https://github.com/YinBuLiao) in [#110](https://github.com/Kuddev/pebrel/pull/110).
+- Fixed mixed shell icons giving settings-menu rows different heights. Shells without a brand image also receive an icon in the new-terminal menu. Contributed by [@YinBuLiao](https://github.com/YinBuLiao) in [#111](https://github.com/Kuddev/pebrel/pull/111).
+- Shortened long and multi-line notification previews while retaining the original notification text in logs. Plain persistent notifications can be dismissed by clicking the card. Contributed in part by [@YinBuLiao](https://github.com/YinBuLiao) in [#112](https://github.com/Kuddev/pebrel/pull/112).
+- Improved foreground contrast for terminal text on light backgrounds while preserving color pairs that are already readable. Addresses [#104](https://github.com/Kuddev/nebula/issues/104).
+- Fixed the System language setting falling back to English when macOS applications launched from Finder have no locale environment variables.
+- Corrected Antigravity status detection so ordinary replies do not look like pending confirmations, while active question and file-review prompts are recognized as waiting for input. Addresses [#100](https://github.com/Kuddev/nebula/issues/100). Contributed by [@821869798](https://github.com/821869798) in [#101](https://github.com/Kuddev/pebrel/pull/101).
+
+#### Improved
+
+- Improved Markdown reading with bounded preview work and shared background formula rendering; unsupported or oversized expressions retain their source.
+- Added in-place feedback to code and formula copy controls, and kept document focus mode separate from operating-system fullscreen.
+- Made Git-ignored files and directories distinguishable with italic text in the file tree.
+
+Windows packages include an installer and portable ZIP. Linux x64 packages and macOS Apple Silicon/Intel DMGs retain their Preview designation. Molecular structure rendering remains disabled.
+
+### 中文
+
+#### 新增
+
+- 在“设置 → 终端 → 提醒”中新增“AI 消息弹窗”开关。关闭后收起已有的应用内 AI 卡片并停止显示新的卡片，同时保留系统通知和标签状态提示。对应 [#107](https://github.com/Kuddev/nebula/issues/107)。
+- 新增本地和 SSH 文本文档编辑，支持保存、文件外部变更检查，并在保存失败时保留未保存的内容。
+- 新增可复用的终端布局，在独立窗口中打开并保留终端启动设置，不重放命令历史。
+- 新增从系统文件管理器向本地和 WSL 终端拖入文件，插入加引号的路径而不执行；SSH 会话所需的本地文件可通过“远程文件”上传。对应 [#106](https://github.com/Kuddev/nebula/issues/106)。
+- 将内置主题选择器扩展为 13 套配色，包含 Breeze、Mint、Catppuccin Mocha／Latte，以及 Glass 浅色／深色。Glass 使用静态配色，不会自动开启背景模糊。
+
+#### 修复
+
+- 修复 macOS 未配置 Shell 时，“默认 Shell”设置和新建终端菜单推荐 PowerShell 的问题。两处现在与终端后端共用宿主默认 Shell 解析。由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#110](https://github.com/Kuddev/pebrel/pull/110) 中贡献。
+- 修复不同 Shell 图标使设置菜单行高不一致的问题；没有品牌图片的 Shell 在新建终端菜单中也会显示图标。由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#111](https://github.com/Kuddev/pebrel/pull/111) 中贡献。
+- 缩短长通知和多行通知的预览，同时在日志中保留通知原文。部分修复由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#112](https://github.com/Kuddev/pebrel/pull/112) 中贡献。
+- 改进浅色终端背景上的文字对比度，同时保留原本可读的配色。对应 [#104](https://github.com/Kuddev/nebula/issues/104)。
+- 修复 macOS 从 Finder 启动、缺少语言环境变量时，“跟随系统”回退到英文的问题。
+- 修正 Antigravity 状态识别：普通回答不再误报为等待确认，实际的问题选择框和文件审核框能识别为等待输入。对应 [#100](https://github.com/Kuddev/nebula/issues/100)。由 [@821869798](https://github.com/821869798) 在 [#101](https://github.com/Kuddev/pebrel/pull/101) 中贡献。
+
+#### 改进
+
+- 改进 Markdown 阅读，限制预览处理量，并共享后台公式渲染；不支持或超限的表达式保留源码。
+- 为代码和公式复制控件加入就地反馈，并将文档专注模式与系统全屏分开。
+- 文件树中被 Git 忽略的文件和目录使用斜体显示，便于区分。
+
+Windows 提供安装器和 ZIP 便携包；Linux x64 包以及 macOS Apple Silicon／Intel DMG 继续标记为 Preview。分子结构渲染仍处于禁用状态。
+
+### Contributors
+
+<a href="https://github.com/YinBuLiao"><img src="https://github.com/YinBuLiao.png?size=96" width="64" height="64" alt="@YinBuLiao avatar"></a><a href="https://github.com/821869798"><img src="https://github.com/821869798.png?size=96" width="64" height="64" alt="@821869798 avatar"></a><a href="https://github.com/Kuddev"><img src="https://github.com/Kuddev.png?size=96" width="64" height="64" alt="@Kuddev avatar"></a>
+
+**[@YinBuLiao](https://github.com/YinBuLiao)** - Contributed host-default shell selection, consistent shell icons and spacing, and bounded notification previews. / 贡献宿主默认 Shell 选择、统一的 Shell 图标与间距，以及通知预览限幅。（[#110](https://github.com/Kuddev/pebrel/pull/110)、[#111](https://github.com/Kuddev/pebrel/pull/111)、[#112](https://github.com/Kuddev/pebrel/pull/112)）
+
+**[@821869798](https://github.com/821869798)** - Corrected Antigravity confirmation and question-state detection. / 修正 Antigravity 确认与问题选择状态识别。（[#101](https://github.com/Kuddev/pebrel/pull/101)）
+
+**[@Kuddev](https://github.com/Kuddev)** - Added document and layout workflows, the AI message toast preference, and release integration fixes. / 完成文档与布局工作流、AI 消息弹窗设置及发布整合修复。
+
+---
+
+**SHA256**
+
+- `Pebrel-v1.7.0-windows-x64.zip`: `PENDING FINAL BUILD`
+- `Pebrel-v1.7.0-windows-x64-setup.exe`: `PENDING FINAL BUILD`
+- `NebulaTerminal-1.7.0-windows-x64-setup.exe`: `PENDING FINAL BUILD`
+- `Pebrel-v1.7.0-linux-x64-preview.AppImage`: `PENDING FINAL BUILD`
+- `Pebrel-v1.7.0-linux-x64-preview.deb`: `PENDING FINAL BUILD`
+- `Pebrel-v1.7.0-linux-x64-preview.tar.gz`: `PENDING FINAL BUILD`
+- `Pebrel-v1.7.0-macos-arm64-preview.dmg`: `PENDING FINAL BUILD`
+- `Pebrel-v1.7.0-macos-x64-preview.dmg`: `PENDING FINAL BUILD`
+
 ## 1.6.0 - 2026-09-07
 
 ### English

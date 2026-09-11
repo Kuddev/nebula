@@ -63,6 +63,8 @@ mod remote_files;
 mod residency;
 mod send_to_chat;
 mod session_persistence;
+mod shell_picker;
+use shell_picker::shell_palette_rows;
 mod settings_navigation;
 mod sidebar;
 mod ssh_dialog;
@@ -767,89 +769,6 @@ fn new_tab_insert_index(
 
 fn settings_should_fold_sidebar(tabs_position: nebula_settings::TabsPositionName) -> bool {
     tabs_position == nebula_settings::TabsPositionName::Sidebar
-}
-
-/// 新建终端弹窗的行：已检测 shell + SSH 主机，分组对照旧壳
-/// `CommandPalette::open_profiles`（推荐 / 所有 Shell / SSH 主机）。
-/// 三点菜单与 Ctrl+K 打开的是这份列表，不是通用命令面板。
-fn shell_palette_rows(
-    shells: Vec<crate::shell_detect::DetectedShell>,
-    profiles: Vec<crate::config::ui_config::Profile>,
-    ssh_hosts: impl IntoIterator<Item = String>,
-    default_shell_id: &str,
-    language: crate::display::UiLanguage,
-    scale_factor: f32,
-) -> Vec<WorkspacePaletteRow> {
-    const SHELL_ICON_PX: f32 = 22.0;
-    let recommended = language.pick("推荐", "Recommended");
-    let all_shells = language.pick("所有 Shell", "All shells");
-    let ssh_group = language.pick("SSH 主机", "SSH hosts");
-    let mut rows: Vec<WorkspacePaletteRow> = shells
-        .into_iter()
-        .map(|shell| {
-            let is_default = shell.id == default_shell_id;
-            WorkspacePaletteRow {
-                group_order: if is_default { 0 } else { 1 },
-                group: if is_default { recommended.to_owned() } else { all_shells.to_owned() },
-                label: shell.name.clone(),
-                hint: shell.program.clone(),
-                hint_style: WorkspacePaletteHintStyle::Metadata,
-                search: format!("{} {} shell profile", shell.name, shell.id).to_lowercase(),
-                icon: crate::gpui_shell::widgets::shell_brand_image(
-                    &shell.id,
-                    SHELL_ICON_PX,
-                    scale_factor,
-                ),
-                icon_glyph: None,
-                icon_path: None,
-                action: WorkspacePaletteAction::LaunchShell(shell),
-            }
-        })
-        .collect();
-    rows.extend(profiles.into_iter().filter_map(|profile| {
-        let id = profile.settings_id()?;
-        let is_default = id.eq_ignore_ascii_case(default_shell_id);
-        let icon_id = profile.shell_id.as_deref().unwrap_or(&id);
-        let icon =
-            crate::gpui_shell::widgets::shell_brand_image(icon_id, SHELL_ICON_PX, scale_factor);
-        let label = profile.name.clone();
-        let hint = profile.command.clone();
-        Some(WorkspacePaletteRow {
-            group_order: if is_default { 0 } else { 1 },
-            group: if is_default { recommended.to_owned() } else { all_shells.to_owned() },
-            search: format!("{} {} {} shell profile", profile.name, id, profile.command)
-                .to_lowercase(),
-            label,
-            hint,
-            hint_style: WorkspacePaletteHintStyle::Metadata,
-            action: WorkspacePaletteAction::LaunchProfile(profile),
-            icon,
-            icon_glyph: None,
-            icon_path: None,
-        })
-    }));
-    if let Some(position) = rows.iter().position(|row| row.group_order == 0) {
-        let default_row = rows.remove(position);
-        rows.insert(0, default_row);
-    }
-    let ssh_icons = ssh_host_icon_ids(&crate::display::nebula_data_dir());
-    rows.extend(ssh_hosts.into_iter().map(|host| {
-        let glyph =
-            crate::display::ui::os_icons::resolve(ssh_icons.get(&host).map(String::as_str)).glyph;
-        WorkspacePaletteRow {
-            group_order: 2,
-            group: ssh_group.to_owned(),
-            label: host.clone(),
-            hint: "SSH".to_owned(),
-            hint_style: WorkspacePaletteHintStyle::Metadata,
-            search: format!("{host} ssh host remote lianjie 连接").to_lowercase(),
-            action: WorkspacePaletteAction::LaunchSshHost(host),
-            icon: None,
-            icon_glyph: Some(glyph),
-            icon_path: None,
-        }
-    }));
-    rows
 }
 
 fn ssh_host_icon_ids(data_dir: &Path) -> std::collections::HashMap<String, String> {
@@ -2964,10 +2883,10 @@ impl NebulaWorkspace {
     /// 三点 / Ctrl+K：旧壳 `NewTabMenu` → `open_shell_menu` → `PaletteMode::Profiles`。
     fn open_shell_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_manager_open = false;
-        let default_shell_id = cx
-            .try_global::<crate::gpui_shell::config::Settings>()
-            .and_then(|settings| settings.shell_id.clone())
-            .unwrap_or_else(|| "powershell".to_owned());
+        let default_shell_id = crate::platform::shell::effective_shell_id(
+            cx.try_global::<crate::gpui_shell::config::Settings>()
+                .and_then(|settings| settings.shell_id.as_deref()),
+        );
         let language = workspace_ui_language();
         let rows = shell_palette_rows(
             crate::shell_detect::detect_shells(),

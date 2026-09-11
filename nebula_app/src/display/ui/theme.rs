@@ -1007,8 +1007,14 @@ mod tests {
         assert_eq!(nord.accent, crate::display::color::Rgb::new(0x88, 0xc0, 0xd0));
 
         let paper = NebulaTheme::Paper.skin();
-        assert_eq!(paper.panel, crate::renderer::ui::Rgba::new(0xf5, 0xf4, 0xf0, 255));
-        assert_eq!(paper.card, crate::renderer::ui::Rgba::new(0xfc, 0xfb, 0xf9, 255));
+        // Floating panels use the reviewed content background; the outer shell
+        // keeps its separate warm-gray token.
+        assert_eq!(paper.panel, crate::renderer::ui::Rgba::new(0xfc, 0xfb, 0xf9, 255));
+        assert_eq!(paper.card, crate::renderer::ui::Rgba::new(0xe9, 0xe8, 0xe1, 255));
+        assert_eq!(
+            NebulaTheme::Paper.palette().panel,
+            crate::renderer::ui::Rgba::new(0xf5, 0xf4, 0xf0, 255)
+        );
         assert_eq!(paper.accent, crate::display::color::Rgb::new(0x2b, 0x5a, 0x38));
     }
 }

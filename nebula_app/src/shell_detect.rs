@@ -94,6 +94,12 @@ impl DetectedShell {
 /// Nerd Font glyph for a shell id — shared by detected shells and the settings
 /// row so a saved `shell=<id>` always draws the same mark. WSL distro ids carry
 /// a `wsl:` prefix; everything else matches whole.
+///
+/// Shells without brand artwork (zsh, sh, dash, csh, ksh, tcsh…) all share the
+/// one `cod-terminal` codepoint. Different Nerd Font glyphs carry very
+/// different ink for the same em (dev-terminal is ~0.7 em, codicon ~0.9), so
+/// mixing them in one dropdown renders at visibly different sizes; a single
+/// codepoint is what makes "every icon the same size" true by construction.
 pub fn icon_for_id(id: &str) -> &'static str {
     let id = profile_shell_id(id).unwrap_or(id).to_ascii_lowercase();
     if id.starts_with("wsl") {
@@ -102,11 +108,16 @@ pub fn icon_for_id(id: &str) -> &'static str {
     match id.as_str() {
         "pwsh" | "powershell" => "\u{ebc7}", // codicon terminal-powershell
         "cmd" => "\u{ebc4}",                 // codicon terminal-cmd
-        "bash" | "git-bash" | "gitbash" | "zsh" | "sh" | "dash" => "\u{e795}", // devicon bash/terminal
-        "fish" | "nu" => "\u{f489}", // generic terminal glyph
-        _ => "\u{ea85}",             // codicon terminal (fallback)
+        _ => "\u{ea85}",                     // codicon terminal (every other shell)
     }
 }
+
+/// 回落字形相对图标槽边长的字号系数。
+///
+/// 品牌 PNG 是从矢量图按 12% 安全边距栅格化的，可见部分约为自身边长的
+/// 0.77；`icon_for_id` 返回的 codicon terminal 墨迹约 0.88 em。两者乘上这
+/// 个系数之后才在视觉上是同一个尺寸——不乘就会「有的图标大、有的小」。
+pub const FALLBACK_ICON_SCALE: f32 = 0.88;
 
 /// Full-color brand icon (embedded PNG, rasterized from vector artwork with
 /// a 12% safe margin; see THIRD-PARTY-NOTICES) for a shell id — the terminal picker draws this textured
@@ -1058,6 +1069,21 @@ mod tests {
         let profile_key = "profile:pwsh|pwsh-1234";
         assert_eq!(icon_for_id(profile_key), icon_for_id("pwsh"));
         assert!(color_icon_png(profile_key).is_some());
+    }
+
+    /// 回归锁：没有品牌贴图的 shell 必须共用同一个字形码位。下拉把它们排在同
+    /// 一槽位、同一字号；混用不同 Nerd 码位时墨迹大小差很多（dev-terminal
+    /// 约 0.7 em，codicon 约 0.9），看起来就是「有的图标大、有的小」。
+    #[test]
+    fn fallback_shell_marks_share_one_glyph_so_they_render_at_one_size() {
+        let expected = icon_for_id("zsh");
+        for id in ["zsh", "sh", "dash", "csh", "ksh", "tcsh", "fish", "nu", "unknown-shell"] {
+            assert_eq!(icon_for_id(id), expected, "`{id}` 的回落字形必须与其它 shell 一致");
+        }
+        // 有品牌贴图的仍然保留各自的字形：贴图取不到时（导入的 profile 家族）
+        // 也不该和 POSIX shell 混成同一个印记。
+        assert_ne!(icon_for_id("pwsh"), expected);
+        assert_ne!(icon_for_id("cmd"), expected);
     }
 
     #[cfg(windows)]

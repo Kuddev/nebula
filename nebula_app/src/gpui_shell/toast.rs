@@ -102,6 +102,11 @@ fn is_duplicate(text: &str) -> bool {
 }
 
 fn note(kind: ToastKind, text: String) -> Notification {
+    // 通知栏是「一眼带过」的层。正文先收短：模型回合完成的正文可能是整段
+    // 回答（OSC 9 更是无界），不设上限时按固定宽度排出来比窗口还高，锚在
+    // 右下就会整条溢出屏幕、把关闭按钮顶到看不见的地方。完整原文仍在日志
+    // 与终端的「阅读 / 原文」里。
+    let text = crate::notify::clamp_toast_body(&text);
     let note = match kind {
         ToastKind::Info => Notification::info(text),
         ToastKind::Success => Notification::success(text),
@@ -155,6 +160,9 @@ pub fn render_layer(window: &mut Window, cx: &mut App) -> Option<AnyElement> {
             .items_end()
             .justify_end()
             .p(px(20.0))
+            // 约束动画和阴影的绘制范围。裁剪本身不限制卡片/堆叠高度，
+            // 关闭按钮是否可达仍须由窗口尺寸与真实布局回归验证。
+            .overflow_hidden()
             // 用全视口透明宿主明确右下锚点；宿主不注册命中，只有实际
             // Notification 卡片会 occlude/接收鼠标，周围终端仍可正常点击。
             .child(v_flex().items_end().gap_2().children(items))
@@ -174,13 +182,17 @@ pub fn toast(window: &mut Window, cx: &mut App, kind: ToastKind, text: impl Into
 
 /// 驻留一条消息（消息栏层）：停留远长于 toast，但**有上限**，见
 /// [`BANNER_TTL`]。用于「值得驻留」的事——没什么值得驻留的请用 [`toast`]。
+///
+/// 这里也挂一个空的 `on_click`：组件库的点击包装会先 `dismiss` 再调回调，
+/// 所以整张卡片点一下就消失。驻留消息的关闭按钮只在悬停时出现，没有这条
+/// 路径的话「怎么都关不掉」就是字面事实。
 pub fn banner(window: &mut Window, cx: &mut App, kind: ToastKind, text: impl Into<String>) {
     let text = text.into();
     if text.trim().is_empty() {
         return;
     }
     log::warn!("banner [{kind:?}]: {text}");
-    push_banner(window, cx, note(kind, text), false);
+    push_banner(window, cx, note(kind, text).on_click(|_, _, _| {}), false);
 }
 
 pub(crate) fn banner_for_pane(

@@ -15,12 +15,19 @@ DOCUMENTS = (
 class GovernanceTests(unittest.TestCase):
     def ignored_paths(self, paths):
         result = subprocess.run(
-            ["git", "check-ignore", "--no-index", "--stdin"], cwd=ROOT,
-            input="\n".join(paths) + "\n", text=True, encoding="utf-8",
+            ["git", "check-ignore", "--no-index", "--stdin", "-z"], cwd=ROOT,
+            # Binary NUL framing avoids Windows newline conversion and Git's
+            # quoted-path output; both would change the path being tested.
+            input=b"\0".join(path.encode("utf-8") for path in paths) + b"\0",
             capture_output=True,
         )
         self.assertIn(result.returncode, (0, 1), result.stderr)
-        return set(result.stdout.splitlines())
+        return {path.decode("utf-8") for path in result.stdout.split(b"\0") if path}
+
+    def test_git_path_transport_preserves_unicode_and_control_characters(self):
+        ignored = ("tmp/中文 空格.txt", 'tmp/quoted"name.txt', "tmp/line\nbreak.txt", "tmp/cr\rname.txt")
+        paths = (*ignored, "docs/architecture.md")
+        self.assertEqual(self.ignored_paths(paths), set(ignored))
 
     def test_contributor_documents_exist_and_are_not_ignored(self):
         for name in DOCUMENTS:

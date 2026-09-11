@@ -66,7 +66,8 @@ impl NebulaWorkspace {
             } else {
                 None
             };
-            let (title, body) = notification.toast_text();
+            // Log the original message before the banner creates a bounded preview.
+            let (title, body) = notification.raw_toast_text();
             let kind = if attention {
                 crate::display::ToastKind::Warning
             } else {

@@ -310,6 +310,7 @@ fn render_language_picker(
             anchored().snap_to_window_with_margin(px(8.0)).child(
                 div()
                     .id("markdown-language-popup")
+                    .debug_selector(|| "markdown-language-popup".to_owned())
                     .occlude()
                     .w(px(224.0))
                     .max_h(px(280.0))

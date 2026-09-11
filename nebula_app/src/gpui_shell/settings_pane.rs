@@ -56,6 +56,8 @@ mod keymap;
 mod localization;
 mod navigation;
 mod shell_picker;
+#[cfg(all(test, feature = "gpui-test-support"))]
+mod shell_picker_tests;
 mod status;
 
 use localization::*;
@@ -547,7 +549,7 @@ impl SettingsPane {
 
     /// 按当前设置值重建下拉候选（导入后新增行即时可见）。
     fn refresh_shell_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.runtime.shell.clone().unwrap_or_else(|| "powershell".into());
+        let current = crate::platform::shell::effective_shell_id(self.runtime.shell.as_deref());
         let (items, selected) = shell_select_items(
             &current,
             window.scale_factor().max(0.5),
@@ -561,7 +563,7 @@ impl SettingsPane {
 
     /// 把下拉选中项拨回设置里真正生效的 shell。
     fn restore_shell_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self.runtime.shell.clone().unwrap_or_else(|| "powershell".into());
+        let current = crate::platform::shell::effective_shell_id(self.runtime.shell.as_deref());
         self.shell_select.update(cx, |state, cx| {
             state.set_selected_value(&current, window, cx);
         });
@@ -711,6 +713,7 @@ impl SettingsPane {
                 this.toggle(key, *checked, window, cx);
             }),
         );
+        let control = div().debug_selector(move || format!("nebula-switch-{key}")).child(control);
         self.maybe_marked(key, label, desc, control, cx)
     }
 

@@ -46,7 +46,7 @@ impl SettingsPane {
 
         let cursor_current =
             runtime.cursor_shape.map(|shape| shape.settings_value()).unwrap_or("beam");
-        let shell_current = runtime.shell.clone().unwrap_or_else(|| "powershell".into());
+        let shell_current = crate::platform::shell::effective_shell_id(runtime.shell.as_deref());
 
         add_select(
             "language",

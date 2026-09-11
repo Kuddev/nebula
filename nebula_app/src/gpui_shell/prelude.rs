@@ -189,7 +189,12 @@ mod tests {
 
     #[gpui::test]
     fn confirm_dialog_mouse_buttons_dispatch_cancel_and_confirm(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            // Test button dispatch at the settled layout. The dialog's slide-in
+            // animation otherwise moves the hit target between mouse down/up.
+            cx.set_reduce_motion(true);
+        });
         let (_, cx) = cx.add_window_view(|window, cx| {
             let view = cx.new(|_| ConfirmDialogProbe);
             Root::new(view, window, cx)
