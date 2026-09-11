@@ -106,10 +106,38 @@ pub enum Notification {
     AiTurn { program: String, message: Option<String>, attention: bool },
 }
 
+/// Longest notification body any shell may render.
+///
+/// A toast/banner is a glance layer, not a reader. Codex's turn-complete
+/// notification carries the model's `last-assistant-message` (bounded only at
+/// 4 000 chars in `ai_hook`), and an OSC 9 body is unbounded; rendered at a
+/// fixed width that becomes a card taller than the window. Anchored to the
+/// bottom-right it then overflows off the top, taking its close button out of
+/// reach, and sits there for the whole banner TTL while covering whatever is
+/// underneath (including a split pane). Only the preview is bounded here — the
+/// full text stays in the log and in the terminal's answer reader.
+pub(crate) const TOAST_BODY_MAX_CHARS: usize = 160;
+
+/// Clamp a notification body to [`TOAST_BODY_MAX_CHARS`], ending with `…` when
+/// anything was dropped. The ellipsis replaces the last kept character, so the
+/// result never exceeds the limit and clamping again is a no-op.
+pub(crate) fn clamp_toast_body(body: &str) -> String {
+    if body.chars().count() <= TOAST_BODY_MAX_CHARS {
+        return body.to_owned();
+    }
+    let head: String = body.chars().take(TOAST_BODY_MAX_CHARS - 1).collect();
+    format!("{head}…")
+}
+
 impl Notification {
     /// Toast title + body. Title names the source ("Pebrel" or the program);
-    /// body carries the human detail.
+    /// body carries the human detail, bounded to a glanceable length.
     pub(crate) fn toast_text(&self) -> (String, String) {
+        let (title, body) = self.raw_toast_text();
+        (title, clamp_toast_body(&body))
+    }
+
+    fn raw_toast_text(&self) -> (String, String) {
         match self {
             Self::Bell { program } => match program {
                 Some(p) => (p.clone(), "任务完成，等待输入".to_owned()),
@@ -301,6 +329,32 @@ mod delivery_tests {
         assert!(
             !Notification::Text { body: "permission".to_owned(), program: None }.is_attention()
         );
+    }
+
+    /// 回归锁：一篇很长的模型回答不能变成一张撑破窗口的通知卡。正文只保留
+    /// 一眼能读的预览，其余在日志和终端「原文」里。
+    #[test]
+    fn oversized_notification_bodies_are_clamped_to_a_glanceable_preview() {
+        let long = "回答正文。".repeat(1_000);
+        let done = Notification::AiTurn {
+            program: "codex".to_owned(),
+            message: Some(long.clone()),
+            attention: false,
+        };
+        let (title, body) = done.toast_text();
+        assert_eq!(title, "codex");
+        assert!(body.chars().count() <= TOAST_BODY_MAX_CHARS, "正文必须被收短: {}", body.len());
+        assert!(body.ends_with('…'), "被截断的正文要以省略号收尾");
+        assert!(long.starts_with(body.trim_end_matches('…')), "保留的是原文开头");
+
+        // OSC 9 原文同样无界，走 Text 分支也要收短。
+        let (_, osc) =
+            Notification::Text { body: long, program: Some("claude".to_owned()) }.toast_text();
+        assert!(osc.chars().count() <= TOAST_BODY_MAX_CHARS);
+
+        // 幂等：已经收短过的正文再收一次不会多出第二个省略号。
+        let once = clamp_toast_body(&"x".repeat(1_000));
+        assert_eq!(clamp_toast_body(&once), once);
     }
 
     #[cfg(feature = "gpui-shell")]
