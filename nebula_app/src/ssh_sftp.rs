@@ -1,6 +1,14 @@
+#[path = "ssh_sftp/document.rs"]
+pub(crate) mod document;
+#[path = "ssh_sftp/export.rs"]
+pub(crate) mod export;
+#[path = "ssh_sftp/limits.rs"]
 pub(crate) mod limits;
+#[path = "ssh_sftp/remote_cwd.rs"]
 pub(crate) mod remote_cwd;
+#[path = "ssh_sftp/transaction.rs"]
 mod transaction;
+#[path = "ssh_sftp/transfer.rs"]
 mod transfer;
 
 use std::collections::HashSet;
@@ -102,6 +110,7 @@ pub enum SftpPhase {
     Ready,
     Working,
     Error,
+    Cancelled,
 }
 
 #[derive(Clone, Debug)]
@@ -382,6 +391,14 @@ impl SftpController {
         (self.wake)();
     }
 
+    pub(crate) fn cancellation_probe(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let current = lock(&self.task_control);
+        let expected = self.generation.load(Ordering::Acquire);
+        let control = current.clone();
+        let generation = self.generation.clone();
+        Arc::new(move || task_cancelled(&control, &generation, expected))
+    }
+
     fn start_job<J, F>(&self, phase: SftpPhase, progress: Option<TransferProgress>, job: J)
     where
         J: FnOnce(TaskContext) -> F + Send + 'static,
@@ -475,7 +492,7 @@ impl TransferObserver for TaskContext {
     }
 
     fn cancelled(&self) -> bool {
-        self.task_control.load(Ordering::Acquire) & CANCEL_REQUESTED != 0 || !self.is_current()
+        task_cancelled(&self.task_control, &self.generation, self.task_generation)
     }
 }
 
@@ -567,6 +584,11 @@ impl TaskContext {
                 state.error = None;
                 state.progress = None;
             },
+            Err(_) if self.cancelled() => {
+                state.phase = SftpPhase::Cancelled;
+                state.error = None;
+                state.progress = None;
+            },
             Err(err) => {
                 state.phase = SftpPhase::Error;
                 state.error = Some(err.to_string());
@@ -576,6 +598,11 @@ impl TaskContext {
         drop(state);
         (self.wake)();
     }
+}
+
+fn task_cancelled(control: &AtomicUsize, generation: &AtomicU64, expected: u64) -> bool {
+    control.load(Ordering::Acquire) & CANCEL_REQUESTED != 0
+        || generation.load(Ordering::Acquire) != expected
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

@@ -106,6 +106,18 @@ pub enum Notification {
 }
 
 impl Notification {
+    /// Source classification only. In-app preferences must not silence native
+    /// notifications or infer an AI source from arbitrary message text.
+    pub(crate) fn is_ai(&self) -> bool {
+        let program = match self {
+            Self::AiTurn { .. } => return true,
+            Self::Bell { program }
+            | Self::CommandDone { program, .. }
+            | Self::Text { program, .. } => program.as_deref(),
+        };
+        program.is_some_and(|program| crate::ai_agents::AgentKind::parse(program).is_some())
+    }
+
     /// Toast title + body. Title names the source ("Pebrel" or the program);
     /// body carries the human detail.
     pub(crate) fn toast_text(&self) -> (String, String) {
@@ -342,6 +354,54 @@ mod delivery_tests {
     use super::*;
 
     #[test]
+    fn every_registered_ai_is_recognized_for_bell_text_and_command_events() {
+        for agent in crate::ai_agents::AgentKind::ALL {
+            let program = Some(agent.slug().to_owned());
+            assert!(Notification::Bell { program: program.clone() }.is_ai());
+            assert!(
+                Notification::Text { body: "done".to_owned(), program: program.clone() }.is_ai()
+            );
+            assert!(
+                Notification::CommandDone { duration: Duration::from_secs(12), program }.is_ai()
+            );
+        }
+    }
+
+    #[test]
+    fn typed_ai_events_and_executable_aliases_keep_their_source_identity() {
+        for attention in [false, true] {
+            assert!(
+                Notification::AiTurn {
+                    program: "custom-agent".to_owned(),
+                    message: None,
+                    attention,
+                }
+                .is_ai()
+            );
+        }
+        for program in [r"C:\tools\CODEX.EXE", "/usr/bin/claude-code", "gemini-cli"] {
+            assert!(Notification::Bell { program: Some(program.to_owned()) }.is_ai());
+        }
+    }
+
+    #[test]
+    fn ordinary_notifications_are_not_classified_from_their_text() {
+        for program in [None, Some("cargo".to_owned()), Some("powershell".to_owned())] {
+            assert!(!Notification::Bell { program: program.clone() }.is_ai());
+            assert!(
+                !Notification::Text {
+                    body: "codex claude permission required".to_owned(),
+                    program: program.clone(),
+                }
+                .is_ai()
+            );
+            assert!(
+                !Notification::CommandDone { duration: Duration::from_secs(12), program }.is_ai()
+            );
+        }
+    }
+
+    #[test]
     fn pane_throttle_does_not_suppress_another_pane_or_attention() {
         let now = Instant::now();
         let mut throttle = PaneNotificationThrottle::default();
@@ -500,7 +560,7 @@ mod win {
         set_reg_sz(&subkey, "DisplayName", crate::brand::NAME)?;
         match ensure_icon_file(variant) {
             Some(icon) => set_reg_sz(&subkey, "IconUri", &icon.display().to_string())?,
-            None => log::debug!("notify: toast icon not materialized; banner shows no logo"),
+            None => return Err("could not materialize the notification icon".into()),
         }
         Ok(())
     }
@@ -513,11 +573,17 @@ mod win {
     fn ensure_icon_file(variant: nebula_settings::AppIconName) -> Option<PathBuf> {
         let bytes = crate::app_icon::png(variant, 256)?;
         let directory = crate::platform::dirs::data_dir();
-        let path = directory.join(format!("toast_icon-{}.png", variant.settings_value()));
+        // Windows caches the attribution icon separately from the body logo.
+        // A content-addressed URI invalidates both caches after artwork changes.
+        use sha2::{Digest as _, Sha256};
+        let digest = Sha256::digest(bytes.as_ref());
+        let fingerprint = digest[..12].iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let path =
+            directory.join(format!("pebrel-toast-{}-{fingerprint}.png", variant.settings_value()));
         let stale = std::fs::read(&path).ok().as_deref() != Some(bytes.as_ref());
         if stale {
             std::fs::create_dir_all(directory).ok()?;
-            std::fs::write(&path, bytes).ok()?;
+            crate::atomic_file::write(&path, bytes.as_ref()).ok()?;
         }
         Some(path)
     }

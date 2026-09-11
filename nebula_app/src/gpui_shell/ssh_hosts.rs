@@ -2,7 +2,7 @@
 //!
 //! 与旧壳读写同一份 `nebula_settings.txt` 的三个键（`saved_hosts` /
 //! `pinned_hosts` / `hidden_hosts`，逗号分隔），排序与隐藏策略复用
-//! `display::merge_ssh_hosts` 单一权威——两壳交替增删主机不会产生第二套
+//! `ssh_profiles::merge_host_sources` 单一权威——两壳交替增删主机不会产生第二套
 //! 次序。凭据（Credential Manager 条目）在这里**永不**触碰：删除主机只
 //! 动列表，连接路径的密码/私钥语义由 `ssh_session` 业务层负责。
 
@@ -18,6 +18,10 @@ pub struct SshHostLists {
     /// 隐藏的 `~/.ssh/config` 别名（Nebula 不改用户的 config 文件，
     /// 隐藏是对 config 源最强的"删除"）。
     pub hidden: Vec<String>,
+    /// Loaded on lifecycle changes, never while rendering individual host rows.
+    pub(crate) profiles: crate::ssh_profiles::SshProfiles,
+    pub(crate) configured: Vec<String>,
+    pub(crate) load_error: Option<String>,
 }
 
 fn parse_list(value: Option<&str>) -> Vec<String> {
@@ -33,7 +37,16 @@ fn parse_list(value: Option<&str>) -> Vec<String> {
 impl SshHostLists {
     pub fn load() -> Self {
         let raw = nebula_settings::RawSettings::load();
+        let (profiles, load_error) = match crate::ssh_profiles::SshProfiles::load(
+            &crate::display::nebula_data_dir().join("ssh_profiles.json"),
+        ) {
+            Ok(profiles) => (profiles, None),
+            Err(error) => (Default::default(), Some(error.to_string())),
+        };
         Self {
+            profiles,
+            load_error,
+            configured: crate::ssh::ssh_config_hosts(),
             saved: parse_list(raw.value("saved_hosts")),
             pinned: parse_list(raw.value("pinned_hosts")),
             hidden: parse_list(raw.value("hidden_hosts")),
@@ -42,12 +55,18 @@ impl SshHostLists {
 
     /// 展示顺序的单一权威（saved ∪ config − hidden，置顶浮头）。
     pub fn merged(&self) -> Vec<String> {
-        crate::display::merge_ssh_hosts(&self.saved, &self.pinned, &self.hidden)
+        crate::ssh_profiles::merge_host_sources(
+            &self.saved,
+            &self.pinned,
+            &self.hidden,
+            &self.configured,
+            self.profiles.destinations(),
+        )
     }
 
     /// 隐藏区（设置页"已隐藏"折叠列表的数据源）。
-    pub fn hidden_hosts(&self) -> &[String] {
-        &self.hidden
+    pub fn hidden_hosts(&self) -> Vec<String> {
+        self.hidden.iter().filter(|host| self.configured.contains(host)).cloned().collect()
     }
 
     pub fn is_pinned(&self, host: &str) -> bool {
@@ -56,7 +75,7 @@ impl SshHostLists {
 
     /// 该主机是否来自 `~/.ssh/config`（决定删除语义：隐藏 vs 移除）。
     pub fn is_from_config(&self, host: &str) -> bool {
-        crate::ssh::ssh_config_hosts().iter().any(|entry| entry == host)
+        self.configured.iter().any(|entry| entry == host)
     }
 
     /// 新增/提升一个保存的目的地（头插、去重、截断到容量上限）。
@@ -81,7 +100,9 @@ impl SshHostLists {
         let from_config = self.is_from_config(host);
         self.saved.retain(|entry| entry != host);
         self.pinned.retain(|entry| entry != host);
-        if from_config && !self.hidden.iter().any(|entry| entry == host) {
+        if (from_config || self.profiles.contains(host))
+            && !self.hidden.iter().any(|entry| entry == host)
+        {
             self.hidden.push(host.to_owned());
         }
     }
@@ -139,6 +160,7 @@ mod tests {
             saved: vec!["a@b".into(), "c@d".into()],
             pinned: vec!["a@b".into()],
             hidden: Vec::new(),
+            ..Default::default()
         };
         lists.remove("a@b");
         assert!(!lists.saved.iter().any(|entry| entry == "a@b"));

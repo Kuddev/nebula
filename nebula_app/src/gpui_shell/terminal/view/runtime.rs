@@ -27,7 +27,37 @@ fn progress_sidebar_activity(
 }
 
 impl TerminalView {
-    pub(super) fn apply_ssh_stage(
+    pub(crate) fn is_remote_session(&self) -> bool {
+        !self.suggest.suggest_env.is_this_machine()
+    }
+
+    /// Remote foreground identity comes from the terminal protocol/screen.
+    /// A host process snapshot cannot disprove work inside WSL or built-in SSH.
+    pub fn busy_process(&self) -> Option<String> {
+        let session = self.session.as_ref()?;
+        if self.exited.is_some()
+            || matches!(self.ssh_stage, Some(crate::ssh_session::SshStage::Failed(_)))
+        {
+            return None;
+        }
+        let remote = !self.suggest.suggest_env.is_this_machine();
+        let child = (session.shell_pid != 0)
+            .then(|| crate::process_tree::busy_child(session.shell_pid))
+            .flatten();
+        crate::process_tree::close_warning_process(
+            remote,
+            self.running_program.as_deref(),
+            child.as_deref(),
+        )
+    }
+
+    pub(super) fn invalidate_ai_session_probe(&mut self) {
+        self.ai_session_probe_epoch = self.ai_session_probe_epoch.wrapping_add(1);
+        self.ai_session_probe_pending = false;
+        self.last_ai_session_probe = None;
+    }
+
+    pub(in crate::gpui_shell::terminal) fn apply_ssh_stage(
         &mut self,
         stage: crate::ssh_session::SshStage,
         cx: &mut Context<Self>,
@@ -59,6 +89,7 @@ impl TerminalView {
         self.answers.close();
         let title_changed =
             self.running_program.take().is_some() || self.ai_session.take().is_some();
+        self.invalidate_ai_session_probe();
         self.primary_agent_pid = None;
         self.agent_status = crate::ai_agents::AgentStatus::Unknown;
         self.agent_status_source = crate::ai_agents::AgentStatusSource::Unknown;
@@ -626,6 +657,63 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Fill a missing Codex identity from the active rollout file. Hook events
+    /// remain authoritative; this only repairs panes whose Codex process was
+    /// already running before the hook was installed or before Nebula saw its
+    /// first event. The blocking probe is isolated on GPUI's background
+    /// executor and its result is accepted only for the same foreground epoch.
+    pub(super) fn probe_missing_codex_session(&mut self, cx: &mut Context<Self>) {
+        if self.exited.is_some()
+            || self.ai_session.is_some()
+            || self.ai_session_probe_pending
+            || !self
+                .running_program
+                .as_deref()
+                .and_then(crate::ai_agents::AgentKind::parse)
+                .is_some_and(|agent| agent == crate::ai_agents::AgentKind::Codex)
+        {
+            return;
+        }
+        if self
+            .last_ai_session_probe
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(2))
+        {
+            return;
+        }
+        let Some(exec_context) = self.exec_context.clone() else { return };
+        let epoch = self.ai_session_probe_epoch;
+        let pane_id = self.pane_id;
+        self.ai_session_probe_pending = true;
+        self.last_ai_session_probe = Some(std::time::Instant::now());
+        let work = cx.background_executor().spawn(async move {
+            crate::platform::ai_session_identity::probe_codex_session(pane_id, Some(&exec_context))
+        });
+        cx.spawn(async move |this, cx| {
+            let session_id = work.await;
+            let _ = this.update(cx, |view, cx| {
+                if !probe_result_is_current(
+                    view.ai_session_probe_epoch,
+                    epoch,
+                    view.ai_session.is_some(),
+                    view.running_program.as_deref(),
+                ) {
+                    return;
+                }
+                view.ai_session_probe_pending = false;
+                if let Some(session_id) = session_id {
+                    log::debug!("agent session identity from active rollout: pane={pane_id}");
+                    view.ai_session = Some(crate::display::AiSessionIdentity {
+                        source: "codex".to_owned(),
+                        session_id,
+                    });
+                    cx.emit(TerminalViewEvent::TitleChanged);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Queue a full shell command. Like cold resume, input may arrive before
     /// the first prompt; ConPTY preserves ordering until the shell reads it.
     pub fn run_command(&mut self, command: String, cx: &mut Context<Self>) {
@@ -861,6 +949,7 @@ impl TerminalView {
         // 进程树对账必须排在下面那道早退之前：身份认不出来就早退，等于让
         // 这个 pane 永远退出屏幕检测。
         self.reconcile_shell_activity(cx);
+        self.probe_missing_codex_session(cx);
         let Some(session) = &self.session else { return };
         let (prompt_restored, screen) = {
             let term = session.term.lock();
@@ -1037,6 +1126,9 @@ impl TerminalView {
     /// 那是脆弱推断：会话恢复、shell 别名、`npx codex` 这类间接启动都会让它
     /// 落空。进程树是客观事实，只是慢一拍——而慢一拍在 1 Hz 看门狗里无所谓。
     fn reconcile_shell_activity(&mut self, cx: &mut Context<Self>) {
+        if !self.suggest.suggest_env.is_this_machine() {
+            return;
+        }
         if !self.command_running {
             self.command_running_disproved = false;
             return;
@@ -1129,6 +1221,19 @@ impl TerminalView {
     }
 }
 
+fn probe_result_is_current(
+    current_epoch: u64,
+    result_epoch: u64,
+    has_session: bool,
+    running_program: Option<&str>,
+) -> bool {
+    current_epoch == result_epoch
+        && !has_session
+        && running_program
+            .and_then(crate::ai_agents::AgentKind::parse)
+            .is_some_and(|agent| agent == crate::ai_agents::AgentKind::Codex)
+}
+
 /// 一次写入是谁发起的。安全判定不看写了什么，看谁让写的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputOrigin {
@@ -1166,8 +1271,8 @@ fn runtime_chat_agent_kind(
 #[cfg(test)]
 mod tests {
     use super::{
-        InputOrigin, SidebarActivity, local_context_refusal, progress_sidebar_activity,
-        runtime_chat_agent_kind,
+        InputOrigin, SidebarActivity, local_context_refusal, probe_result_is_current,
+        progress_sidebar_activity, runtime_chat_agent_kind,
     };
 
     #[test]
@@ -1213,6 +1318,14 @@ mod tests {
             runtime_chat_agent_kind(Some("codex"), false),
             Some(crate::ai_agents::AgentKind::Codex)
         );
+    }
+
+    #[test]
+    fn a_probe_from_an_older_command_cannot_claim_a_new_codex_process() {
+        assert!(!probe_result_is_current(8, 7, false, Some("codex")));
+        assert!(!probe_result_is_current(8, 8, true, Some("codex")));
+        assert!(!probe_result_is_current(8, 8, false, Some("claude")));
+        assert!(probe_result_is_current(8, 8, false, Some("codex")));
     }
 
     /// 强制层的判据：本地内容不得由程序自动送进远端 pane，用户当场选中则放行。

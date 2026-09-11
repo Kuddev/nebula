@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 mod enumerate;
+mod gitignore;
 mod icons;
 #[cfg(feature = "legacy-shell")]
 mod render;
@@ -34,6 +35,7 @@ mod vcs;
 // 子模块的项一律 `pub(crate)`：本 crate 是 bin，没有下游用户，所以拆分不必
 // 把内部实现抬到 `pub`。glob 转发让 `display::side_panel::X` 这层路径不变。
 pub(crate) use enumerate::*;
+pub(crate) use gitignore::*;
 pub(crate) use icons::*;
 #[cfg(feature = "legacy-shell")]
 pub(crate) use render::*;
@@ -246,18 +248,99 @@ impl FileDrag {
 /// 参数是字符串而不是 `Path`：WSL 行要写的是**来宾**路径（`/home/x`），它在
 /// 宿主上不是一个有效的 `Path`，转一圈只会被 Windows 的路径语义改写。
 pub fn drop_text_for_path(path: &str) -> Option<Vec<u8>> {
-    let mut text = path.to_owned();
-    // Unix permits control characters (including CR/LF) in file names.
-    // Sending those bytes to a PTY could execute input despite the drop
-    // contract explicitly requiring paste-only behaviour.
-    if text.chars().any(char::is_control) {
+    drop_text_for_paths(&[path.to_owned()], PathQuote::CommandPrompt).map(String::into_bytes)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum PathQuote {
+    CommandPrompt,
+    PowerShell,
+    Posix,
+}
+
+/// Paste-only path arguments. Reject control bytes and CMD expansion rather than
+/// letting filenames become a second command when the user eventually submits.
+pub fn drop_text_for_paths(paths: &[String], shell: PathQuote) -> Option<String> {
+    if paths.is_empty() || paths.len() > 32 {
         return None;
     }
-    if text.contains(char::is_whitespace) {
-        text = format!("\"{text}\"");
+    let mut output = String::new();
+    for path in paths {
+        if path.is_empty() || path.chars().any(char::is_control) {
+            return None;
+        }
+        let safe = path.chars().all(|ch| {
+            ch.is_alphanumeric()
+                || "/._-:".contains(ch)
+                || matches!(shell, PathQuote::CommandPrompt | PathQuote::PowerShell) && ch == '\\'
+        });
+        match shell {
+            PathQuote::CommandPrompt => {
+                if path.contains(['"', '%', '!']) {
+                    return None;
+                }
+                if safe {
+                    output.push_str(path);
+                } else {
+                    output.push('"');
+                    output.push_str(path);
+                    output.push('"');
+                }
+            },
+            PathQuote::PowerShell if !safe => {
+                output.push('\'');
+                output.push_str(&path.replace('\'', "''"));
+                output.push('\'');
+            },
+            PathQuote::Posix if !safe => {
+                output.push('\'');
+                output.push_str(&path.replace('\'', "'\\''"));
+                output.push('\'');
+            },
+            _ => output.push_str(path),
+        }
+        output.push(' ');
+        if output.len() > 64 * 1024 {
+            return None;
+        }
     }
-    text.push(' ');
-    Some(text.into_bytes())
+    Some(output)
+}
+
+#[cfg(test)]
+mod dropped_path_tests {
+    use super::{PathQuote, drop_text_for_paths};
+
+    #[test]
+    fn paths_are_quoted_for_the_target_shell_without_submitting() {
+        assert_eq!(
+            drop_text_for_paths(&["D:\\研究资料\\a b.txt".into()], PathQuote::PowerShell).unwrap(),
+            "'D:\\研究资料\\a b.txt' "
+        );
+        assert_eq!(
+            drop_text_for_paths(&["/tmp/it's $(touch nope).txt".into()], PathQuote::Posix).unwrap(),
+            "'/tmp/it'\\''s $(touch nope).txt' "
+        );
+        assert_eq!(
+            drop_text_for_paths(
+                &["C:\\a&b.txt".into(), "C:\\two.txt".into()],
+                PathQuote::CommandPrompt
+            )
+            .unwrap(),
+            "\"C:\\a&b.txt\" C:\\two.txt "
+        );
+    }
+
+    #[test]
+    fn unsafe_or_unbounded_path_lists_are_rejected() {
+        for path in ["/tmp/a\ncommand", "/tmp/a\u{1b}[200~", ""] {
+            assert!(drop_text_for_paths(&[path.into()], PathQuote::Posix).is_none());
+        }
+        assert!(
+            drop_text_for_paths(&["C:\\%PATH%.txt".into()], PathQuote::CommandPrompt).is_none()
+        );
+        assert!(drop_text_for_paths(&vec!["a".into(); 33], PathQuote::PowerShell).is_none());
+    }
 }
 
 /// WSL 子命令预算。

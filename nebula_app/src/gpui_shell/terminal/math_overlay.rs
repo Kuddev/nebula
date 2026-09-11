@@ -37,6 +37,8 @@ use crate::gpui_shell::math_view;
 #[derive(Default)]
 pub struct MathOverlay {
     state: TerminalMathState,
+    resources_bound: bool,
+    pub(super) molecules: super::molecule_overlay::MoleculeOverlay,
 }
 
 /// 一条通过几何计划的公式：源码 + 绘制计划（坐标系 = 网格局部逻辑 px）。
@@ -174,6 +176,23 @@ fn plan_color(plan: &OverlayDrawPlan) -> Rgba {
 impl MathOverlay {
     /// session 暂不可用时也要立即清掉上一帧投影；输入命中发生在 paint 之外，
     /// 不能等下一次有 term 的扫描再修正旧坐标。
+    pub(super) fn bind_resources(&mut self, cx: &App) {
+        if self.resources_bound {
+            return;
+        }
+        let engine = super::super::scientific_render::assets(cx);
+        self.state.set_layout_resolver(Arc::new(move |source, size, points, display| {
+            engine.layout(super::super::scientific_render::FormulaKey::new(
+                source.into(),
+                display,
+                false,
+                size,
+                points,
+            ))
+        }));
+        self.resources_bound = true;
+    }
+
     pub fn clear_frame(&mut self, size: &SizeInfo, pixels_per_point: f32) -> PendingMathFrame {
         self.state.update_projection(&[], &[], false);
         PendingMathFrame::empty(*size, pixels_per_point)
@@ -817,6 +836,56 @@ mod tests {
         assert!(frame.formulas[0].plan.display_style);
         assert!(frame.covers(0, 0));
         assert!(frame.covers(2, 0));
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    #[gpui::test]
+    fn cli_screenshot_formulas_reach_async_bitmaps_without_new_terminal_output(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::gpui_shell::math_view::register);
+        let mut overlay = MathOverlay::default();
+        cx.update(|cx| overlay.bind_resources(cx));
+        let term = term_with(
+            100,
+            24,
+            &[
+                "1. quadratic",
+                "",
+                "  [",
+                r"  x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}",
+                "  ]",
+                "",
+                "2. euler",
+                "",
+                "  [",
+                r"  e^{i\pi}+1=0",
+                "  ]",
+                "",
+                "3. integral",
+                "",
+                "  [",
+                r"  \int_a^b f(x),\mathrm{d}x=F(b)-F(a)",
+                "  ]",
+                "",
+                "prompt",
+            ],
+        );
+        let size = grid_size_info(100, 24, 8.0, 18.0);
+        let mut counts = Vec::new();
+        for _ in 0..12 {
+            let frame = cx.update(|cx| {
+                let pending =
+                    overlay.plan_frame(&term, &size, Rgb::new(0xec, 0xef, 0xf4), 16.0, 1.0);
+                overlay.finalize_frame(pending, 1.0, cx)
+            });
+            counts.push(frame.formulas.len());
+            if frame.formulas.len() == 3 {
+                break;
+            }
+            cx.run_until_parked();
+        }
+        assert_eq!(counts.last(), Some(&3), "async pipeline frame counts: {counts:?}");
     }
 
     #[test]

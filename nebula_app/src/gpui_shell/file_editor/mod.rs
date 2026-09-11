@@ -1,29 +1,41 @@
 //! Editable local text files shared by Markdown and code tabs.
 
+mod chrome;
+mod code_actions;
+#[cfg(all(test, feature = "gpui-test-support"))]
+mod code_actions_tests;
 mod document;
+#[cfg(all(test, feature = "gpui-test-support"))]
+mod focus_tests;
 mod images;
 mod info;
 mod outline;
+mod outline_view;
+mod preview;
+mod reader_presentation;
+mod source;
 #[cfg(all(test, feature = "gpui-test-support"))]
 mod tests;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ListAlignment,
-    ListState, MouseButton, Pixels, Point, PromptLevel, SharedString, Subscription, Task, Window,
-    actions, div, px,
+    App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyBinding, ListAlignment,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    PromptLevel, ScrollHandle, SharedString, Subscription, Task, Window, actions, div, px,
 };
-use gpui_component::WindowExt as _;
-use gpui_component::text::{TextView, TextViewState, TextViewStyle};
+use gpui_component::text::TextViewState;
 
 use super::prelude::*;
 use crate::i18n::Message;
-use document::{Document, SaveError};
+use crate::ssh_sftp::document::{DocumentOperation, RemoteLocation};
+use document::SaveError;
 use outline::Outline;
+use source::{DocumentSource, LoadedDocument};
 
 actions!(file_editor, [SaveFile]);
 
@@ -41,6 +53,7 @@ pub(super) fn init(cx: &mut App) {
 pub enum TextFileEvent {
     Changed,
     SelectionContextMenuRequested { position: Point<Pixels>, text: String },
+    ReaderFocusChanged { focused: bool },
 }
 
 pub struct TextFileView {
@@ -48,7 +61,9 @@ pub struct TextFileView {
     pub title: String,
     input: Entity<InputState>,
     focus: FocusHandle,
-    document: Option<Document>,
+    source: DocumentSource,
+    document: Option<LoadedDocument>,
+    operation: Option<DocumentOperation>,
     dirty: bool,
     loading: bool,
     saving: bool,
@@ -58,8 +73,20 @@ pub struct TextFileView {
     show_details: bool,
     info: bool,
     outline: Outline,
-    blocks: Vec<Entity<TextViewState>>,
+    blocks: Rc<RefCell<Vec<Option<Entity<TextViewState>>>>>,
+    preview_extensions: gpui_component::text::MarkdownExtensions,
     scroll: ListState,
+    preview_bounds: Rc<RefCell<Bounds<Pixels>>>,
+    preview_selection_scroll_epoch: u64,
+    preview_selection_scroll_active: bool,
+    outline_scroll: ScrollHandle,
+    preview_scrollbar_hovered: bool,
+    outline_scrollbar_hovered: bool,
+    reader_focus: bool,
+    reader_focus_restore: Option<(bool, bool)>,
+    details_width: f32,
+    details_resize_anchor: Option<(f32, f32)>,
+    collapsed_headings: std::collections::HashSet<usize>,
     selected_heading: Option<usize>,
     all_selected: bool,
     revision: u64,
@@ -77,8 +104,39 @@ impl Focusable for TextFileView {
 
 impl TextFileView {
     pub fn new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_source(DocumentSource::Local(path), window, cx)
+    }
+
+    pub(crate) fn new_remote(
+        location: RemoteLocation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_source(DocumentSource::Remote(location), window, cx)
+    }
+
+    pub(crate) fn source_label(&self) -> String {
+        self.source.display()
+    }
+
+    pub(crate) fn is_local_path(&self, path: &std::path::Path) -> bool {
+        matches!(&self.source, DocumentSource::Local(local) if local == path)
+    }
+
+    pub(crate) fn is_remote_location(&self, location: &RemoteLocation) -> bool {
+        matches!(&self.source, DocumentSource::Remote(remote) if remote == location)
+    }
+
+    fn new_with_source(
+        source: DocumentSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let path = source.path().to_owned();
         let language = super::code_tab::language_for_path(&path.to_string_lossy());
-        let markdown = matches!(language, "markdown");
+        // Remote Markdown is edited as source. It must not resolve remote image
+        // paths through the local document preview's filesystem loader.
+        let markdown = matches!(language, "markdown") && !source.is_remote();
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .code_editor(language)
@@ -99,13 +157,21 @@ impl TextFileView {
                 cx.notify();
             }
         });
-        let title = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let title = match &source {
+            DocumentSource::Local(_) => name,
+            DocumentSource::Remote(location) => format!("{name} · {}", location.destination),
+        };
+        let preview_extensions = preview::extensions(path.parent().map(PathBuf::from));
         let mut this = Self {
+            preview_extensions,
             path,
             title,
             input,
             focus: cx.focus_handle(),
+            source,
             document: None,
+            operation: None,
             dirty: false,
             loading: false,
             saving: false,
@@ -115,8 +181,19 @@ impl TextFileView {
             show_details: markdown,
             info: false,
             outline: Outline::default(),
-            blocks: vec![],
+            blocks: Rc::default(),
             scroll: ListState::new(0, ListAlignment::Top, px(500.0)),
+            preview_bounds: Rc::default(),
+            preview_selection_scroll_epoch: 0,
+            preview_selection_scroll_active: false,
+            outline_scroll: ScrollHandle::new(),
+            preview_scrollbar_hovered: false,
+            outline_scrollbar_hovered: false,
+            reader_focus: false,
+            reader_focus_restore: None,
+            details_width: reader_presentation::OUTLINE_WIDTH,
+            details_resize_anchor: None,
+            collapsed_headings: Default::default(),
             selected_heading: None,
             all_selected: false,
             revision: 0,
@@ -138,6 +215,74 @@ impl TextFileView {
         self.saving
     }
 
+    pub(super) fn reader_focus(&self) -> bool {
+        self.reader_focus
+    }
+
+    /// Clear reader focus while switching tabs or closing a document. The
+    /// workspace owns the outer sidebar snapshot, so this method only restores
+    /// this document's own details panel and intentionally emits no event.
+    pub(super) fn clear_reader_focus(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.reader_focus {
+            return false;
+        }
+        self.reader_focus = false;
+        if let Some((show_details, info)) = self.reader_focus_restore.take() {
+            self.show_details = show_details;
+            self.info = info;
+        }
+        self.details_resize_anchor = None;
+        cx.notify();
+        true
+    }
+
+    fn toggle_reader_focus(&mut self, cx: &mut Context<Self>) {
+        if !self.markdown {
+            return;
+        }
+        if self.reader_focus {
+            self.clear_reader_focus(cx);
+        } else {
+            self.reader_focus = true;
+            self.reader_focus_restore = Some((self.show_details, self.info));
+            self.show_details = false;
+            self.details_resize_anchor = None;
+        }
+        cx.emit(TextFileEvent::ReaderFocusChanged { focused: self.reader_focus });
+        cx.notify();
+    }
+
+    fn begin_details_resize(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        if !self.show_details || !self.markdown {
+            return;
+        }
+        self.details_resize_anchor = Some((f32::from(event.position.x), self.details_width));
+        cx.notify();
+    }
+
+    fn update_details_resize(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some((start_x, start_width)) = self.details_resize_anchor else { return };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.details_resize_anchor = None;
+            cx.notify();
+            return;
+        }
+        // The divider is on the panel's left edge: moving left grows the panel.
+        let width = reader_presentation::clamp_details_width(
+            start_width + (start_x - f32::from(event.position.x)),
+        );
+        if (width - self.details_width).abs() >= 0.5 {
+            self.details_width = width;
+            cx.notify();
+        }
+    }
+
+    fn finish_details_resize(&mut self, _event: &MouseUpEvent, cx: &mut Context<Self>) {
+        if self.details_resize_anchor.take().is_some() {
+            cx.notify();
+        }
+    }
+
     pub fn tab_title(&self) -> String {
         if self.dirty { format!("{} •", self.title) } else { self.title.clone() }
     }
@@ -155,9 +300,16 @@ impl TextFileView {
         self.revision += 1;
         self.preview_task = None;
         let path = self.path.clone();
+        let source = self.source.clone();
+        let operation = DocumentOperation::default();
+        if let Some(previous) = self.operation.replace(operation.clone()) {
+            previous.cancel();
+        }
         let markdown = self.markdown;
+        let resources = super::scientific_render::assets(cx);
         let task = cx.background_executor().spawn(async move {
-            Document::load(&path).map(|doc| {
+            let _permit = resources.document_permit().await;
+            source.load(operation).await.map(|doc| {
                 let outline = markdown
                     .then(|| Outline::parse(&images::rewrite_doc_images(&doc.text, path.parent())));
                 (doc, outline)
@@ -169,6 +321,7 @@ impl TextFileView {
             let _ = handle.update(cx, |_, window, cx| {
                 let _ = this.update(cx, |view, cx| {
                     view.loading = false;
+                    view.operation = None;
                     match loaded {
                         Ok((document, outline)) => {
                             view.input.update(cx, |input, cx| {
@@ -182,7 +335,11 @@ impl TextFileView {
                             }
                         },
                         Err(error) => {
-                            view.notice = Some((Message::EditorReadFailed, Some(error.to_string())))
+                            view.notice = Some(if error.kind() == std::io::ErrorKind::Interrupted {
+                                (Message::TransferCancelled, None)
+                            } else {
+                                (Message::EditorReadFailed, Some(error.to_string()))
+                            })
                         },
                     }
                     cx.emit(TextFileEvent::Changed);
@@ -206,7 +363,7 @@ impl TextFileView {
         let answer = window.prompt(
             PromptLevel::Warning,
             language.text(Message::EditorDiscardTitle),
-            Some(&self.path.display().to_string()),
+            Some(&self.source.display()),
             &[language.text(Message::EditorCancel), language.text(Message::EditorDiscard)],
             cx,
         );
@@ -233,15 +390,20 @@ impl TextFileView {
         }
         let Some(document) = self.document.clone() else { return Task::ready(false) };
         let text = self.input.read(cx).value().to_string();
-        let path = self.path.clone();
+        let source = self.source.clone();
+        let operation = DocumentOperation::default();
+        self.operation = Some(operation.clone());
         self.saving = true;
         self.notice = None;
-        let task = cx.background_executor().spawn(async move { document.save(&path, text) });
+        let task = cx
+            .background_executor()
+            .spawn(async move { document.save(source, text, operation).await });
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = task.await;
             this.update(cx, |view, cx| {
                 view.saving = false;
+                view.operation = None;
                 let success = match result {
                     Ok(document) => {
                         view.dirty = view.input.read(cx).value().as_ref() != document.text;
@@ -253,6 +415,11 @@ impl TextFileView {
                         view.notice = Some(match error {
                             SaveError::Changed => (Message::EditorConflict, None),
                             SaveError::ReadOnly => (Message::EditorReadOnly, None),
+                            SaveError::Io(error)
+                                if error.kind() == std::io::ErrorKind::Interrupted =>
+                            {
+                                (Message::TransferCancelled, None)
+                            },
                             SaveError::Io(error) => {
                                 (Message::EditorSaveFailed, Some(error.to_string()))
                             },
@@ -272,6 +439,7 @@ impl TextFileView {
         self.revision += 1;
         let revision = self.revision;
         let executor = cx.background_executor().clone();
+        let resources = super::scientific_render::assets(cx);
         self.preview_task = Some(cx.spawn(async move |this, cx| {
             executor.timer(Duration::from_millis(250)).await;
             let Ok((source, path)) =
@@ -281,6 +449,7 @@ impl TextFileView {
             };
             let outline = executor
                 .spawn(async move {
+                    let _permit = resources.document_permit().await;
                     Outline::parse(&images::rewrite_doc_images(&source, path.parent()))
                 })
                 .await;
@@ -293,15 +462,25 @@ impl TextFileView {
     }
 
     fn apply_outline(&mut self, outline: Outline, cx: &mut Context<Self>) {
-        self.blocks = outline
-            .blocks
-            .iter()
-            .map(|text| cx.new(|cx| TextViewState::markdown(text, cx)))
-            .collect();
-        self.scroll.reset(self.blocks.len());
+        self.blocks = Rc::new(RefCell::new(vec![None; outline.blocks.len()]));
+        self.scroll.reset(outline.blocks.len());
         self.outline = outline;
+        self.collapsed_headings.clear();
         self.selected_heading = None;
         self.all_selected = false;
+        cx.notify();
+    }
+
+    fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview = !self.preview;
+        if !self.preview {
+            self.stop_preview_selection_scroll();
+            for block in self.blocks.borrow_mut().iter_mut() {
+                *block = None;
+            }
+            self.all_selected = false;
+            self.input.update(cx, |input, cx| input.focus(window, cx));
+        }
         cx.notify();
     }
 
@@ -323,87 +502,14 @@ impl TextFileView {
         }
         cx.notify();
     }
-
-    fn render_outline(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let language = super::config::ui_language(cx);
-        let muted = cx.theme().muted_foreground;
-        v_flex()
-            .id("markdown-outline")
-            .w(px(210.0))
-            .min_w(px(110.0))
-            .max_w(gpui::relative(0.32))
-            .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .child(
-                div().p_3().text_xs().font_semibold().child(language.text(Message::EditorOutline)),
-            )
-            .child(
-                v_flex()
-                    .id("markdown-headings")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_2()
-                    .when(self.outline.headings.is_empty(), |list| {
-                        list.child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .child(language.text(Message::EditorNoHeadings)),
-                        )
-                    })
-                    .children(self.outline.headings.iter().enumerate().map(|(index, heading)| {
-                        let copied = heading.label.clone();
-                        div()
-                            .id(("markdown-heading", index))
-                            .min_h(px(28.0))
-                            .py_1()
-                            .pr_2()
-                            .pl(px(8.0 + heading.depth.saturating_sub(1) as f32 * 12.0))
-                            .rounded_md()
-                            .text_xs()
-                            .cursor_pointer()
-                            .text_color(if self.selected_heading == Some(index) {
-                                cx.theme().link
-                            } else {
-                                muted
-                            })
-                            .hover(|style| style.bg(cx.theme().list_hover))
-                            .child(heading.label.clone())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.jump_to_heading(index, window, cx)
-                            }))
-                            .context_menu(move |menu, _, _| {
-                                let copied = copied.clone();
-                                menu.item(
-                                    gpui_component::menu::PopupMenuItem::new(
-                                        language.text(Message::EditorCopyHeading),
-                                    )
-                                    .icon(IconName::Copy)
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                                copied.clone(),
-                                            ));
-                                        },
-                                    ),
-                                )
-                            })
-                    })),
-            )
-            .into_any_element()
-    }
 }
 
 impl Render for TextFileView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let language = super::config::ui_language(cx);
         let muted = cx.theme().muted_foreground;
         let editable = !self.loading && self.document.as_ref().is_some_and(|doc| !doc.read_only);
-        let path = self.path.display().to_string();
-        let notice = if self.loading {
+        let mut notice = if self.loading {
             Some(language.text(Message::EditorLoading).to_owned())
         } else if let Some((message, error)) = &self.notice {
             Some(language.format(*message, &[("error", error.as_deref().unwrap_or_default())]))
@@ -421,48 +527,14 @@ impl Render for TextFileView {
                 Some(language.text(message).to_owned())
             })
         };
+        if self.preview && self.outline.limited {
+            let detail = language.text(Message::EditorPreviewLimited);
+            notice = Some(
+                notice.map_or_else(|| detail.to_owned(), |notice| format!("{notice} {detail}")),
+            );
+        }
         let content = if self.preview {
-            let blocks = self.blocks.clone();
-            let style = TextViewStyle {
-                image_base: self.path.parent().map(Arc::from),
-                highlight_theme: cx.theme().highlight_theme.clone(),
-                is_dark: cx.theme().is_dark(),
-                ..Default::default()
-            };
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .px_4()
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(|_, event: &gpui::MouseDownEvent, window, cx| {
-                        let text = window.selected_text(cx).to_string();
-                        if !text.trim().is_empty() {
-                            cx.emit(TextFileEvent::SelectionContextMenuRequested {
-                                position: event.position,
-                                text,
-                            });
-                            cx.stop_propagation();
-                        }
-                    }),
-                )
-                .child(
-                    gpui::list(self.scroll.clone(), move |index, _, _| {
-                        div()
-                            .w_full()
-                            .py_1()
-                            .child(
-                                TextView::new(&blocks[index])
-                                    .selectable(true)
-                                    .scrollable(false)
-                                    .style(style.clone()),
-                            )
-                            .into_any_element()
-                    })
-                    .size_full(),
-                )
-                .into_any_element()
+            self.render_markdown_preview(cx)
         } else {
             div()
                 .flex_1()
@@ -488,14 +560,32 @@ impl Render for TextFileView {
             .key_context("FileEditor")
             .track_focus(&self.focus)
             .size_full()
+            .relative()
             .overflow_hidden()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                // GPUI can deliver a move after the pointer leaves the
+                // divider with no pressed button. Clear only an active resize;
+                // normal reader selection remains untouched.
+                if this.details_resize_anchor.is_some()
+                    && event.pressed_button != Some(MouseButton::Left)
+                {
+                    this.details_resize_anchor = None;
+                    cx.notify();
+                }
+            }))
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                if this.details_resize_anchor.is_some() && event.button == MouseButton::Left {
+                    this.finish_details_resize(event, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
                 this.save(cx).detach();
             }))
             .when(self.preview, |root| {
                 root.capture_action(cx.listener(
                     |this, _: &gpui_component::input::SelectAll, _, cx| {
-                        for block in &this.blocks {
+                        for block in this.blocks.borrow().iter().flatten() {
                             block.update(cx, |state, cx| state.select_all(cx));
                         }
                         this.all_selected = true;
@@ -505,12 +595,8 @@ impl Render for TextFileView {
                 ))
                 .capture_action(cx.listener(|this, _: &gpui_component::input::Copy, _, cx| {
                     if this.all_selected {
-                        let text = this
-                            .blocks
-                            .iter()
-                            .map(|block| block.read(cx).selected_text())
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
+                        // Do not materialize off-screen preview blocks for copy.
+                        let text = this.input.read(cx).value().to_string();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                         cx.stop_propagation();
                     } else {
@@ -525,94 +611,7 @@ impl Render for TextFileView {
                     }),
                 )
             })
-            .child(
-                h_flex()
-                    .h(px(36.0))
-                    .flex_shrink_0()
-                    .px_3()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div().flex_1().min_w_0().truncate().text_xs().text_color(muted).child(path),
-                    )
-                    .when(self.dirty, |bar| {
-                        bar.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().warning)
-                                .child(language.text(Message::EditorUnsaved)),
-                        )
-                    })
-                    .when(self.markdown, |bar| {
-                        bar.child(
-                            Button::new("file-toggle-preview")
-                                .ghost()
-                                .xsmall()
-                                .label(language.text(if self.preview {
-                                    Message::EditorEdit
-                                } else {
-                                    Message::EditorPreview
-                                }))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.preview = !this.preview;
-                                    if !this.preview {
-                                        this.input.update(cx, |input, cx| input.focus(window, cx));
-                                    }
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("file-toggle-outline")
-                                .ghost()
-                                .xsmall()
-                                .selected(self.show_details)
-                                .label(language.text(Message::EditorOutline))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_details = !this.show_details || this.info;
-                                    this.info = false;
-                                    cx.notify();
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new("file-info")
-                            .ghost()
-                            .xsmall()
-                            .label(language.text(Message::EditorInfo))
-                            .selected(self.show_details && self.info)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_details = !this.show_details || !this.info;
-                                this.info = true;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("file-reload")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Redo2)
-                            .tooltip(language.text(Message::EditorReload))
-                            .disabled(self.saving || self.loading)
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.request_reload(window, cx)),
-                            ),
-                    )
-                    .child(
-                        Button::new("file-save")
-                            .small()
-                            .label(language.text(if self.saving {
-                                Message::EditorSaving
-                            } else {
-                                Message::EditorSave
-                            }))
-                            .tooltip(language.text(Message::EditorSaveShortcut))
-                            .disabled(!editable || !self.dirty || self.saving)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.save(cx).detach();
-                            })),
-                    ),
-            )
+            .child(self.render_toolbar(editable, window, cx))
             .when_some(notice, |root, notice| {
                 root.child(div().px_3().py_1().text_xs().text_color(muted).child(notice))
             })
@@ -626,5 +625,32 @@ impl Render for TextFileView {
                     })
                 },
             ))
+            .when(self.details_resize_anchor.is_some(), |root| {
+                root.child(
+                    div()
+                        .id("file-details-resize-overlay")
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .cursor_col_resize()
+                        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                            this.update_details_resize(event, cx);
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                                this.finish_details_resize(event, cx);
+                            }),
+                        ),
+                )
+            })
+    }
+}
+
+impl Drop for TextFileView {
+    fn drop(&mut self) {
+        if let Some(operation) = &self.operation {
+            operation.cancel();
+        }
     }
 }

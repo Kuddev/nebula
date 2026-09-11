@@ -448,6 +448,15 @@ pub(crate) fn elide_left(text: &str, max_chars: usize) -> String {
     format!("…{tail}")
 }
 
+/// Preserve the candidate's spelling when a case-insensitive/fuzzy match
+/// changes already-typed text. Only a literal prefix can be appended safely.
+fn popup_edit(line: &str, candidate: &str) -> (usize, String) {
+    match candidate.strip_prefix(line) {
+        Some(suffix) => (0, suffix.to_owned()),
+        None => (line.chars().count(), candidate.to_owned()),
+    }
+}
+
 /// Fill `state.completion_items` for the popup style: the same sources as
 /// the ghost hint (history → directory history → PATH commands → file
 /// system), but keeping several candidates each instead of the first hit.
@@ -471,12 +480,14 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
     };
 
     // Whole-line history matches, newest first.
-    for (full, rem) in sources.history.hints(&state.suggest_env.history_scope(), line, 3) {
+    for full in sources.history.search(&state.suggest_env.history_scope(), line, 8) {
+        let (replace_chars, insert) = popup_edit(line, full);
         push(
             &mut items,
             NebulaCompletionItem {
+                replace_chars,
                 label: elide_left(full, LABEL_MAX),
-                insert: rem.to_owned(),
+                insert,
                 kind: NebulaCompletionKind::History,
             },
         );
@@ -492,6 +503,7 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
             push(
                 &mut items,
                 NebulaCompletionItem {
+                    replace_chars: 0,
                     label: elide_left(&format!("{token}{rem}"), LABEL_MAX),
                     insert: rem,
                     kind: NebulaCompletionKind::Dir,
@@ -513,14 +525,14 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
         for command in nebula_command_hints(commands, line, POPUP_LIMIT) {
             // 精确命令也必须成为可接受项；补一个空格既给用户明确反馈，
             // 又让 Enter 只完成选择而不立刻执行命令。
-            let insert = if command.len() == line.len() {
-                " ".to_owned()
-            } else {
-                command[line.len()..].to_owned()
-            };
+            let (replace_chars, mut insert) = popup_edit(line, command);
+            if command.eq_ignore_ascii_case(line) {
+                insert.push(' ');
+            }
             push(
                 &mut items,
                 NebulaCompletionItem {
+                    replace_chars,
                     label: elide_left(command, LABEL_MAX),
                     insert,
                     kind: NebulaCompletionKind::Command,
@@ -538,6 +550,7 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
             push(
                 &mut items,
                 NebulaCompletionItem {
+                    replace_chars: 0,
                     label: elide_left(&format!("{token}{rem}"), LABEL_MAX),
                     insert: rem,
                     kind: if is_dir {
@@ -588,6 +601,7 @@ fn suggest_collect(sources: &SuggestSources<'_>, state: &mut NebulaPaneState, li
                 push(
                     &mut items,
                     NebulaCompletionItem {
+                        replace_chars: 0,
                         label: elide_left(&format!("{token}{insert}"), LABEL_MAX),
                         insert: insert.to_owned(),
                         kind,

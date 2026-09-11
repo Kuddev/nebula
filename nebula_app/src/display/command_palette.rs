@@ -260,6 +260,15 @@ pub(crate) struct PaletteItem {
 
 /// The full action table, in declaration order (also the tie-break order when
 /// fuzzy scores are equal, and the order shown for an empty query).
+const fn theme_item(theme: NebulaTheme, search: &'static str) -> PaletteItem {
+    PaletteItem {
+        label: theme.command_label(),
+        hint: "",
+        search,
+        action: PaletteAction::SelectTheme(theme),
+    }
+}
+
 const ITEMS: &[PaletteItem] = &[
     PaletteItem {
         label: "新建标签页",
@@ -427,60 +436,19 @@ const ITEMS: &[PaletteItem] = &[
         search: "恢复外观默认 reset appearance default huifu waiguan moren",
         action: PaletteAction::ResetAppearance,
     },
-    PaletteItem {
-        label: "主题：Nebula",
-        hint: "",
-        search: "主题 nebula theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::Nebula),
-    },
-    PaletteItem {
-        label: "主题：Silver Light",
-        hint: "",
-        search: "主题 silver light theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::SilverLight),
-    },
-    PaletteItem {
-        label: "主题：Steel Dark",
-        hint: "",
-        search: "主题 steel dark theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::SteelDark),
-    },
-    PaletteItem {
-        label: "主题：Limestone",
-        hint: "",
-        search: "主题 limestone light theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::LimestoneLight),
-    },
-    PaletteItem {
-        label: "主题：Coal Dark",
-        hint: "",
-        search: "主题 coal dark theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::CoalDark),
-    },
-    PaletteItem {
-        label: "主题：Linen Light",
-        hint: "",
-        search: "主题 linen light theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::LinenLight),
-    },
-    PaletteItem {
-        label: "主题：Moss Dark",
-        hint: "",
-        search: "主题 moss dark theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::MossDark),
-    },
-    PaletteItem {
-        label: "主题：Nord",
-        hint: "",
-        search: "主题 nord dark theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::Nord),
-    },
-    PaletteItem {
-        label: "主题：Paper",
-        hint: "",
-        search: "主题 paper light theme zhuti",
-        action: PaletteAction::SelectTheme(NebulaTheme::Paper),
-    },
+    theme_item(NebulaTheme::BreezeLight, "theme 主题 breeze light"),
+    theme_item(NebulaTheme::BreezeDark, "theme 主题 breeze dark"),
+    theme_item(NebulaTheme::MintLight, "theme 主题 mint light"),
+    theme_item(NebulaTheme::MintDark, "theme 主题 mint dark"),
+    theme_item(NebulaTheme::SilverLight, "theme 主题 silver light"),
+    theme_item(NebulaTheme::Nord, "theme 主题 nord dark"),
+    theme_item(NebulaTheme::Paper, "theme 主题 paper light"),
+    theme_item(NebulaTheme::LimestoneLight, "theme 主题 limestone light"),
+    theme_item(NebulaTheme::LinenLight, "theme 主题 linen light"),
+    theme_item(NebulaTheme::CatppuccinMocha, "theme 主题 catppuccin mocha dark"),
+    theme_item(NebulaTheme::CatppuccinLatte, "theme 主题 catppuccin latte light"),
+    theme_item(NebulaTheme::GlassLight, "theme 主题 glass light"),
+    theme_item(NebulaTheme::GlassDark, "theme 主题 glass dark"),
 ];
 
 /// Shared command catalog for alternate presentation layers.
@@ -1350,10 +1318,11 @@ impl CommandPalette {
             });
             self.filtered = order;
         } else {
-            let mut scored: Vec<(i32, PaletteCandidate)> = candidates
+            let mut matcher = nebula_completions::command_search::CommandQuery::new(query);
+            let mut scored: Vec<(u32, PaletteCandidate)> = candidates
                 .into_iter()
                 .filter_map(|candidate| {
-                    fuzzy_score(query, combined_search(candidate)).map(|score| (score, candidate))
+                    matcher.score(combined_search(candidate)).map(|score| (score, candidate))
                 })
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -1640,29 +1609,11 @@ pub struct PaletteRow {
 /// haystack. Consecutive runs and word-start matches are rewarded so intuitive
 /// queries rank first (e.g. "nt" prefers "new tab" over "next"). An empty
 /// needle matches everything with score 0, preserving declaration order.
+#[cfg(test)]
 fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    let needle: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
-    let mut next = 0usize;
-    let mut score = 0i32;
-    let mut run = 0i32;
-    let mut prev = ' ';
-    for hc in haystack.chars().flat_map(char::to_lowercase) {
-        if next < needle.len() && hc == needle[next] {
-            score += 1 + run * 5; // consecutive-match run bonus (dominant)
-            if !prev.is_alphanumeric() {
-                score += 4; // word / segment start
-            }
-            run += 1;
-            next += 1;
-        } else {
-            run = 0;
-        }
-        prev = hc;
-    }
-    (next == needle.len()).then_some(score)
+    nebula_completions::command_search::CommandQuery::new(needle)
+        .score(haystack)
+        .map(|score| score as i32)
 }
 
 /// Scrollbar geometry shared by rendering and pointer input.

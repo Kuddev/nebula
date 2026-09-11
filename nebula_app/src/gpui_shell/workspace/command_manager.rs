@@ -27,6 +27,10 @@ fn custom_icon(path: &'static str) -> Icon {
     Icon::new(Icon::empty()).path(path)
 }
 
+fn command_run_icon(builtin: bool, append_enter: bool) -> IconName {
+    if builtin || append_enter { IconName::Play } else { IconName::SquareTerminal }
+}
+
 /// 多行文本直接逐行送进 PTY 时，前台程序可能把第二行当成自己的 stdin。
 /// 立即执行因此折成一条 shell 语句；仅插入模式保留用户原文供手动编辑。
 fn dispatch_text(command: &crate::saved_commands::SavedCommand) -> String {
@@ -43,66 +47,52 @@ fn dispatch_text(command: &crate::saved_commands::SavedCommand) -> String {
         .join("; ")
 }
 
-fn word_start(text: &str, needle: &str) -> bool {
-    text.split(|ch: char| !ch.is_alphanumeric()).any(|word| word.starts_with(needle))
-}
-
-fn field_score(text: &str, needle: &str, exact: i32, prefix: i32, word: i32, part: i32) -> i32 {
-    if text == needle {
-        exact
-    } else if text.starts_with(needle) {
-        prefix
-    } else if word_start(text, needle) {
-        word
-    } else if text.contains(needle) {
-        part
-    } else {
-        -1
-    }
-}
-
-/// 名称匹配始终排在命令正文匹配之前；同分保持用户保存顺序。
-fn search_score(command: &crate::saved_commands::SavedCommand, query: &str) -> Option<i32> {
-    let name = command.name.to_lowercase();
-    let body = command.command.to_lowercase();
-    let mut total = 0;
-    let mut matched = false;
-    for word in query.split_whitespace() {
-        let name_score = field_score(&name, word, 1_000, 850, 700, 550);
-        let body_score = field_score(&body, word, 400, 340, 280, 220);
-        let score = name_score.max(body_score);
-        if score < 0 {
-            return None;
-        }
-        matched = true;
-        total += score;
-    }
-    matched.then_some(total)
-}
-
 impl NebulaWorkspace {
+    fn available_saved_commands(&self, cx: &App) -> Vec<crate::saved_commands::SavedCommand> {
+        use crate::saved_commands::builtins::CommandPlatform;
+        let remote = self
+            .tabs
+            .get(self.active)
+            .and_then(WorkspaceTab::focused_view)
+            .is_some_and(|view| view.read(cx).is_remote_session());
+        let platform = if remote {
+            CommandPlatform::Posix
+        } else if cfg!(windows) {
+            CommandPlatform::Windows
+        } else if cfg!(target_os = "macos") {
+            CommandPlatform::Mac
+        } else {
+            CommandPlatform::Posix
+        };
+        let mut commands = self.saved_commands.commands().to_vec();
+        commands.extend(crate::saved_commands::builtins::commands(
+            crate::gpui_shell::config::ui_language(cx),
+            platform,
+        ));
+        commands
+    }
+
     fn filtered_saved_commands(&self, cx: &App) -> Vec<crate::saved_commands::SavedCommand> {
-        let query = self.command_manager_input.read(cx).value().trim().to_lowercase();
-        if query.is_empty() {
-            return self.saved_commands.commands().to_vec();
-        }
+        let value = self.command_manager_input.read(cx).value();
+        let query = value.trim();
         if query.len() > MAX_SEARCH_BYTES {
             return Vec::new();
         }
-
-        let mut matches = self
-            .saved_commands
-            .commands()
-            .iter()
-            .cloned()
+        let commands = self.available_saved_commands(cx);
+        if query.is_empty() {
+            return commands;
+        }
+        let mut query = nebula_completions::command_search::CommandQuery::new(query);
+        let mut matches = commands
+            .into_iter()
             .enumerate()
             .filter_map(|(index, command)| {
-                search_score(&command, &query).map(|score| (score, index, command))
+                query
+                    .score_fields(&[&command.name, &command.command])
+                    .map(|score| (score, index, command))
             })
             .collect::<Vec<_>>();
-        matches.sort_by(|(left_score, left_index, _), (right_score, right_index, _)| {
-            right_score.cmp(left_score).then_with(|| left_index.cmp(right_index))
-        });
+        matches.sort_by(|(a, ai, _), (b, bi, _)| b.cmp(a).then(ai.cmp(bi)));
         matches.into_iter().map(|(_, _, command)| command).collect()
     }
 
@@ -231,7 +221,7 @@ impl NebulaWorkspace {
         cx: &mut Context<'_, Self>,
     ) {
         let current = edit_id.as_deref().and_then(|id| {
-            self.saved_commands.commands().iter().find(|command| command.id == id).cloned()
+            self.available_saved_commands(cx).into_iter().find(|command| command.id == id)
         });
         if edit_id.is_some() && current.is_none() {
             crate::gpui_shell::toast::toast(
@@ -243,7 +233,8 @@ impl NebulaWorkspace {
             return;
         }
 
-        let language = workspace_ui_language();
+        let edit_id = edit_id.filter(|id| !id.starts_with("builtin:"));
+        let language = crate::gpui_shell::config::ui_language(cx);
         let initial_name = current.as_ref().map(|command| command.name.clone()).unwrap_or_default();
         let initial_command =
             current.as_ref().map(|command| command.command.clone()).unwrap_or_default();
@@ -413,7 +404,7 @@ impl NebulaWorkspace {
         else {
             return;
         };
-        let language = workspace_ui_language();
+        let language = crate::gpui_shell::config::ui_language(cx);
         let workspace = cx.entity().downgrade();
         let dialog_workspace = workspace.clone();
         let command_name = command.name.clone();
@@ -515,7 +506,7 @@ impl NebulaWorkspace {
         let border = theme.border;
         let accent = theme.primary;
         let mono_family = theme.mono_font_family.clone();
-        let language = workspace_ui_language();
+        let language = crate::gpui_shell::config::ui_language(cx);
         let viewport = window.viewport_size();
         let panel_width =
             PANEL_MAX_WIDTH.min((f32::from(viewport.width) - PANEL_MARGIN * 2.0).max(0.0));
@@ -526,7 +517,6 @@ impl NebulaWorkspace {
         if self.command_manager_selected >= commands.len() {
             self.command_manager_selected = commands.len().saturating_sub(1);
         }
-        let command_count = self.saved_commands.commands().len();
         let selected_index = self.command_manager_selected;
         // 固定区域只保留搜索和新增入口；命令增多时仅滚动中间列表，避免退化成大面板。
         let desired_height = if commands.is_empty() {
@@ -541,6 +531,7 @@ impl NebulaWorkspace {
         let mut rows = Vec::with_capacity(commands.len());
         for (index, command) in commands.into_iter().enumerate() {
             let selected = index == selected_index;
+            let builtin = command.id.starts_with("builtin:");
             let hover_group = SharedString::from(format!("saved-command-row-hover-{index}"));
             let preview = command
                 .command
@@ -549,7 +540,9 @@ impl NebulaWorkspace {
                 .filter(|line| !line.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let mode_label = if command.append_enter {
+            let mode_label = if builtin {
+                language.text(crate::i18n::Message::CommandsBuiltinLabel)
+            } else if command.append_enter {
                 language.pick("运行", "Run")
             } else {
                 language.pick("插入", "Insert")
@@ -559,8 +552,7 @@ impl NebulaWorkspace {
             } else {
                 language.pick("插入到当前终端", "Insert into current terminal")
             };
-            let run_icon =
-                if command.append_enter { IconName::Play } else { IconName::SquareTerminal };
+            let run_icon = command_run_icon(builtin, command.append_enter);
             let run_command = command.clone();
             let row_command = command.clone();
             let copy_command = command.clone();
@@ -670,7 +662,11 @@ impl NebulaWorkspace {
                                 .icon(custom_icon(crate::gpui_shell::assets::nav::PENCIL))
                                 .ghost()
                                 .xsmall()
-                                .tooltip(language.pick("编辑命令", "Edit command"))
+                                .tooltip(if builtin {
+                                    language.text(crate::i18n::Message::CommandsSaveCopy)
+                                } else {
+                                    language.pick("编辑命令", "Edit command")
+                                })
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
                                         cx.stop_propagation();
@@ -682,25 +678,27 @@ impl NebulaWorkspace {
                                     },
                                 )),
                             )
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "saved-command-delete-{index}"
-                                )))
-                                .icon(custom_icon(crate::gpui_shell::assets::nav::TRASH))
-                                .ghost()
-                                .xsmall()
-                                .tooltip(language.pick("删除命令", "Delete command"))
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.open_delete_saved_command_dialog(
-                                            delete_id.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    },
-                                )),
-                            ),
+                            .when(!builtin, |actions| {
+                                actions.child(
+                                    Button::new(SharedString::from(format!(
+                                        "saved-command-delete-{index}"
+                                    )))
+                                    .icon(custom_icon(crate::gpui_shell::assets::nav::TRASH))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip(language.pick("删除命令", "Delete command"))
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            cx.stop_propagation();
+                                            this.open_delete_saved_command_dialog(
+                                                delete_id.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                                )
+                            }),
                     )
                     .into_any_element(),
             );
@@ -726,7 +724,6 @@ impl NebulaWorkspace {
             );
 
         let list_content = if rows.is_empty() {
-            let has_saved_commands = command_count > 0;
             v_flex()
                 .size_full()
                 .items_center()
@@ -734,11 +731,12 @@ impl NebulaWorkspace {
                 .gap_2()
                 .text_color(muted)
                 .child(command_manager_icon().with_size(px(28.0)))
-                .child(div().text_sm().text_color(foreground).child(if has_saved_commands {
-                    language.pick("没有匹配的命令", "No matching commands")
-                } else {
-                    language.pick("还没有保存命令", "No saved commands yet")
-                }))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(foreground)
+                        .child(language.pick("没有匹配的命令", "No matching commands")),
+                )
                 .into_any_element()
         } else {
             let scroll_handle = self.command_manager_scroll.clone();
@@ -835,5 +833,17 @@ impl NebulaWorkspace {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_commands_keep_the_play_icon_without_changing_insert_behavior() {
+        assert!(matches!(command_run_icon(true, false), IconName::Play));
+        assert!(matches!(command_run_icon(false, true), IconName::Play));
+        assert!(matches!(command_run_icon(false, false), IconName::SquareTerminal));
     }
 }

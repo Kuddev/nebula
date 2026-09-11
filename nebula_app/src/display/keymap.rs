@@ -105,6 +105,59 @@ fn cached_defaults() -> &'static [KeyBinding] {
     DEFAULTS.get_or_init(default_key_bindings)
 }
 
+pub(crate) fn default_shortcuts() -> Vec<(String, Action)> {
+    cached_defaults()
+        .iter()
+        .filter_map(|binding| {
+            display_combo(binding.mods, &binding.trigger)
+                .map(|combo| (combo, binding.action.clone()))
+        })
+        .collect()
+}
+
+/// Preserve the existing keybind format: ReceiveChar explicitly passes a key
+/// to the terminal. Clearing an action disables its defaults and its custom key.
+pub(crate) fn clear_action(raw: &mut Vec<(String, String)>, action: &Action) {
+    let mut combos: Vec<String> = default_shortcuts()
+        .into_iter()
+        .filter(|(_, candidate)| candidate == action)
+        .map(|(combo, _)| combo)
+        .collect();
+    combos.extend(
+        raw.iter()
+            .filter(|(_, name)| parse_action(name).as_ref() == Some(action))
+            .map(|(combo, _)| combo.clone()),
+    );
+    raw.retain(|(_, name)| parse_action(name).as_ref() != Some(action));
+    for combo in combos {
+        let key = parse_combo(&combo);
+        if raw
+            .iter()
+            .rev()
+            .find(|(candidate, _)| parse_combo(candidate) == key)
+            .is_some_and(|(_, name)| parse_action(name) != Some(Action::ReceiveChar))
+        {
+            continue;
+        }
+        raw.retain(|(candidate, name)| {
+            parse_combo(candidate) != key || parse_action(name) != Some(Action::ReceiveChar)
+        });
+        raw.push((combo, "ReceiveChar".into()));
+    }
+}
+
+pub(crate) fn reset_action(raw: &mut Vec<(String, String)>, action: &Action) {
+    let defaults = default_shortcuts();
+    raw.retain(|(combo, name)| {
+        let parsed = parse_action(name);
+        parsed.as_ref() != Some(action)
+            && !(parsed == Some(Action::ReceiveChar)
+                && defaults.iter().any(|(default, candidate)| {
+                    candidate == action && parse_combo(combo) == parse_combo(default)
+                }))
+    });
+}
+
 // ---- combo 文本 ↔ 结构 ----
 
 /// 命名键与存储别名的映射（存储侧统一小写）。
@@ -384,7 +437,7 @@ pub(crate) enum CaptureOutcome {
     Pending,
     /// Esc：取消捕获，不改绑定。
     Cancel,
-    /// 裸 Backspace：删除该动作的自定义绑定（回落默认）。
+    /// Bare Backspace explicitly disables the action's shortcuts.
     ClearCustom,
     /// 得到一个可存储的组合。
     Bind(String),
@@ -521,6 +574,43 @@ pub(crate) fn gpui_mods_prefix(modifiers: &::gpui::Modifiers) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clearing_ctrl_k_survives_persistence_and_restore_is_explicit() {
+        use super::*;
+        let action = Action::ToggleShellPicker;
+        let mut raw = vec![("ctrl+alt+k".to_owned(), action_storage_name(&action))];
+        clear_action(&mut raw, &action);
+        let saved = nebula_settings::apply_keybinds("theme=moss\n", &raw);
+        let reloaded = nebula_settings::keybind_pairs_from_text(&saved);
+        assert_eq!(raw, reloaded);
+        let bindings = build_bindings(&reloaded);
+        assert!(effective_combo(&action, &bindings).is_none());
+        for combo in ["ctrl+k", "ctrl+alt+k"] {
+            let (mods, trigger) = parse_combo(combo).unwrap();
+            assert!(bindings.iter().any(|binding| binding.mods == mods
+                && binding.trigger == trigger
+                && binding.action == Action::ReceiveChar));
+        }
+        reset_action(&mut raw, &action);
+        assert!(effective_combo(&action, &build_bindings(&raw)).is_some());
+    }
+
+    #[test]
+    fn clearing_does_not_steal_a_default_reassigned_to_another_action() {
+        use super::*;
+        let mut raw = vec![("ctrl+k".to_owned(), "CreateNewTab".to_owned())];
+        clear_action(&mut raw, &Action::ToggleShellPicker);
+        let (mods, trigger) = parse_combo("ctrl+k").unwrap();
+        let bindings = build_bindings(&raw);
+        assert_eq!(
+            bindings
+                .iter()
+                .find(|binding| binding.mods == mods && binding.trigger == trigger)
+                .unwrap()
+                .action,
+            Action::CreateNewTab
+        );
+    }
     use super::*;
 
     #[test]

@@ -57,6 +57,15 @@ pub(crate) struct MathLayout {
     pub(crate) text: Vec<MathTextOp>,
 }
 
+impl MathLayout {
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.glyphs.capacity() * std::mem::size_of::<MathGlyphOp>()
+            + self.rules.capacity() * std::mem::size_of::<MathRuleOp>()
+            + self.text.capacity() * std::mem::size_of::<MathTextOp>()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Segment {
     start: u32,
@@ -142,7 +151,7 @@ pub(crate) fn layout_formula(
     }
 
     let font = MathFont::load().map_err(|_| MathError::new(MathErrorKind::Font, 0))?;
-    let styles = effective_styles(formula)?;
+    let (styles, reachable) = style_plan(formula)?;
     let mut builder = LayoutBuilder {
         formula,
         font,
@@ -150,6 +159,7 @@ pub(crate) fn layout_formula(
         pixels_per_point,
         limits,
         styles,
+        reachable,
         plans: Vec::with_capacity(formula.arena.nodes.len()),
         placements: Vec::with_capacity(formula.arena.nodes.len()),
         glyphs: Vec::new(),
@@ -161,8 +171,14 @@ pub(crate) fn layout_formula(
 }
 
 /// 样式先自根向下传播，随后节点可按 arena 后序顺序一次完成测量。
+#[cfg(test)]
 fn effective_styles(formula: &ParsedFormula) -> Result<Vec<MathStyle>, MathError> {
+    style_plan(formula).map(|(styles, _)| styles)
+}
+
+fn style_plan(formula: &ParsedFormula) -> Result<(Vec<MathStyle>, Vec<bool>), MathError> {
     let mut styles = vec![formula.style; formula.arena.nodes.len()];
+    let mut reachable = vec![false; formula.arena.nodes.len()];
     let mut stack = vec![(formula.root, formula.style, None::<u16>)];
     while let Some((node_id, inherited, active_scope)) = stack.pop() {
         let node = formula.arena.node(node_id);
@@ -176,6 +192,7 @@ fn effective_styles(formula: &ParsedFormula) -> Result<Vec<MathStyle>, MathError
             return Err(MathError::new(MathErrorKind::Parse, 0));
         };
         *slot = style;
+        reachable[node_id.0 as usize] = true;
 
         let mut push = |child: NodeId, child_style: MathStyle| {
             stack.push((child, child_style, active_scope));
@@ -222,7 +239,7 @@ fn effective_styles(formula: &ParsedFormula) -> Result<Vec<MathStyle>, MathError
             },
         }
     }
-    Ok(styles)
+    Ok((styles, reachable))
 }
 
 fn fraction_child_style(style: MathStyle) -> MathStyle {
@@ -247,6 +264,7 @@ struct LayoutBuilder<'a> {
     pixels_per_point: f32,
     limits: MathLimits,
     styles: Vec<MathStyle>,
+    reachable: Vec<bool>,
     plans: Vec<BoxPlan>,
     placements: Vec<PlacedChild>,
     glyphs: Vec<LocalGlyph>,
@@ -257,6 +275,12 @@ struct LayoutBuilder<'a> {
 impl LayoutBuilder<'_> {
     fn build_all(&mut self) -> Result<(), MathError> {
         for index in 0..self.formula.arena.nodes.len() {
+            // Parser rewrites can leave detached nodes (e.g. an accent glyph).
+            // They neither contribute ink nor require a font glyph or layout.
+            if !self.reachable[index] {
+                self.plans.push(BoxPlan::default());
+                continue;
+            }
             let node = self.formula.arena.nodes[index].clone();
             let child_start = self.placements.len();
             let glyph_start = self.glyphs.len();
@@ -436,6 +460,9 @@ impl LayoutBuilder<'_> {
         character: char,
         class: AtomClass,
     ) -> Result<Geometry, MathError> {
+        if matches!(character, '\r' | '\n') {
+            return Err(MathError::new(MathErrorKind::Parse, 0));
+        }
         let pixel_size = self.pixel_size(index)?;
         let columns = character.width().unwrap_or(1).max(1) as f32;
         // Match the normal terminal font's usual half-em Latin and full-em
@@ -830,6 +857,25 @@ impl LayoutBuilder<'_> {
     ) -> Result<Geometry, MathError> {
         let body_plan = self.plans[body.0 as usize];
         let pixel_size = self.pixel_size(index)?;
+        if accent == '\u{203e}' {
+            // Overbars are rules, not dependent on a U+203E font glyph.
+            let gap = self.constant(MathConstant::OverbarVerticalGap, pixel_size)?;
+            let rule = self.constant(MathConstant::OverbarRuleThickness, pixel_size)?.max(0.5);
+            self.place(body, 0.0, 0.0);
+            self.push_rule(LocalRule {
+                x: 0.0,
+                y: -body_plan.metrics.height - gap - rule,
+                width: body_plan.metrics.width,
+                height: rule,
+            })?;
+            let mut metrics = body_plan.metrics;
+            metrics.height += gap + rule;
+            return Ok(Geometry {
+                metrics,
+                class: Some(AtomClass::Ord),
+                italic_correction: body_plan.italic_correction,
+            });
+        }
         let glyph = self
             .font
             .glyph_id(accent)

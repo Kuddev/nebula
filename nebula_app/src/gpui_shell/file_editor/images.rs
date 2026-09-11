@@ -30,6 +30,12 @@ fn flatten_local_image_url(url: &str, base: Option<&Path>) -> String {
     if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("data:") {
         return url.to_owned();
     }
+    // Static images do not need animation flattening. In particular, do not
+    // reread every large PNG/JPEG occurrence while parsing a long document.
+    let extension = Path::new(url).extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    if !extension.eq_ignore_ascii_case("gif") && !extension.eq_ignore_ascii_case("webp") {
+        return url.to_owned();
+    }
     let path = Path::new(url);
     let resolved = if path.is_absolute() {
         path.to_path_buf()

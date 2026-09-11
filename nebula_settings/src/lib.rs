@@ -22,7 +22,7 @@ mod quick_terminal;
 mod themes;
 pub use language::{LanguageInfo, LanguagePref};
 pub use quick_terminal::{QuickTerminalMode, QuickTerminalSize};
-pub use themes::FreshPalette;
+pub use themes::{FreshPalette, ReviewedPalette};
 mod reset;
 pub use reset::restore_default_settings;
 mod paths;
@@ -204,6 +204,10 @@ pub enum ThemeName {
     BreezeDark,
     MintLight,
     MintDark,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    GlassLight,
+    GlassDark,
 }
 
 impl ThemeName {
@@ -222,12 +226,16 @@ impl ThemeName {
             "BreezeDark" => Self::BreezeDark,
             "MintLight" => Self::MintLight,
             "MintDark" => Self::MintDark,
+            "CatppuccinMocha" => Self::CatppuccinMocha,
+            "CatppuccinLatte" => Self::CatppuccinLatte,
+            "GlassLight" => Self::GlassLight,
+            "GlassDark" => Self::GlassDark,
 
             _ => return None,
         })
     }
 
-    pub fn prompt_name(self) -> &'static str {
+    pub const fn prompt_name(self) -> &'static str {
         match self {
             Self::Nebula => "Nebula",
             Self::SilverLight => "SilverLight",
@@ -242,6 +250,10 @@ impl ThemeName {
             Self::BreezeDark => "BreezeDark",
             Self::MintLight => "MintLight",
             Self::MintDark => "MintDark",
+            Self::CatppuccinMocha => "CatppuccinMocha",
+            Self::CatppuccinLatte => "CatppuccinLatte",
+            Self::GlassLight => "GlassLight",
+            Self::GlassDark => "GlassDark",
         }
     }
 
@@ -250,9 +262,14 @@ impl ThemeName {
         // 背景与 is_light 来自各主题 palette()；powerline 为提示符段色
         // （icon bg/fg、path bg/fg、branch bg/fg、time bg/fg）。
         match self {
-            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
-                themes::fresh_terminal(self)
-            },
+            Self::BreezeLight
+            | Self::BreezeDark
+            | Self::MintLight
+            | Self::MintDark
+            | Self::CatppuccinMocha
+            | Self::CatppuccinLatte
+            | Self::GlassLight
+            | Self::GlassDark => themes::fresh_terminal(self),
             Self::Nebula => TermTheme {
                 background: [15, 17, 26],
                 is_light: false,
@@ -445,28 +462,10 @@ impl ThemeName {
         }
     }
 
-    /// 主题自带的终端卡几何。
-    ///
-    /// 归属裁定：卡几何跟**主题**走，不跟全局设置走。于是「浮起的圆角卡」和
-    /// 「铺满到边 + 一条竖线」不是两条渲染路径、也不是两套页面，只是同一条
-    /// 路径在不同主题下的取值。切主题即换形态；用户的显式设置覆盖这里。
-    ///
-    /// [`ThemeName::Nord`] 是这套抽象的第一个实验者：半径与卡缝双双归零，
-    /// 终端铺满整个右侧区域，侧栏与终端之间靠一条 1px 竖线分界——卡缝归零后
-    /// 两块深色面板会糊成一片，竖线是这种形态下唯一的结构分界。
+    /// Built-in themes share a flat terminal surface. Window/widget radii are separate.
+    /// Explicit user geometry remains configurable; choosing a preset restores its geometry.
     pub fn card_geometry(self) -> ThemeCardGeometry {
-        match self {
-            Self::Nord => {
-                ThemeCardGeometry { radius: 0.0, gutter: 0.0, shadow: false, divider: 1.0 }
-            },
-            _ => ThemeCardGeometry {
-                radius: DEFAULT_PANE_CARD_RADIUS,
-                gutter: DEFAULT_PANE_CARD_GUTTER,
-                shadow: false,
-                // 有卡缝就已经把两块面板分开了，再加竖线是重复的分界。
-                divider: 0.0,
-            },
-        }
+        ThemeCardGeometry { radius: 0.0, gutter: 0.0, shadow: false, divider: 1.0 }
     }
 }
 
@@ -968,6 +967,9 @@ pub struct RuntimeSettings {
     pub vcs_display: VcsDisplayName,
     /// 终端 BEL：关 / 闪烁 / 声音 / 两者（缺省两者）。
     pub bell: BellModeName,
+    /// AI message toasts inside the application. System notifications and
+    /// terminal/tab state are independent. Default on for existing users.
+    pub ai_toasts: bool,
     /// 新会话欢迎屏 fastfetch（默认关：启动速度优先于观感，旧壳裁定）。
     pub fetch: bool,
     /// Check GitHub Releases after startup. Manual checks remain available
@@ -1130,6 +1132,7 @@ impl RuntimeSettings {
                 .and_then(VcsDisplayName::from_settings)
                 .unwrap_or_default(),
             bell: raw.value("bell").and_then(BellModeName::from_settings).unwrap_or_default(),
+            ai_toasts: raw.bool_on("ai_toasts").unwrap_or(true),
             fetch: raw.bool_on("fetch").unwrap_or(false),
             auto_check_updates: raw.bool_on("auto_check_updates").unwrap_or(true),
             keep_session: raw.bool_on("keep_session").unwrap_or(false),
@@ -1215,6 +1218,14 @@ pub fn format_hex_rgb(rgb: Rgb8) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_quick_terminal_hotkey_is_distinct_from_an_unset_preference() {
+        let unset = RuntimeSettings::from_raw(&RawSettings::from_text("theme=Nord\n"));
+        let cleared =
+            RuntimeSettings::from_raw(&RawSettings::from_text("quick_terminal_hotkey=\n"));
+        assert_eq!(unset.quick_terminal_hotkey, DEFAULT_QUICK_TERMINAL_HOTKEY);
+        assert_eq!(cleared.quick_terminal_hotkey, "");
+    }
     use super::*;
 
     #[test]
@@ -1247,23 +1258,24 @@ mod tests {
     }
 
     #[test]
-    fn nord_carries_the_flush_card_geometry() {
+    fn nord_and_paper_carry_the_flush_card_geometry() {
         // Nord 是卡几何抽象的第一个实验者：半径与卡缝双双归零、靠一条竖线分界。
         // 这四个数一起构成「终端铺满整个右侧区域」的形态，任一项退回默认都会
         // 让它变回浮起的圆角卡——所以逐项钉死，而不是只断言 radius。
-        let nord = ThemeName::Nord.card_geometry();
-        assert_eq!(nord.radius, 0.0);
-        assert_eq!(nord.gutter, 0.0);
-        assert_eq!(nord.divider, 1.0);
-        assert!(!nord.shadow);
-
-        // 其余主题保持卡片形态，且**不画**竖线：有卡缝时两块面板已经分开了，
-        // 再加一条线是重复的分界。
-        for theme in [ThemeName::Nebula, ThemeName::Paper, ThemeName::CoalDark] {
+        for theme in ThemeName::BUILTIN {
             let geometry = theme.card_geometry();
-            assert_eq!(geometry.radius, DEFAULT_PANE_CARD_RADIUS);
-            assert_eq!(geometry.gutter, DEFAULT_PANE_CARD_GUTTER);
-            assert_eq!(geometry.divider, 0.0);
+            assert_eq!(geometry.radius, 0.0);
+            assert_eq!(geometry.gutter, 0.0);
+            assert_eq!(geometry.divider, 1.0);
+            assert!(!geometry.shadow);
+        }
+
+        // Retired identifiers also resolve to the flat geometry contract.
+        for theme in [ThemeName::Nebula, ThemeName::CoalDark] {
+            let geometry = theme.card_geometry();
+            assert_eq!(geometry.radius, 0.0);
+            assert_eq!(geometry.gutter, 0.0);
+            assert_eq!(geometry.divider, 1.0);
         }
     }
 
@@ -1419,6 +1431,37 @@ mod tests {
             !RuntimeSettings::from_raw(&RawSettings::from_text("auto_check_updates=0\n"))
                 .auto_check_updates
         );
+    }
+
+    #[test]
+    fn ai_toasts_default_on_and_accept_all_boolean_spellings() {
+        for value in ["", "invalid", "1", "true", "YES", "On"] {
+            let raw = RawSettings::from_text(&format!("ai_toasts={value}\n"));
+            assert!(RuntimeSettings::from_raw(&raw).ai_toasts, "{value:?}");
+        }
+        assert!(RuntimeSettings::from_raw(&RawSettings::default()).ai_toasts);
+        for value in ["0", "false", "NO", "Off"] {
+            let raw = RawSettings::from_text(&format!("ai_toasts={value}\n"));
+            let settings = RuntimeSettings::from_raw(&raw);
+            assert!(!settings.ai_toasts, "{value:?}");
+            assert_eq!(settings.bell, BellModeName::Both);
+            assert!(settings.auto_check_updates);
+            assert!(settings.resume_ai);
+        }
+    }
+
+    #[test]
+    fn ai_toast_toggle_round_trips_without_replacing_other_settings() {
+        let original = "# preferences\nshell=zsh\ncustom_key=keep\nAI_TOASTS=1\n";
+        let disabled = apply_updates(original, &[("ai_toasts", "0".to_owned())]);
+        let restored = RuntimeSettings::from_raw(&RawSettings::from_text(&disabled));
+        assert!(!restored.ai_toasts);
+        assert_eq!(restored.shell.as_deref(), Some("zsh"));
+        assert!(disabled.contains("# preferences\n"));
+        assert!(disabled.contains("custom_key=keep\n"));
+        let enabled = apply_updates(&disabled, &[("ai_toasts", "1".to_owned())]);
+        assert!(RuntimeSettings::from_raw(&RawSettings::from_text(&enabled)).ai_toasts);
+        assert_eq!(enabled.matches("ai_toasts=").count(), 1);
     }
 
     #[test]

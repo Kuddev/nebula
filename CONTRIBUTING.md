@@ -9,6 +9,8 @@ when changing them. Internal Rust crate and source-directory names remain stable
 
 - [Architecture and module ownership](docs/architecture.md)
 - [Enforced contracts and review rules](docs/project-constraints.md)
+- UI changes must also satisfy the **UI 设计约束 / UI design constraints** chapter
+  in that document: interaction states, result feedback, hit targets and visual acceptance.
 - [Decision log and policy change process](docs/architecture-decisions.md)
 - [Evidence behind the rules](docs/engineering-evidence.md)
 - [Internationalization](docs/internationalization.md) when changing UI text

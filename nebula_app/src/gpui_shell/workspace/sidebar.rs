@@ -921,6 +921,9 @@ impl NebulaWorkspace {
         let secondary = cx.theme().secondary;
         let settings_active_bg = cx.theme().sidebar_accent;
         let settings_active_fg = cx.theme().sidebar_accent_foreground;
+        let sidebar_visible = !self.sidebar_collapsed && !self.reader_focus_active(cx);
+        let flush_sidebar =
+            !settings_active && sidebar_visible && crate::gpui_shell::theme::pane_is_flush(cx);
         h_flex()
             .size_full()
             .items_center()
@@ -931,6 +934,13 @@ impl NebulaWorkspace {
                     // 32px，`.small()` 会把热区缩成 24px。
                     .gap_2()
                     .items_center()
+                    .when(flush_sidebar, |left| {
+                        // Keep the sidebar-colored strip aligned with the actual
+                        // sidebar, including the title bar's leading padding.
+                        let inset = if cfg!(target_os = "macos") { 80.0 } else { 12.0 };
+                        left.h_full().w(px(self.sidebar_width)).flex_shrink_0()
+                            .ml(px(-inset)).pl(px(inset)).bg(cx.theme().background)
+                    })
                     .occlude()
                     .child(
                         Button::new("toggle-sidebar")
@@ -939,13 +949,17 @@ impl NebulaWorkspace {
                             .disabled(settings_active)
                             // 侧栏是开关而非一次性动作：展开期间必须持续显示
                             // 选中底，和旧壳 `left_sidebar_visible()` 同义。
-                            .selected(!self.sidebar_collapsed)
+                            .selected(sidebar_visible)
                             // Ghost 的全局 selected 使用 hover_strong，静态底比
                             // 旧壳亮一档；仅此按钮覆写回旧壳 surface。
-                            .when(!self.sidebar_collapsed, |button| button.bg(secondary))
+                            .when(sidebar_visible, |button| button.bg(secondary))
                             .tooltip("折叠/展开侧边栏 (Ctrl+Shift+B)")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.sidebar_collapsed = !this.sidebar_collapsed;
+                                if this.reader_focus_active(cx) {
+                                    this.clear_reader_focus(cx);
+                                } else {
+                                    this.sidebar_collapsed = !this.sidebar_collapsed;
+                                }
                                 this.sidebar_fold_armed = true;
                                 cx.notify();
                             })),

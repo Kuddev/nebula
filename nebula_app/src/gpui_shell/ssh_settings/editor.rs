@@ -372,6 +372,7 @@ impl SettingsPane {
                         cx,
                     )),
             )
+            .child(self.host_organization_fields(window, cx))
             .child(
                 h_flex()
                     .mt_5()

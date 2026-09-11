@@ -165,6 +165,29 @@ impl NebulaHistory {
         ));
     }
 
+    /// Popup search retains the stored spelling and ranks ties by recency.
+    /// Inline ghost suggestions remain literal suffixes of the current input.
+    pub fn search(&self, scope: &HistoryScope, text: &str, limit: usize) -> Vec<&str> {
+        if text.trim().is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let Some(pool) = self.pools.get(&scope.clone().normalized()) else { return Vec::new() };
+        let mut query = nebula_completions::command_search::CommandQuery::new(text);
+        let mut matches: Vec<_> = pool
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, command)| {
+                (command != text)
+                    .then(|| query.score(command))
+                    .flatten()
+                    .map(|score| (score, index, command.as_str()))
+            })
+            .collect();
+        matches.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        matches.into_iter().take(limit).map(|(_, _, command)| command).collect()
+    }
+
     pub fn hint(&self, scope: &HistoryScope, prefix: &str) -> Option<&str> {
         self.pools.get(&scope.clone().normalized())?.hint(prefix)
     }
@@ -287,6 +310,44 @@ pub(crate) fn record_category_file(line: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn popup_search_ignores_case_and_keeps_remote_history_scoped() {
+        let local = super::HistoryScope::Local;
+        let mut history =
+            hist(local.clone(), &["Docker compose up", "docker compose logs", "git status"]);
+        history
+            .pools
+            .entry(super::HistoryScope::Wsl("ubuntu".into()))
+            .or_default()
+            .insert("docker remote-only".into());
+        assert_eq!(
+            history.search(&local, "COMPOSE DOCKER", 8),
+            vec!["docker compose logs", "Docker compose up"]
+        );
+        assert_eq!(history.search(&local, "dck cmp", 1), vec!["docker compose logs"]);
+        assert!(history.search(&local, "remote-only", 8).is_empty());
+        assert_eq!(
+            history.hint(&local, "DOCKER"),
+            None,
+            "an inline suffix cannot correct a prefix's spelling"
+        );
+    }
+
+    #[test]
+    #[ignore = "informational cost measurement with a populated local history"]
+    fn popup_search_cost_for_full_history() {
+        let scope = super::HistoryScope::Local;
+        let mut history = super::NebulaHistory::default();
+        let pool = history.pools.entry(scope.clone()).or_default();
+        for index in 0..5000 {
+            pool.insert(format!("docker compose -p service-{index} logs --tail 100"));
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            std::hint::black_box(history.search(&scope, "DCK CMP logs", 8));
+        }
+        println!("100 popup queries over 5000 history entries: {:?}", started.elapsed());
+    }
     use super::*;
 
     fn hist(scope: HistoryScope, cmds: &[&str]) -> NebulaHistory {

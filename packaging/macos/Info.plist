@@ -4,6 +4,20 @@
 <dict>
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+    <string>zh-Hans</string>
+    <string>zh-Hant</string>
+    <string>fr</string>
+    <string>de</string>
+    <string>es</string>
+    <string>pt-BR</string>
+    <string>it</string>
+    <string>ru</string>
+    <string>ja</string>
+    <string>ko</string>
+  </array>
   <key>CFBundleDisplayName</key>
   <string>Pebrel Preview</string>
   <key>CFBundleExecutable</key>

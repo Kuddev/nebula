@@ -364,7 +364,7 @@ impl RenderableCell {
         fg = content.color_resolver.resolve_foreground(
             fg,
             bg,
-            fixed_fg && !is_terminal_graphic(cell.c),
+            !is_terminal_graphic(cell.c),
             content.theme_foreground,
             content.theme_background,
         );

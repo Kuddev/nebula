@@ -198,6 +198,11 @@ impl TerminalImportError {
 
 #[derive(Clone, Debug)]
 pub(in crate::gpui_shell) enum SshStatus {
+    LibraryProcessing,
+    LibraryReloaded,
+    LibraryExported,
+    LibraryImported { added: usize, skipped: usize },
+    LibraryImportedPartial { added: usize, error: String },
     Saved(String),
     Pinned,
     Imported(usize),
@@ -222,7 +227,8 @@ impl SshStatus {
     pub(in crate::gpui_shell) fn is_error(&self) -> bool {
         matches!(
             self,
-            Self::CleanupPartial(_)
+            Self::LibraryImportedPartial { .. }
+                | Self::CleanupPartial(_)
                 | Self::Validation(_)
                 | Self::PersistFailed(_)
                 | Self::DeleteFailed(_)
@@ -239,6 +245,14 @@ impl SshStatus {
 
     pub(in crate::gpui_shell) fn text(&self, language: crate::display::UiLanguage) -> String {
         match self {
+            Self::LibraryImportedPartial { added, error } => language.format(crate::i18n::Message::HostsImportedPartial,
+                &[("added", &added.to_string()), ("error", error)]),
+            Self::LibraryProcessing => language.text(crate::i18n::Message::HostsProcessing).to_owned(),
+            Self::LibraryReloaded => language.text(crate::i18n::Message::HostsReloaded).to_owned(),
+            Self::LibraryExported => language.text(crate::i18n::Message::HostsExported).to_owned(),
+            Self::LibraryImported { added, skipped } => language.format(crate::i18n::Message::HostsImported,
+                &[("added", &added.to_string()), ("skipped", &skipped.to_string())]),
+
             Self::Saved(destination) => {
                 format!("{} {destination}", language.pick("已保存", "Saved"))
             },

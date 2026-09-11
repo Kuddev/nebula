@@ -1250,7 +1250,7 @@ struct SettingsGeometry {
     /// Navigation group labels occupy the intentional gaps before connection
     /// and system settings, so the rail never contains unexplained whitespace.
     nav_groups: [(f32, f32, f32, f32); 2],
-    options: [(NebulaTheme, f32, f32, f32, f32); 9],
+    options: [(NebulaTheme, f32, f32, f32, f32); 13],
     /// Live terminal preview card at the top of Appearance: configure →
     /// immediately see (font, size, colors, wallpaper opacity, cursor).
     preview: (f32, f32, f32, f32),
@@ -1521,7 +1521,7 @@ fn settings_geometry(
     let row_h = s(ROW_H);
 
     // Appearance: preview, cards, colors, cursor and interface groups.
-    let card_rows = (9.0f32 / card_columns).ceil();
+    let card_rows = (nebula_settings::ThemeName::BUILTIN.len() as f32 / card_columns).ceil();
     let system_theme_y0 = card_y0 + card_rows * (64.0 + 48.0) + GROUP_ADVANCE;
     let color_y0 = system_theme_y0 + ROW_H + GROUP_ADVANCE;
     // Background-image controls: path, stretch,
@@ -1817,17 +1817,11 @@ fn settings_geometry(
         stacked_rows,
         nav,
         nav_groups,
-        options: [
-            (NebulaTheme::Nebula, card(0.0), card_slot_y(0.0), card_w, card_h),
-            (NebulaTheme::SilverLight, card(1.0), card_slot_y(1.0), card_w, card_h),
-            (NebulaTheme::SteelDark, card(2.0), card_slot_y(2.0), card_w, card_h),
-            (NebulaTheme::LimestoneLight, card(3.0), card_slot_y(3.0), card_w, card_h),
-            (NebulaTheme::CoalDark, card(4.0), card_slot_y(4.0), card_w, card_h),
-            (NebulaTheme::LinenLight, card(5.0), card_slot_y(5.0), card_w, card_h),
-            (NebulaTheme::MossDark, card(6.0), card_slot_y(6.0), card_w, card_h),
-            (NebulaTheme::Nord, card(7.0), card_slot_y(7.0), card_w, card_h),
-            (NebulaTheme::Paper, card(8.0), card_slot_y(8.0), card_w, card_h),
-        ],
+        options: std::array::from_fn(|index| {
+            let name = nebula_settings::ThemeName::BUILTIN[index];
+            let theme = NebulaTheme::from_prompt_name(name.prompt_name()).unwrap();
+            (theme, card(index as f32), card_slot_y(index as f32), card_w, card_h)
+        }),
         preview,
         system_theme: (row_x, at(system_theme_y0), row_w, row_h),
         background: (row_x, at(color_y0), row_w, row_h),

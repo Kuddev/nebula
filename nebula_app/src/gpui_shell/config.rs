@@ -59,6 +59,8 @@ pub struct Settings {
     pub cursor_blink: Option<bool>,
     /// 选区完成即复制（旧壳 `copy_on_select` 设置）。
     pub copy_on_select: bool,
+    /// Cached in-app toast preference, independent of native system notifications.
+    pub ai_toasts: bool,
     /// 标签关闭按钮与标签插入动画都在渲染热路径读取，必须随全局设置驻留内存。
     pub tab_close_visible: bool,
     pub tab_reveal: nebula_settings::TabRevealName,
@@ -90,6 +92,10 @@ impl Global for Settings {}
 /// 回调若尚未注册则回退英文，不能为取语言把磁盘 I/O 带进渲染路径。
 pub(crate) fn ui_language(cx: &App) -> UiLanguage {
     cx.try_global::<Settings>().map(|settings| settings.ui_language).unwrap_or(UiLanguage::EnUs)
+}
+
+pub(crate) fn ai_toasts_enabled(cx: &App) -> bool {
+    cx.try_global::<Settings>().is_none_or(|settings| settings.ai_toasts)
 }
 
 #[inline]
@@ -170,6 +176,7 @@ impl Settings {
             }),
             cursor_blink: runtime.cursor_blink,
             copy_on_select: runtime.copy_on_select,
+            ai_toasts: runtime.ai_toasts,
             tab_close_visible: runtime.tab_close_visible,
             tab_reveal: runtime.tab_reveal,
             ghost: runtime.ghost,

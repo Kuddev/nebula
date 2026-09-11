@@ -100,9 +100,9 @@ pub fn popup_move(state: &mut NebulaPaneState, delta: isize) {
 }
 
 /// 取走选中候选要键入的余量并关闭列表。
-pub fn popup_take(state: &mut NebulaPaneState) -> Option<String> {
+pub fn popup_take(state: &mut NebulaPaneState) -> Option<crate::display::NebulaCompletionItem> {
     let index = state.completion_selected?;
-    let insert = state.completion_items.get(index)?.insert.clone();
+    let insert = state.completion_items.get(index)?.clone();
     state.completion_items.clear();
     state.completion_selected = None;
     Some(insert)
@@ -132,11 +132,13 @@ mod tests {
         let mut state = NebulaPaneState::default();
         state.completion_items = vec![
             NebulaCompletionItem {
+                replace_chars: 0,
                 label: "git pull upstream".to_owned(),
                 insert: " upstream".to_owned(),
                 kind: NebulaCompletionKind::History,
             },
             NebulaCompletionItem {
+                replace_chars: 0,
                 label: "git pull --rebase".to_owned(),
                 insert: " --rebase".to_owned(),
                 kind: NebulaCompletionKind::Command,
@@ -150,7 +152,7 @@ mod tests {
         let mut state = popup_state();
         assert!(popup_active(&state));
         assert_eq!(state.completion_selected, None);
-        assert_eq!(popup_take(&mut state), None);
+        assert!(popup_take(&mut state).is_none());
         assert!(popup_active(&state));
     }
 
@@ -160,7 +162,10 @@ mod tests {
             let mut state = popup_state();
             popup_move(&mut state, delta);
             assert_eq!(state.completion_selected, Some(0));
-            assert_eq!(popup_take(&mut state).as_deref(), Some(" upstream"));
+            assert_eq!(
+                popup_take(&mut state).map(|item| item.insert).as_deref(),
+                Some(" upstream")
+            );
             assert!(!popup_active(&state));
         }
     }
@@ -174,7 +179,7 @@ mod tests {
         viewport.scroll(-28.0, 28.0, state.completion_items.len(), 1);
         assert_eq!(viewport.offset, 1);
         assert_eq!(state.completion_selected, Some(0));
-        assert_eq!(popup_take(&mut state).as_deref(), Some(" upstream"));
+        assert_eq!(popup_take(&mut state).map(|item| item.insert).as_deref(), Some(" upstream"));
     }
 }
 

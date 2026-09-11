@@ -46,6 +46,7 @@ mod assistant_answer;
 mod atomic_file;
 mod backup_remote;
 mod brand;
+mod chemistry;
 mod cli;
 mod clipboard;
 mod codex_config;
@@ -58,6 +59,7 @@ mod display;
 #[cfg(all(feature = "gpui-shell", not(feature = "legacy-shell")))]
 #[path = "product_ui/mod.rs"]
 mod display;
+mod document_io;
 mod encrypted_backup;
 #[cfg(feature = "legacy-shell")]
 mod event;
@@ -95,6 +97,7 @@ mod process_tree;
 mod provider_test;
 mod proxy_test;
 mod remote_dirs;
+mod render_cache;
 #[cfg(feature = "legacy-shell")]
 mod renderer;
 #[cfg(all(feature = "gpui-shell", not(feature = "legacy-shell")))]
@@ -105,6 +108,8 @@ mod runtime_exec;
 mod saved_commands;
 #[cfg(feature = "legacy-shell")]
 mod scheduler;
+#[cfg(test)]
+mod scientific_corpus;
 mod session;
 mod shell_detect;
 mod ssh;
@@ -119,6 +124,8 @@ mod svn_status;
 mod sync;
 mod taskbar;
 mod terminal_profiles;
+mod text_document;
+mod text_preview;
 mod tray;
 mod update_check;
 #[cfg(feature = "gpui-shell")]

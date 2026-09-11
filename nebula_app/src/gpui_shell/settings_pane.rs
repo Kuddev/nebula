@@ -129,6 +129,7 @@ pub struct SettingsPane {
     provider_codex_confirm: Option<String>,
     /// SSH 主机列表（共享三键 + merge 权威）；操作后整体重载防漂移。
     /// SSH 区的行为实现拆在 `ssh_settings.rs`（同类型第二个 impl 块）。
+    pub(super) ssh_library: super::ssh_settings::library::HostLibraryState,
     pub(super) ssh_hosts: crate::gpui_shell::ssh_hosts::SshHostLists,
     /// SSH 编辑器的文本字段常驻，以便所有文本改动都能使进行中的测试失效。
     pub(super) ssh_username_input: Entity<InputState>,
@@ -295,6 +296,22 @@ impl SettingsPane {
         }
         if key == "background_image_cover_chrome" {
             self.request_cover_chrome(value, window, cx);
+            return;
+        }
+        if key == "ai_toasts" {
+            if let Err(error) = self.try_persist(&[(key, (value as u8).to_string())], cx) {
+                let language = crate::gpui_shell::config::ui_language(cx);
+                super::toast::toast(
+                    window,
+                    cx,
+                    super::toast::ToastKind::Warning,
+                    language.format(
+                        crate::i18n::Message::SettingsNotificationsSaveFailed,
+                        &[("error", &error.to_string())],
+                    ),
+                );
+                cx.notify();
+            }
             return;
         }
         self.persist(&[(key, (value as u8).to_string())], cx);
@@ -646,6 +663,7 @@ impl SettingsPane {
             "terminal_proxy" => flag!(terminal_proxy),
             "powerline" => flag!(powerline),
             "ghost" => flag!(ghost),
+            "ai_toasts" => flag!(ai_toasts),
             "cjk_bold_regular" => flag!(cjk_bold_regular),
             "fetch" => flag!(fetch),
             "keep_session" => flag!(keep_session),
@@ -982,12 +1000,21 @@ impl SettingsPane {
             .group(language.pick("启动", "Startup"), cx)
             .child(self.shell_select_row(cx))
             .child(self.startup_directory_row(cx));
-        let alerts = self.group(language.pick("提醒", "Alerts"), cx).child(self.select_row(
-            "bell",
-            language.pick("终端铃声", "Terminal bell"),
-            help("bell", language),
-            cx,
-        ));
+        let alerts = self
+            .group(language.pick("提醒", "Alerts"), cx)
+            .child(self.switch_row(
+                "ai_toasts",
+                language.text(crate::i18n::Message::SettingsNotificationsAiMessages),
+                help("ai_toasts", language),
+                self.runtime.ai_toasts,
+                cx,
+            ))
+            .child(self.select_row(
+                "bell",
+                language.pick("终端铃声", "Terminal bell"),
+                help("bell", language),
+                cx,
+            ));
         let completion = self
             .group(language.pick("补全", "Completion"), cx)
             .child(self.switch_row(

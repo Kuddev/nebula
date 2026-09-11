@@ -13,131 +13,116 @@
 //! 失败合同与旧壳一致：编译失败/超预算/缩到 [`MIN_READABLE_MATH_PX`] 之下
 //! 的公式回退为源码文本（组件库侧代码样式），不撑破阅读列。
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+mod source_fallback;
+use source_fallback::SourceFallback;
+
+use std::cell::{Cell, RefCell};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use gpui::prelude::*;
 use gpui::{
-    App, AvailableSpace, Bounds, Corners, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, Pixels, Rgba, ShapedLine, SharedString, Size, Style, Window, point, px,
-    size,
+    App, AvailableSpace, Bounds, ClipboardItem, Context, Corners, Element, ElementId, Entity,
+    GlobalElementId, Image, ImageFormat, InspectorElementId, IntoElement, LayoutId, Pixels, Render,
+    RenderImage, Rgba, SharedString, Size, Style, Subscription, Task, Window, div, point, px, size,
+};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _, button::ButtonVariants as _,
 };
 use image::Frame;
+use image::ImageEncoder as _;
 
+use super::copy_feedback::CopyFeedback;
+use super::prelude::{Button, IconName, h_flex};
+use super::scientific_render::{self, FormulaKey, ScientificRender};
+use crate::display::ToastKind;
+use crate::i18n::Message;
+use crate::math::MIN_READABLE_MATH_PX;
 use crate::math::layout::MathLayout;
 use crate::math::rasterizer::MathGlyphRasterizer;
-use crate::math::{DEFAULT_LIMITS, MIN_READABLE_MATH_PX, compile_formula, compile_formula_source};
 
 /// 探针编译字号：注册的渲染闭包用它判定"这条公式能否编译"，失败即让
 /// 组件库走源码文本回退。解析/预算类失败与字号无关，任意正值等价。
 const PROBE_PX: f32 = 16.0;
 
-/// 布局缓存条数上限。键含字号与 DPI，同一公式 fit 前后各占一条；超限
-/// 整体清空，单条重建是亚毫秒级 compile，不值得上 LRU。
-const MAX_LAYOUTS: usize = 1024;
-
-/// 公式位图缓存的字节预算；超限整体清空，可见公式下一帧按需重建。
-const IMAGE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
-
-/// 单条公式位图的物理边长/字节上限；超限回退源码文本，与旧壳"fit 不进
-/// 列宽即回退"同一精神，防止病态长公式吃掉显存。
-const MAX_IMAGE_EDGE_PX: u32 = 8192;
-const MAX_IMAGE_BYTES: usize = 24 * 1024 * 1024;
-
-/// 位图四周的出血余量（物理 px）：字形位图的 bearing 可以越出公式度量
-/// 包围盒 1–2px（`GLYPH_PADDING` + 抗锯齿），出血兜住后仍越界的按行裁剪。
-const CANVAS_PAD: u32 = 2;
-
 /// 与旧壳 `fit_math_run` 相同的收缩余量：布局对字号线性，留 2% 吸收
 /// 取整误差，保证最右侧抗锯齿像素不越出阅读列。
 const FIT_MARGIN: f32 = 0.98;
 
+/// Clipboard export is a transient conversion from the existing cached BGRA
+/// image to PNG. Keep that conversion bounded independently of the shared
+/// scientific cache; a pathological formula should disable image copy rather
+/// than allocate another 24 MiB buffer on the UI thread.
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// A copy needs one transformed raw frame and one encoded PNG at the same
+/// time. Keep all simultaneous formula-copy work below a small, independent
+/// transient budget; this is separate from (and does not raise) the shared
+/// 48 MiB scientific cache.
+const MAX_CLIPBOARD_WORK_BYTES: usize = MAX_CLIPBOARD_IMAGE_BYTES * 2;
+static CLIPBOARD_WORK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
 /// 注册 TextView 的公式渲染器；`gpui_shell::init` 调用一次。
 pub fn register(cx: &mut App) {
-    cx.set_global(MathAssets::new());
-    gpui_component::text::set_math_renderer(cx, |spec, _, cx| {
+    scientific_render::init(cx);
+    cx.set_global(MathAssets::new(scientific_render::assets(cx)));
+    gpui_component::text::set_math_renderer(cx, |spec, window, cx| {
         let assets = source_assets(cx);
-        if assets.rasterizer.is_none() {
-            return None;
-        }
         // 探针编译：失败的公式仍是文档文本，交回组件库按代码样式排版。
         assets.layout(&spec.source, spec.display, PROBE_PX, 1.0)?;
-        Some(MathView { source: spec.source.clone(), display: spec.display }.into_any_element())
+        let source = spec.source.clone();
+        let display = spec.display;
+        let key = ("markdown-math-actions", math_element_key(&source, display));
+        let state = window
+            .use_keyed_state(key, cx, |_, cx| MathFormulaView::new(source.clone(), display, cx));
+        Some(state.into_any_element())
     });
 }
 
-// ---- 全局缓存 ----
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct LayoutKey {
-    source: SharedString,
-    display: bool,
-    pixel_size_bits: u32,
-    pixels_per_point_bits: u32,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ImageKey {
-    source: SharedString,
-    display: bool,
-    pixel_size_bits: u32,
-    raster_scale_bits: u32,
-    color: u32,
-}
+// ---- Application-owned background resources ----
 
 /// 位图内的定位信息（物理 px）：paint 时把位图基线吸附到元素基线。
 #[derive(Clone, Copy, Debug)]
-struct ImageGeometry {
+pub(super) struct ImageGeometry {
     /// 位图顶边到公式基线的距离。
-    baseline: u32,
+    pub(super) baseline: u32,
     /// 位图左边相对公式盒左缘的外扩（出血）。
-    pad: u32,
-    width: u32,
-    height: u32,
+    pub(super) pad: u32,
+    pub(super) width: u32,
+    pub(super) height: u32,
 }
 
 pub(crate) struct MathAssets {
     verbatim_source: bool,
-    /// 字体解析失败时为 None：探针直接失败，所有公式回退源码文本。
-    rasterizer: Option<MathGlyphRasterizer>,
-    layouts: HashMap<LayoutKey, Option<Arc<MathLayout>>>,
-    images: HashMap<ImageKey, Option<(Arc<gpui::RenderImage>, ImageGeometry)>>,
-    image_bytes: usize,
+    engine: Arc<ScientificRender>,
 }
 
 impl gpui::Global for MathAssets {}
-
 struct SourceMathAssets(MathAssets);
-
 impl gpui::Global for SourceMathAssets {}
 
 fn source_assets(cx: &mut App) -> &mut MathAssets {
     if cx.try_global::<SourceMathAssets>().is_none() {
-        cx.set_global(SourceMathAssets(MathAssets { verbatim_source: true, ..MathAssets::new() }));
+        let mut assets = MathAssets::new(scientific_render::assets(cx));
+        assets.verbatim_source = true;
+        cx.set_global(SourceMathAssets(assets));
     }
     &mut cx.global_mut::<SourceMathAssets>().0
 }
 
 impl MathAssets {
-    fn new() -> Self {
-        Self {
-            verbatim_source: false,
-            rasterizer: MathGlyphRasterizer::new().ok(),
-            layouts: HashMap::new(),
-            images: HashMap::new(),
-            image_bytes: 0,
-        }
+    fn new(engine: Arc<ScientificRender>) -> Self {
+        Self { verbatim_source: false, engine }
     }
 
-    /// 数学字体加载失败时终端覆盖层必须保留源码，不能先跳格再画空位图。
     pub(crate) fn can_rasterize(&self) -> bool {
-        self.rasterizer.is_some()
+        true // Actual font/bitmap failures remain a source fallback in the worker cache.
     }
 
-    /// 这条公式能不能真的合成出位图。终端覆盖层在跳过源格**之前**问一次：
-    /// 位图合成失败（缺字形、超出位图上限）时源格必须留在屏幕上，否则那块
-    /// 区域既没有原文也没有公式。命中的位图进缓存，随后的绘制取同一份。
     pub(crate) fn can_compose(
         &mut self,
         source: &SharedString,
@@ -150,7 +135,6 @@ impl MathAssets {
         self.image(source, display, pixel_size, pixels_per_point, raster_scale, color).is_some()
     }
 
-    /// 编排（含负缓存：失败公式不逐帧重试）。
     pub(crate) fn layout(
         &mut self,
         source: &SharedString,
@@ -158,25 +142,13 @@ impl MathAssets {
         pixel_size: f32,
         pixels_per_point: f32,
     ) -> Option<Arc<MathLayout>> {
-        let key = LayoutKey {
-            source: source.clone(),
+        self.engine.layout(FormulaKey::new(
+            source.clone(),
             display,
-            pixel_size_bits: pixel_size.to_bits(),
-            pixels_per_point_bits: pixels_per_point.to_bits(),
-        };
-        if !self.layouts.contains_key(&key) {
-            if self.layouts.len() >= MAX_LAYOUTS {
-                self.layouts.clear();
-            }
-            let compile =
-                if self.verbatim_source { compile_formula_source } else { compile_formula };
-            let compiled =
-                compile(source.as_ref(), display, pixel_size, pixels_per_point, DEFAULT_LIMITS)
-                    .ok()
-                    .map(Arc::new);
-            self.layouts.insert(key.clone(), compiled);
-        }
-        self.layouts.get(&key).and_then(Clone::clone)
+            self.verbatim_source,
+            pixel_size,
+            pixels_per_point,
+        ))
     }
 
     /// 旧壳 `fit_math_run` 的等价物：超宽公式按线性比例缩字号，缩到
@@ -211,147 +183,395 @@ impl MathAssets {
         raster_scale: f32,
         color: Rgba,
     ) -> Option<(Arc<gpui::RenderImage>, ImageGeometry)> {
-        let color_bits = ((color.r * 255.0) as u32) << 16
-            | ((color.g * 255.0) as u32) << 8
-            | (color.b * 255.0) as u32;
-        let key = ImageKey {
-            source: source.clone(),
-            display,
-            pixel_size_bits: pixel_size.to_bits(),
-            raster_scale_bits: raster_scale.to_bits(),
-            color: color_bits,
-        };
-        if let Some(cached) = self.images.get(&key) {
-            return cached.clone();
-        }
-
-        let layout = self.layout(source, display, pixel_size, pixels_per_point)?;
-        let composed = self
-            .rasterizer
-            .as_ref()
-            .and_then(|rasterizer| compose_image(rasterizer, &layout, raster_scale, color));
-        if let Some((_, geometry)) = &composed {
-            let bytes = geometry.width as usize * geometry.height as usize * 4;
-            if self.image_bytes.saturating_add(bytes) > IMAGE_BUDGET_BYTES {
-                self.images.clear();
-                self.image_bytes = 0;
-            }
-            self.image_bytes += bytes;
-        }
-        self.images.insert(key, composed.clone());
-        composed
+        self.engine.image(
+            FormulaKey::new(
+                source.clone(),
+                display,
+                self.verbatim_source,
+                pixel_size,
+                pixels_per_point,
+            ),
+            raster_scale,
+            color,
+        )
     }
 }
 
-/// 把整条公式（字形 + 分数线等矩形）按物理像素合成为一张直通 alpha 的
-/// BGRA 位图。字形位图原点吸附整数物理像素（旧壳同款），advance 保持
-/// 全精度。
-fn compose_image(
+/// Adapt the shared CPU bitmap to GPUI without copying its pixel buffer.
+pub(super) fn compose_image(
     rasterizer: &MathGlyphRasterizer,
     layout: &MathLayout,
     raster_scale: f32,
     color: Rgba,
 ) -> Option<(Arc<gpui::RenderImage>, ImageGeometry)> {
-    let content_width = (layout.metrics.width * raster_scale).ceil().max(1.0) as u32;
-    let ascent = (layout.metrics.height * raster_scale).ceil().max(0.0) as u32;
-    let descent = (layout.metrics.depth * raster_scale).ceil().max(0.0) as u32;
-    let width = content_width.checked_add(CANVAS_PAD * 2)?;
-    let height = ascent.checked_add(descent)?.checked_add(CANVAS_PAD * 2)?.max(1);
-    if width > MAX_IMAGE_EDGE_PX || height > MAX_IMAGE_EDGE_PX {
-        return None;
-    }
-    let bytes = width as usize * height as usize * 4;
-    if bytes > MAX_IMAGE_BYTES {
-        return None;
-    }
-    let baseline = (ascent + CANVAS_PAD) as i64;
-
-    // 先在 alpha 平面上合成（Porter-Duff over），最后一次性染色。
-    let mut coverage = vec![0u8; width as usize * height as usize];
-    for op in &layout.glyphs {
-        let glyph = rasterizer.rasterize(op.glyph_id, op.pixel_size * raster_scale).ok()?;
-        if glyph.width == 0 || glyph.height == 0 {
-            continue;
-        }
-        let origin_x = (op.x * raster_scale).round() as i64 + glyph.left as i64 + CANVAS_PAD as i64;
-        let origin_y = baseline + (op.baseline_y * raster_scale).round() as i64 - glyph.top as i64;
-        blit_over(
-            &mut coverage,
-            width,
-            height,
-            origin_x,
-            origin_y,
-            glyph.width as u32,
-            glyph.height as u32,
-            |x, y| glyph.rgba[(y * glyph.width as usize + x) * 4 + 3],
-        );
-    }
-    for rule in &layout.rules {
-        let x0 = (rule.x * raster_scale).round() as i64 + CANVAS_PAD as i64;
-        let y0 = baseline + (rule.y * raster_scale).round() as i64;
-        let w = (rule.width * raster_scale).round().max(1.0) as u32;
-        let h = (rule.height * raster_scale).round().max(1.0) as u32;
-        blit_over(&mut coverage, width, height, x0, y0, w, h, |_, _| u8::MAX);
-    }
-
-    // gpui 图像管线吃直通 alpha 的 BGRA（与 DirectWrite 字形同一约定）。
-    let mut bgra = vec![0u8; bytes];
-    let (r, g, b) = (
+    let color = [
         (color.r * 255.0).round() as u8,
         (color.g * 255.0).round() as u8,
         (color.b * 255.0).round() as u8,
-    );
-    for (pixel, alpha) in bgra.chunks_exact_mut(4).zip(&coverage) {
-        pixel[0] = b;
-        pixel[1] = g;
-        pixel[2] = r;
-        pixel[3] = *alpha;
-    }
-    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
-    let geometry = ImageGeometry { baseline: baseline as u32, pad: CANVAS_PAD, width, height };
+    ];
+    let bitmap = crate::math::bitmap::compose(rasterizer, layout, raster_scale, color)?;
+    let geometry = ImageGeometry {
+        baseline: bitmap.baseline,
+        pad: bitmap.pad,
+        width: bitmap.width,
+        height: bitmap.height,
+    };
+    let buffer = image::RgbaImage::from_raw(bitmap.width, bitmap.height, bitmap.pixels)?;
     Some((Arc::new(gpui::RenderImage::new([Frame::new(buffer)])), geometry))
 }
 
-/// alpha 平面上的 Porter-Duff over 合成；目标越界的像素按行列裁剪。
-#[allow(clippy::too_many_arguments)]
-fn blit_over(
-    canvas: &mut [u8],
-    canvas_width: u32,
-    canvas_height: u32,
-    origin_x: i64,
-    origin_y: i64,
-    width: u32,
-    height: u32,
-    sample: impl Fn(usize, usize) -> u8,
-) {
-    for row in 0..height as i64 {
-        let y = origin_y + row;
-        if y < 0 || y >= canvas_height as i64 {
-            continue;
+// ---- 公式元素 ----
+
+fn math_element_key(source: &SharedString, display: bool) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    display.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn latex_clipboard_text(source: &SharedString) -> String {
+    source.to_string()
+}
+
+fn image_copy_is_complete(layout: &MathLayout) -> bool {
+    layout.text.is_empty()
+}
+
+/// Return a ready-to-copy image from the same scientific cache used by the
+/// visible formula. A formula with text fallback is intentionally rejected:
+/// `MathLayout.text` is painted separately by [`MathView::paint_math`], so its
+/// `RenderImage` alone would be an incomplete copy.
+fn ready_formula_image(
+    source: &SharedString,
+    display: bool,
+    pixel_size: f32,
+    window: &Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let text_style = window.text_style();
+    let pixels_per_point = crate::math::pixels_per_point(window.scale_factor());
+    let color = Rgba::from(text_style.color);
+    let raster_scale = window.scale_factor();
+    let assets = source_assets(cx);
+    let layout = assets.layout(source, display, pixel_size, pixels_per_point)?;
+    if !image_copy_is_complete(&layout) {
+        return None;
+    }
+    let (image, _) =
+        assets.image(source, display, pixel_size, pixels_per_point, raster_scale, color)?;
+    let size = image.size(0);
+    let width = u32::from(size.width) as usize;
+    let height = u32::from(size.height) as usize;
+    let expected = width.checked_mul(height)?.checked_mul(4)?;
+    (expected > 0
+        && expected <= MAX_CLIPBOARD_IMAGE_BYTES
+        && image.as_bytes(0).is_some_and(|bytes| bytes.len() == expected))
+    .then_some(image)
+}
+
+struct ClipboardWorkReservation {
+    bytes: usize,
+}
+
+impl Drop for ClipboardWorkReservation {
+    fn drop(&mut self) {
+        CLIPBOARD_WORK_BYTES.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+fn reserve_clipboard_work(input_bytes: usize) -> Option<ClipboardWorkReservation> {
+    let bytes = input_bytes.checked_add(MAX_CLIPBOARD_IMAGE_BYTES)?;
+    if bytes > MAX_CLIPBOARD_WORK_BYTES {
+        return None;
+    }
+    let mut used = CLIPBOARD_WORK_BYTES.load(Ordering::Acquire);
+    loop {
+        let next = used.checked_add(bytes)?;
+        if next > MAX_CLIPBOARD_WORK_BYTES {
+            return None;
         }
-        for column in 0..width as i64 {
-            let x = origin_x + column;
-            if x < 0 || x >= canvas_width as i64 {
-                continue;
-            }
-            let source = sample(column as usize, row as usize) as u32;
-            if source == 0 {
-                continue;
-            }
-            let target = &mut canvas[y as usize * canvas_width as usize + x as usize];
-            let existing = *target as u32;
-            *target = (existing + source * (255 - existing) / 255).min(255) as u8;
+        match CLIPBOARD_WORK_BYTES.compare_exchange_weak(
+            used,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(ClipboardWorkReservation { bytes }),
+            Err(actual) => used = actual,
         }
     }
 }
 
-// ---- 公式元素 ----
+/// A writer which fails before the output vector can grow beyond the
+/// clipboard budget.  `PngEncoder` writes incrementally, so this bounds the
+/// encoded allocation rather than encoding an oversized PNG and discarding it
+/// afterwards.
+struct BoundedPngWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedPngWriter {
+    fn new(limit: usize, capacity: usize) -> Self {
+        Self { bytes: Vec::with_capacity(capacity.min(limit)), limit }
+    }
+}
+
+impl io::Write for BoundedPngWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.bytes.len());
+        if bytes.len() > remaining {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "PNG clipboard budget exceeded"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Convert GPUI's cached BGRA frame into a bounded RGBA PNG for the system
+/// clipboard. The cached frame is straight-alpha (coverage in A, source color
+/// in RGB), so only the channel order changes; no un-premultiplication is
+/// required here. This function is called by a background task for UI copies.
+fn formula_png(image: &RenderImage) -> Option<Vec<u8>> {
+    let size = image.size(0);
+    let width = u32::from(size.width);
+    let height = u32::from(size.height);
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    if expected == 0 || expected > MAX_CLIPBOARD_IMAGE_BYTES {
+        return None;
+    }
+    let source = image.as_bytes(0)?;
+    if source.len() != expected {
+        return None;
+    }
+    let _reservation = reserve_clipboard_work(expected)?;
+    formula_png_from_bgra(width, height, source)
+}
+
+fn formula_png_from_bgra(width: u32, height: u32, source: &[u8]) -> Option<Vec<u8>> {
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    if expected == 0 || expected > MAX_CLIPBOARD_IMAGE_BYTES || source.len() != expected {
+        return None;
+    }
+    let mut rgba = source.to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let mut writer = BoundedPngWriter::new(MAX_CLIPBOARD_IMAGE_BYTES, expected);
+    image::codecs::png::PngEncoder::new(&mut writer)
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(writer.bytes)
+}
+
+/// Stateful wrapper around the layout element. The action controls are
+/// absolutely positioned and only become visible while the formula group is
+/// hovered, so inline baselines and display-math spacing remain unchanged.
+struct MathFormulaView {
+    source: SharedString,
+    display: bool,
+    visible_pixel_size: Rc<Cell<Option<f32>>>,
+    latex_feedback: Entity<CopyFeedback>,
+    image_feedback: Entity<CopyFeedback>,
+    image_copy_task: Option<Task<()>>,
+    _latex_feedback_subscription: Subscription,
+    _image_feedback_subscription: Subscription,
+}
+
+impl MathFormulaView {
+    fn new(source: SharedString, display: bool, cx: &mut Context<Self>) -> Self {
+        let latex_feedback = cx.new(|_| CopyFeedback::new());
+        let image_feedback = cx.new(|_| CopyFeedback::new());
+        let latex_feedback_subscription = cx.observe(&latex_feedback, |_, _, cx| cx.notify());
+        let image_feedback_subscription = cx.observe(&image_feedback, |_, _, cx| cx.notify());
+        Self {
+            source,
+            display,
+            visible_pixel_size: Rc::new(Cell::new(None)),
+            latex_feedback,
+            image_feedback,
+            image_copy_task: None,
+            _latex_feedback_subscription: latex_feedback_subscription,
+            _image_feedback_subscription: image_feedback_subscription,
+        }
+    }
+
+    fn copy_formula_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.image_copy_task.is_some() {
+            return;
+        }
+        let language = super::config::ui_language(cx);
+        let Some(pixel_size) = self.visible_pixel_size.get() else {
+            crate::gpui_shell::toast::toast(
+                window,
+                cx,
+                ToastKind::Warning,
+                language.text(Message::EditorMathImageUnavailable),
+            );
+            return;
+        };
+        let Some(image) = ready_formula_image(&self.source, self.display, pixel_size, window, cx)
+        else {
+            crate::gpui_shell::toast::toast(
+                window,
+                cx,
+                ToastKind::Warning,
+                language.text(Message::EditorMathImageUnavailable),
+            );
+            return;
+        };
+
+        let executor = cx.background_executor().clone();
+        let encode = executor.spawn(async move { formula_png(&image) });
+        self.image_feedback.update(cx, |feedback, cx| feedback.mark_pending(cx));
+
+        let window_handle = window.window_handle();
+        self.image_copy_task = Some(cx.spawn(async move |this, cx| {
+            let png = encode.await;
+            let succeeded = png.is_some();
+            let applied = this.update(cx, move |view, cx| {
+                view.image_copy_task = None;
+                match png {
+                    Some(png) => {
+                        cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                            ImageFormat::Png,
+                            png,
+                        )));
+                        view.image_feedback.update(cx, |feedback, cx| feedback.mark_copied(cx));
+                    },
+                    None => view.image_feedback.update(cx, |feedback, cx| feedback.clear(cx)),
+                }
+            });
+            if applied.is_ok() {
+                let _ = window_handle.update(cx, |_, window, cx| {
+                    let (kind, message) = if succeeded {
+                        (ToastKind::Success, Message::EditorMathImageCopied)
+                    } else {
+                        (ToastKind::Warning, Message::EditorMathImageUnavailable)
+                    };
+                    crate::gpui_shell::toast::toast(window, cx, kind, language.text(message));
+                });
+            }
+        }));
+        cx.notify();
+    }
+}
+
+impl Render for MathFormulaView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let source = self.source.clone();
+        let source_for_latex = source.clone();
+        let display = self.display;
+        let key = math_element_key(&source, display);
+        let group = format!("markdown-math-actions-{key:x}");
+        let language = super::config::ui_language(cx);
+        let latex_feedback = self.latex_feedback.clone();
+        let image_feedback = self.image_feedback.clone();
+        let latex_copied = latex_feedback.read(cx).is_copied();
+        let image_copied = image_feedback.read(cx).is_copied();
+        let image_pending = image_feedback.read(cx).is_pending();
+        let visible_pixel_size = self.visible_pixel_size.get();
+        let image_ready = !image_pending
+            && visible_pixel_size.is_some_and(|pixel_size| {
+                ready_formula_image(&source, display, pixel_size, window, cx).is_some()
+            });
+        let owner = cx.weak_entity();
+
+        let latex_button = Button::new(("markdown-copy-math-latex", key))
+            .custom(
+                gpui_component::button::ButtonCustomVariant::new(cx)
+                    .hover(cx.theme().list_hover)
+                    .active(cx.theme().list_active),
+            )
+            .compact()
+            .size(px(28.0))
+            .icon(if latex_copied { IconName::Check } else { IconName::Copy })
+            .tooltip(language.text(Message::EditorCopyMathLatex))
+            .on_click(move |_, window, cx| {
+                // The GPUI clipboard API is best-effort and returns `()`. The
+                // payload is always valid here, so mark the visual action
+                // complete immediately after submitting it.
+                cx.write_to_clipboard(ClipboardItem::new_string(latex_clipboard_text(
+                    &source_for_latex,
+                )));
+                latex_feedback.update(cx, |feedback, cx| feedback.mark_copied(cx));
+                crate::gpui_shell::toast::toast(
+                    window,
+                    cx,
+                    ToastKind::Success,
+                    language.text(Message::EditorMathLatexCopied),
+                );
+            });
+
+        let owner_for_image = owner.clone();
+        let image_button = Button::new(("markdown-copy-math-image", key))
+            .custom(
+                gpui_component::button::ButtonCustomVariant::new(cx)
+                    .hover(cx.theme().list_hover)
+                    .active(cx.theme().list_active),
+            )
+            .compact()
+            .size(px(28.0))
+            .icon(if image_pending {
+                IconName::Loader
+            } else if image_copied {
+                IconName::Check
+            } else {
+                IconName::File
+            })
+            .loading(image_pending)
+            .disabled(!image_ready || image_pending)
+            .tooltip(if image_ready {
+                language.text(Message::EditorCopyMathImage)
+            } else {
+                language.text(Message::EditorMathImageUnavailable)
+            })
+            .on_click(move |_, window, cx| {
+                let _ = owner_for_image.update(cx, |view, cx| view.copy_formula_image(window, cx));
+            });
+
+        div()
+            .relative()
+            .flex_shrink_0()
+            .group(group.clone())
+            .child(MathView {
+                source,
+                display,
+                visible_pixel_size: self.visible_pixel_size.clone(),
+            })
+            .child(
+                h_flex()
+                    .absolute()
+                    .top(px(-4.0))
+                    .right(px(0.0))
+                    .invisible()
+                    .when(latex_copied || image_copied || image_pending, |actions| {
+                        actions.visible()
+                    })
+                    .group_hover(group, |actions| actions.visible())
+                    .gap(px(2.0))
+                    .p(px(2.0))
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().popover)
+                    .shadow_sm()
+                    .child(latex_button)
+                    .child(image_button),
+            )
+    }
+}
 
 /// 一条公式的 GPUI 元素。行内公式由组件库放进换行 flex 行（底边对齐），
 /// 自身用底部留白把公式基线补齐到文本基线；块级公式由组件库水平居中。
 struct MathView {
     source: SharedString,
     display: bool,
+    visible_pixel_size: Rc<Cell<Option<f32>>>,
 }
 
 /// measure 闭包与 paint 之间的当帧交接。taffy 可能以不同可用宽度多次
@@ -367,9 +587,8 @@ enum FitSlot {
         /// 元素底边到公式基线的距离（行内基线补偿；块级为 depth）。
         baseline_from_bottom: f32,
     },
-    /// fit 放弃后的退化形态：单行源码文本（探针已保证可编译，只有
-    /// 极窄列会走到这里）。
-    Text(ShapedLine),
+    /// 排版等待或 fit 放弃时保留有界的多行源码预览。
+    Text(SourceFallback),
 }
 
 impl IntoElement for MathView {
@@ -420,6 +639,7 @@ impl Element for MathView {
         let color = Rgba::from(text_style.color);
         let measure_slot = slot.clone();
         let style = Style { flex_shrink: 0.0, ..Style::default() };
+        let visible_pixel_size = self.visible_pixel_size.clone();
         let layout_id = window.request_measured_layout(style, move |_, available, window, cx| {
             let max_width = match available.width {
                 AvailableSpace::Definite(width) => f32::from(width).max(8.0),
@@ -440,6 +660,7 @@ impl Element for MathView {
                 });
             match fitted {
                 Some((layout, pixel_size)) => {
+                    visible_pixel_size.set(Some(pixel_size));
                     let bottom_pad = if display {
                         0.0
                     } else {
@@ -453,15 +674,18 @@ impl Element for MathView {
                     size(px(width), px(height))
                 },
                 None => {
-                    let line = window.text_system().shape_line(
-                        source.clone(),
+                    visible_pixel_size.set(None);
+                    let fallback = SourceFallback::shape(
+                        &source,
                         px(nominal_px),
-                        std::slice::from_ref(&run),
-                        None,
+                        run.clone(),
+                        max_width,
+                        px(line_height),
+                        window,
                     );
-                    let width = f32::from(line.width).min(max_width.max(8.0));
-                    *measure_slot.borrow_mut() = FitSlot::Text(line);
-                    size(px(width), px(line_height))
+                    let measured = fallback.size;
+                    *measure_slot.borrow_mut() = FitSlot::Text(fallback);
+                    measured
                 },
             }
         });
@@ -493,10 +717,7 @@ impl Element for MathView {
         let line_height = text_style.line_height_in_pixels(window.rem_size());
         match &*slot.borrow() {
             FitSlot::Pending => {},
-            FitSlot::Text(line) => {
-                let _ =
-                    line.paint(bounds.origin, line_height, gpui::TextAlign::Left, None, window, cx);
-            },
+            FitSlot::Text(text) => text.paint(bounds, line_height, window, cx),
             FitSlot::Math { layout, pixel_size, baseline_from_bottom } => {
                 let bounds_width = f32::from(bounds.size.width);
                 // taffy 最终宽度与最后一次 measure 不一致（罕见）：按实际
@@ -512,9 +733,11 @@ impl Element for MathView {
                         pixels_per_point,
                         bounds_width,
                     ) else {
+                        self.visible_pixel_size.set(None);
                         self.paint_source(bounds, window, cx);
                         return;
                     };
+                    self.visible_pixel_size.set(Some(pixel_size));
                     let baseline = bounds.bottom() - px(layout.metrics.depth);
                     self.paint_math(layout.as_ref(), pixel_size, baseline, bounds, window, cx);
                     return;
@@ -530,20 +753,16 @@ impl Element for MathView {
 impl MathView {
     fn paint_source(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
         let style = window.text_style();
-        let line = window.text_system().shape_line(
-            self.source.clone(),
+        let line_height = style.line_height_in_pixels(window.rem_size());
+        let fallback = SourceFallback::shape(
+            &self.source,
             style.font_size.to_pixels(window.rem_size()),
-            &[style.to_run(self.source.len())],
-            None,
-        );
-        let _ = line.paint(
-            bounds.origin,
-            style.line_height_in_pixels(window.rem_size()),
-            gpui::TextAlign::Left,
-            None,
+            style.to_run(self.source.len()),
+            f32::from(bounds.size.width),
+            line_height,
             window,
-            cx,
         );
+        fallback.paint(bounds, line_height, window, cx);
     }
 
     /// 位图贴到基线上（物理像素吸附），数学字体缺字的字符用 gpui 文本
@@ -646,4 +865,58 @@ fn paint_cached_image(
         0,
         false,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::layout::MathTextOp;
+    use std::io::Write as _;
+
+    #[test]
+    fn formula_png_converts_gpui_bgra_to_rgba_without_changing_alpha() {
+        let frame = image::RgbaImage::from_raw(
+            2,
+            1,
+            vec![
+                0x33, 0x22, 0x11, 0x80, // BGRA -> RGBA (11,22,33,80)
+                0xCC, 0xBB, 0xAA, 0xFF,
+            ],
+        )
+        .unwrap();
+        let image = RenderImage::new([Frame::new(frame)]);
+        let png = formula_png(&image).expect("small formula frame is exportable");
+        let decoded = image::load_from_memory(&png).unwrap().into_rgba8();
+        assert_eq!(decoded.as_raw(), &[0x11, 0x22, 0x33, 0x80, 0xAA, 0xBB, 0xCC, 0xFF]);
+    }
+
+    #[test]
+    fn formula_png_rejects_empty_frames() {
+        let image = RenderImage::new([Frame::new(image::RgbaImage::new(0, 0))]);
+        assert!(formula_png(&image).is_none());
+    }
+
+    #[test]
+    fn formula_image_export_rejects_layouts_with_font_fallback_text() {
+        let mut layout = MathLayout::default();
+        assert!(image_copy_is_complete(&layout));
+        layout
+            .text
+            .push(MathTextOp { character: '中', x: 0.0, baseline_y: 0.0, pixel_size: 16.0 });
+        assert!(!image_copy_is_complete(&layout));
+    }
+
+    #[test]
+    fn latex_copy_preserves_the_current_formula_source_verbatim() {
+        let source: SharedString = "  x^2 + y^2  \r\n".into();
+        assert_eq!(latex_clipboard_text(&source), "  x^2 + y^2  \r\n");
+    }
+
+    #[test]
+    fn png_writer_rejects_output_past_the_clipboard_budget() {
+        let mut writer = BoundedPngWriter::new(4, 0);
+        assert!(writer.write_all(b"1234").is_ok());
+        assert!(writer.write_all(b"5").is_err());
+        assert_eq!(writer.bytes, b"1234");
+    }
 }

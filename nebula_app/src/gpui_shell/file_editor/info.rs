@@ -1,3 +1,4 @@
+use super::reader_presentation as design;
 use super::*;
 
 impl TextFileView {
@@ -5,13 +6,10 @@ impl TextFileView {
         let language = super::super::config::ui_language(cx);
         let muted = cx.theme().muted_foreground;
         let text = self.input.read(cx).value();
-        let mut rows = vec![
-            (
-                Message::EditorType,
-                self.path.extension().unwrap_or_default().to_string_lossy().to_uppercase(),
-            ),
-            (Message::EditorLineCount, text.lines().count().to_string()),
+        let kind = self.path.extension().unwrap_or_default().to_string_lossy().to_uppercase();
+        let statistics = vec![
             (Message::EditorCharacters, text.chars().count().to_string()),
+            (Message::EditorLineCount, text.lines().count().to_string()),
             (
                 Message::EditorStatus,
                 language
@@ -19,16 +17,10 @@ impl TextFileView {
                     .to_owned(),
             ),
         ];
+        let mut properties = Vec::new();
         if let Some(document) = &self.document {
-            rows.insert(1, (Message::EditorSize, format!("{} B", document.bytes.len())));
-            if let Some(modified) = document.modified {
-                let date: chrono::DateTime<chrono::Local> = modified.into();
-                rows.insert(
-                    2,
-                    (Message::EditorModified, date.format("%Y-%m-%d %H:%M").to_string()),
-                );
-            }
-            rows.push((
+            properties.push((Message::EditorSize, format!("{} B", document.size())));
+            properties.push((
                 Message::EditorEncodingLabel,
                 if document.invalid_encoding {
                     "—"
@@ -37,82 +29,162 @@ impl TextFileView {
                 } else {
                     "UTF-8"
                 }
-                .into(),
+                .to_owned(),
             ));
-            rows.push((
+            properties.push((
                 Message::EditorLineEnding,
-                if document.crlf { "CRLF" } else { "LF" }.into(),
+                if document.crlf { "CRLF" } else { "LF" }.to_owned(),
             ));
+            if let Some(modified) = document.modified() {
+                let date: chrono::DateTime<chrono::Local> = modified.into();
+                properties
+                    .push((Message::EditorModified, date.format("%Y-%m-%d %H:%M").to_string()));
+            }
         }
-        let path = self.path.clone();
-        let name = self.title.clone();
+        let section = |title, rows: Vec<(Message, String)>| {
+            v_flex()
+                .gap(px(4.0))
+                .mt(px(24.0))
+                .child(
+                    div()
+                        .mb(px(10.0))
+                        .text_size(px(design::SECONDARY_SIZE))
+                        .text_color(muted)
+                        .child(language.text(title)),
+                )
+                .children(rows.into_iter().map(|(label, value)| {
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap_2()
+                        .py(px(5.0))
+                        .text_size(px(design::SECONDARY_SIZE))
+                        .child(div().flex_shrink_0().text_color(muted).child(language.text(label)))
+                        .child(div().flex_1().min_w_0().text_right().child(value))
+                }))
+        };
+        let path = self.source.display();
+        let name = self.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let reveal = self.path.clone();
         let external = self.path.clone();
+        let action = |id: &'static str, icon: IconName, label: Message| {
+            Button::new(id).ghost().w_full().h(px(design::ACTION_HEIGHT)).px(px(6.0)).child(
+                h_flex()
+                    .debug_selector(move || id.to_owned())
+                    .w_full()
+                    .h_full()
+                    .gap(px(10.0))
+                    .text_size(px(design::SECONDARY_SIZE))
+                    .text_color(muted)
+                    .child(Icon::new(icon).size(px(design::ICON_SIZE)))
+                    .child(language.text(label)),
+            )
+        };
+        let actions = v_flex()
+            .gap(px(3.0))
+            .mt(px(24.0))
+            .pt(px(14.0))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(action("info-copy-path", IconName::Copy, Message::EditorCopyPath).on_click(
+                move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()))
+                },
+            ))
+            .child(action("info-copy-name", IconName::File, Message::EditorCopyName).on_click(
+                move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(name.clone()))
+                },
+            ))
+            .when(!self.source.is_remote(), |panel| {
+                panel
+                    .child(
+                        action("info-reveal", IconName::FolderOpen, Message::EditorReveal)
+                            .on_click(move |_, _, _| {
+                                super::super::workspace::reveal_in_file_manager(&reveal)
+                            }),
+                    )
+                    .child(
+                        action("info-open", IconName::ExternalLink, Message::EditorOpenExternal)
+                            .on_click(move |_, _, _| {
+                                super::super::workspace::open_in_file_manager(&external)
+                            }),
+                    )
+            });
+        let body = v_flex()
+            .id("file-info-body")
+            .flex_1()
+            .min_h_0()
+            .px(px(design::PANEL_PADDING))
+            .py(px(22.0))
+            .overflow_y_scroll()
+            .child(
+                h_flex()
+                    .gap(px(10.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(32.0))
+                            .h(px(38.0))
+                            .flex_shrink_0()
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().muted)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(10.0))
+                            .font_semibold()
+                            .text_color(muted)
+                            .child(kind.clone()),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .text_size(px(design::CHROME_SIZE))
+                                    .font_semibold()
+                                    .child(self.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(design::SECONDARY_SIZE))
+                                    .text_color(muted)
+                                    .child(if self.markdown {
+                                        language.text(Message::EditorMarkdownDocument).to_owned()
+                                    } else {
+                                        kind
+                                    }),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .mt(px(12.0))
+                    .text_size(px(design::SECONDARY_SIZE))
+                    .line_height(gpui::relative(1.7))
+                    .text_color(muted)
+                    .child(self.source.display()),
+            )
+            .child(section(Message::EditorStatistics, statistics))
+            .child(section(Message::EditorProperties, properties))
+            .child(actions);
         v_flex()
             .id("file-info-panel")
-            .w(px(250.0))
-            .max_w(gpui::relative(0.38))
+            .relative()
+            .w(px(design::clamp_details_width(self.details_width)))
+            .min_w(px(design::DETAILS_MIN_WIDTH))
+            .max_w(gpui::relative(0.42))
             .h_full()
             .flex_shrink_0()
             .border_l_1()
             .border_color(cx.theme().border)
-            .p_3()
-            .gap_3()
-            .overflow_y_scroll()
-            .child(div().text_xs().font_semibold().child(language.text(Message::EditorInfo)))
-            .child(div().text_sm().font_semibold().child(self.title.clone()))
-            .child(div().text_xs().text_color(muted).child(self.path.display().to_string()))
-            .children(rows.into_iter().map(|(label, value)| {
-                h_flex()
-                    .w_full()
-                    .items_start()
-                    .gap_2()
-                    .text_xs()
-                    .child(div().flex_shrink_0().text_color(muted).child(language.text(label)))
-                    .child(div().flex_1().min_w_0().text_right().child(value))
-            }))
-            .child(
-                Button::new("info-copy-path")
-                    .ghost()
-                    .small()
-                    .justify_start()
-                    .label(language.text(Message::EditorCopyPath))
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                            path.display().to_string(),
-                        ))
-                    }),
-            )
-            .child(
-                Button::new("info-copy-name")
-                    .ghost()
-                    .small()
-                    .justify_start()
-                    .label(language.text(Message::EditorCopyName))
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(name.clone()))
-                    }),
-            )
-            .child(
-                Button::new("info-reveal")
-                    .ghost()
-                    .small()
-                    .justify_start()
-                    .label(language.text(Message::EditorReveal))
-                    .on_click(move |_, _, _| {
-                        super::super::workspace::reveal_in_file_manager(&reveal)
-                    }),
-            )
-            .child(
-                Button::new("info-open")
-                    .ghost()
-                    .small()
-                    .justify_start()
-                    .label(language.text(Message::EditorOpenExternal))
-                    .on_click(move |_, _, _| {
-                        super::super::workspace::open_in_file_manager(&external)
-                    }),
-            )
+            .child(self.render_details_header(cx))
+            .child(body)
+            .child(self.render_details_resize_handle(cx))
             .into_any_element()
     }
 }

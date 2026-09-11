@@ -132,6 +132,22 @@ impl Geom {
         self.out.push(Primitive::Poly { points });
     }
 
+    /// 把一个凸多边形裁到当前 cell。圆角框线是把扩展的圆角矩形裁回
+    /// cell 后得到的可见弧段；如果让这些顶点越过 cell，GPUI 会把圆角
+    /// 的外半径泄漏到相邻字符里。对角线和 Powerline 仍使用 [`Self::poly`]
+    /// 保留跨 cell 的连接语义。
+    fn poly_clipped(&mut self, mut points: Vec<[f32; 2]>) {
+        for (axis, bound, keep_greater) in
+            [(0, 0.0, true), (0, self.w, false), (1, 0.0, true), (1, self.h, false)]
+        {
+            points = clip_polygon_axis(points, axis, bound, keep_greater);
+            if points.len() < 3 {
+                return;
+            }
+        }
+        self.out.push(Primitive::Poly { points });
+    }
+
     /// 设备像素 → 逻辑像素。
     fn finish(self, scale: f32) -> Vec<Primitive> {
         let inv = 1.0 / scale;
@@ -153,6 +169,41 @@ impl Geom {
             })
             .collect()
     }
+}
+
+/// Sutherland–Hodgman clipping for the four axis-aligned cell edges.
+fn clip_polygon_axis(
+    points: Vec<[f32; 2]>,
+    axis: usize,
+    bound: f32,
+    keep_greater: bool,
+) -> Vec<[f32; 2]> {
+    let Some(mut previous) = points.last().copied() else {
+        return Vec::new();
+    };
+    let mut previous_inside =
+        if keep_greater { previous[axis] >= bound } else { previous[axis] <= bound };
+    let mut clipped = Vec::with_capacity(points.len() + 1);
+    for current in points {
+        let current_inside =
+            if keep_greater { current[axis] >= bound } else { current[axis] <= bound };
+        if current_inside != previous_inside {
+            let delta = current[axis] - previous[axis];
+            if delta.abs() > f32::EPSILON {
+                let t = (bound - previous[axis]) / delta;
+                clipped.push([
+                    previous[0] + (current[0] - previous[0]) * t,
+                    previous[1] + (current[1] - previous[1]) * t,
+                ]);
+            }
+        }
+        if current_inside {
+            clipped.push(current);
+        }
+        previous = current;
+        previous_inside = current_inside;
+    }
+    clipped
 }
 
 fn draw(c: char, g: &mut Geom) {
@@ -383,47 +434,105 @@ fn draw(c: char, g: &mut Geom) {
             g.v_line(v_lines.0, left_bot_y, bottom_size, stroke);
             g.v_line(v_lines.1, right_bot_y, bottom_size, stroke);
         },
-        // 圆角 '╭','╮','╯','╰'：两段直臂 + 四分之一圆环（凸四边形分段）。
+        // 圆角 '╭','╮','╯','╰'：按 WT BuiltinGlyphs 的扩展 rounded-rect
+        // 语义生成两段直臂和一段四分之一圆环。rounded-rect 故意延伸到
+        // cell 外，再裁回当前 cell；这样相邻的 `╭─╮`/`╰─╯` 连接点与
+        // 普通框线共享同一条像素边界，不会在圆角处留下毛刺或多出一列墨迹。
+        // 笔画宽继续沿用 Nebula 的 `/8` 合同，只有圆角的位置和裁剪规则
+        // 对齐 WT。
         '\u{256d}'..='\u{2570}' => {
-            // 臂方向：sh=+1 右臂，sv=+1 下臂。
-            let (sh, sv): (f32, f32) = match c {
-                '\u{256d}' => (1.0, 1.0),
-                '\u{256e}' => (-1.0, 1.0),
-                '\u{256f}' => (-1.0, -1.0),
-                '\u{2570}' => (1.0, -1.0),
+            // Direct2D 的原实现先把路径坐标按半笔画修正，再对绝对坐标
+            // round；在设备像素域复刻同一计算，避免奇数 cell 宽度下圆角
+            // 比相邻直线偏半个像素。
+            let t = stroke;
+            let half = t / 2.0;
+            let snap_beg = |base: f32| (base - half).round() + half;
+            let snap_end = |base: f32| (base + half).round() - half;
+            let (left, top, right, bottom, start_angle, end_angle) = match c {
+                '\u{256d}' => (
+                    snap_beg(w * 0.5),
+                    snap_beg(h * 0.5),
+                    snap_end(w * 1.5),
+                    snap_end(h * 1.5),
+                    PI,
+                    PI + FRAC_PI_2,
+                ),
+                '\u{256e}' => (
+                    snap_beg(w * -0.5),
+                    snap_beg(h * 0.5),
+                    snap_end(w * 0.5),
+                    snap_end(h * 1.5),
+                    -FRAC_PI_2,
+                    0.0,
+                ),
+                '\u{256f}' => (
+                    snap_beg(w * -0.5),
+                    snap_beg(h * -0.5),
+                    snap_end(w * 0.5),
+                    snap_end(h * 0.5),
+                    0.0,
+                    FRAC_PI_2,
+                ),
+                '\u{2570}' => (
+                    snap_beg(w * 0.5),
+                    snap_beg(h * -0.5),
+                    snap_end(w * 1.5),
+                    snap_end(h * 0.5),
+                    FRAC_PI_2,
+                    PI,
+                ),
                 _ => unreachable!(),
             };
-            let t = stroke;
-            // 外半径与旧实现一致；圆心落在两臂中线的交汇几何位上。
-            let outer = (w.min(h) + t) / 2.0;
-            let inner = outer - t;
-            let d = outer - t / 2.0;
-            let (kx, ky) = (g.x_center() + sh * d, g.y_center() + sv * d);
-
-            // 直臂：竖臂从上/下边缘到圆心高度，横臂从左/右边缘到圆心横位。
-            let (vx0, vx1) = g.v_line_bounds(g.x_center(), t);
-            let (hy0, hy1) = g.h_line_bounds(g.y_center(), t);
-            if sv > 0.0 {
-                g.rect(vx0, ky, vx1 - vx0, h - ky);
-            } else {
-                g.rect(vx0, 0.0, vx1 - vx0, ky);
-            }
-            if sh > 0.0 {
-                g.rect(kx, hy0, w - kx, hy1 - hy0);
-            } else {
-                g.rect(0.0, hy0, kx, hy1 - hy0);
-            }
-
-            // 圆弧朝单元格中心一侧弯曲：象限方向 (-sh, -sv)。
-            let (u, v) = (-sh, -sv);
-            const SEGMENTS: usize = 8;
-            let at = |angle: f32, radius: f32| {
-                [kx + u * radius * angle.cos(), ky + v * radius * angle.sin()]
+            let radius = (t * 5.0).min(w.min(h) * 0.5);
+            let (cx, cy, vertical_start, vertical_len, horizontal_start, horizontal_len) = match c {
+                '\u{256d}' => (
+                    left + radius,
+                    top + radius,
+                    left,
+                    h - (top + radius),
+                    left + radius,
+                    w - (left + radius),
+                ),
+                '\u{256e}' => {
+                    (right - radius, top + radius, right, h - (top + radius), 0.0, right - radius)
+                },
+                '\u{256f}' => {
+                    (right - radius, bottom - radius, right, bottom - radius, 0.0, right - radius)
+                },
+                '\u{2570}' => (
+                    left + radius,
+                    bottom - radius,
+                    left,
+                    bottom - radius,
+                    left + radius,
+                    w - (left + radius),
+                ),
+                _ => unreachable!(),
             };
+
+            match c {
+                '\u{256d}' | '\u{256e}' => {
+                    g.v_line(vertical_start, top + radius, vertical_len, t);
+                    g.h_line(horizontal_start, top, horizontal_len, t);
+                },
+                '\u{256f}' | '\u{2570}' => {
+                    g.v_line(vertical_start, 0.0, vertical_len, t);
+                    g.h_line(horizontal_start, bottom, horizontal_len, t);
+                },
+                _ => unreachable!(),
+            }
+
+            // A stroked rounded rectangle has a centerline radius `radius`; its
+            // filled annulus therefore uses +/- half the stroke width. Clip
+            // every convex segment to the cell like WT's aliased clip.
+            let outer = radius + half;
+            let inner = (radius - half).max(0.0);
+            const SEGMENTS: usize = 8;
             for i in 0..SEGMENTS {
-                let a0 = FRAC_PI_2 * i as f32 / SEGMENTS as f32;
-                let a1 = FRAC_PI_2 * (i + 1) as f32 / SEGMENTS as f32;
-                g.poly(vec![at(a0, outer), at(a1, outer), at(a1, inner), at(a0, inner)]);
+                let a0 = start_angle + (end_angle - start_angle) * i as f32 / SEGMENTS as f32;
+                let a1 = start_angle + (end_angle - start_angle) * (i + 1) as f32 / SEGMENTS as f32;
+                let at = |angle: f32, r: f32| [cx + r * angle.cos(), cy + r * angle.sin()];
+                g.poly_clipped(vec![at(a0, outer), at(a1, outer), at(a1, inner), at(a0, inner)]);
             }
         },
         // 局部块：上/下 n/8、左/右 n/8（含 Legacy Computing 上部块）。
@@ -816,17 +925,76 @@ mod tests {
         }
     }
 
-    /// 圆角 '╭' 输出直臂 + 圆环分段，全部落在单元格附近（允许亚像素越界）。
+    /// 圆角 '╭' 输出直臂 + 圆环分段，并像 WT 的 aliased cell clip 一样
+    /// 把扩展 rounded-rect 裁回当前单元格。
     #[test]
-    fn rounded_corner_stays_near_cell() {
-        let prims = prims('\u{256d}');
-        let polys = prims.iter().filter(|p| matches!(p, Primitive::Poly { .. })).count();
-        assert_eq!(polys, 8, "四分之一圆环按 8 段近似");
-        for prim in &prims {
-            if let Primitive::Poly { points } = prim {
-                for [x, y] in points {
-                    assert!((-1.0..=W + 1.0).contains(x), "x={x}");
-                    assert!((-1.0..=H + 1.0).contains(y), "y={y}");
+    fn rounded_corner_is_clipped_to_cell() {
+        for c in ['\u{256d}', '\u{256e}', '\u{256f}', '\u{2570}'] {
+            let prims = prims(c);
+            let polys = prims.iter().filter(|p| matches!(p, Primitive::Poly { .. })).count();
+            assert_eq!(polys, 8, "{c:?} 四分之一圆环按 8 段近似");
+            for prim in &prims {
+                if let Primitive::Poly { points } = prim {
+                    for [x, y] in points {
+                        assert!((0.0..=W).contains(x), "{c:?} x={x}");
+                        assert!((0.0..=H).contains(y), "{c:?} y={y}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_corner_arms_follow_the_corner_direction() {
+        for (c, extends_down) in
+            [('\u{256d}', true), ('\u{256e}', true), ('\u{256f}', false), ('\u{2570}', false)]
+        {
+            let rects = rects(c);
+            let vertical = rects.iter().find(|(rect, _)| rect.h > rect.w).expect("竖直臂").0;
+            if extends_down {
+                assert!(vertical.y >= H / 2.0, "{c:?} 的竖臂应向下");
+                assert_eq!(vertical.y + vertical.h, H);
+            } else {
+                assert_eq!(vertical.y, 0.0);
+                assert!(vertical.y + vertical.h <= H / 2.0, "{c:?} 的竖臂应向上");
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_corners_keep_clipped_geometry_at_narrow_dpi_sizes() {
+        for c in ['\u{256d}', '\u{256e}', '\u{256f}', '\u{2570}'] {
+            for width in [2.0, 3.0, 4.0, 7.0, 9.0] {
+                for height in [3.0, 5.0, 8.0, 20.0] {
+                    for scale in [1.0, 1.25, 1.5, 2.0] {
+                        let prims = primitives(c, width, height, scale).expect("圆角应为内建");
+                        // The public geometry contract first rounds the cell
+                        // to physical pixels. Compare against that cell, not
+                        // the unsnapped logical input (e.g. 3 * 1.5 -> 5 px).
+                        let cell_width = (width * scale).round().max(1.0) / scale;
+                        let cell_height = (height * scale).round().max(1.0) / scale;
+                        for prim in prims {
+                            match prim {
+                                Primitive::Rect { rect, .. } => {
+                                    for value in [rect.x, rect.y, rect.x + rect.w, rect.y + rect.h]
+                                    {
+                                        assert!(value.is_finite(), "{c:?} 非有限矩形边界");
+                                    }
+                                    assert!(rect.x >= 0.0 && rect.y >= 0.0, "{c:?} 越过左/上边");
+                                    assert!(rect.x + rect.w <= cell_width + 1e-4);
+                                    assert!(rect.y + rect.h <= cell_height + 1e-4);
+                                },
+                                Primitive::Poly { points } => {
+                                    assert!(!points.is_empty(), "{c:?} 不应产生空多边形");
+                                    for [x, y] in points {
+                                        assert!(x.is_finite() && y.is_finite(), "{c:?} 非有限弧点");
+                                        assert!((-1e-4..=cell_width + 1e-4).contains(&x));
+                                        assert!((-1e-4..=cell_height + 1e-4).contains(&y));
+                                    }
+                                },
+                            }
+                        }
+                    }
                 }
             }
         }

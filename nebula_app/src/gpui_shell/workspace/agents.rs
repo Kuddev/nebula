@@ -156,22 +156,34 @@ impl NebulaWorkspace {
     ) {
         let executor = cx.background_executor().clone();
         cx.spawn(async move |_this, cx| {
+            let mut backlog = false;
             loop {
-                executor.timer(Duration::from_millis(75)).await;
+                executor.timer(Duration::from_millis(if backlog { 1 } else { 75 })).await;
                 let mut events = Vec::new();
+                let mut disconnected = false;
                 while events.len() < 64 {
                     match receiver.try_recv() {
                         Ok(event) => events.push(event),
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        },
                     }
                 }
+                backlog = events.len() == 64;
                 if events.is_empty() {
+                    if disconnected {
+                        return;
+                    }
                     continue;
                 }
                 cx.update(|cx| {
                     crate::gpui_shell::workspace::windowing::dispatch_ai_events(events, cx)
                 });
+                if disconnected {
+                    return;
+                }
             }
         })
         .detach();
@@ -184,43 +196,38 @@ impl NebulaWorkspace {
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             loop {
-                executor.timer(Duration::from_millis(1000)).await;
-                let retry_callbacks = this.update(cx, |workspace, cx| {
-                    let views: Vec<_> = workspace
-                        .tabs
-                        .iter()
-                        .filter_map(|tab| match tab {
-                            WorkspaceTab::Terminal { panes, .. } => Some(panes.iter()),
-                            _ => None,
-                        })
-                        .flatten()
-                        .map(|pane| pane.view.clone())
-                        .collect();
-                    for view in views {
-                        view.update(cx, |view, cx| {
-                            view.refresh_agent_screen_state(cx);
-                            // 徽章的时间轴也挂在这一拍上：认出「刚进入完成」的
-                            // 边沿、并让对勾在闪现窗口结束后沉降为圆点。
-                            view.sync_activity_badges(cx);
-                        });
-                    }
+                let Ok(views) = this.update(cx, |workspace, _| {
+                    workspace.tabs.iter().filter_map(|tab| match tab {
+                        WorkspaceTab::Terminal { panes, .. } => Some(panes),
+                        _ => None,
+                    }).flatten().map(|pane| pane.view.downgrade()).collect::<Vec<_>>()
+                }) else { return };
+                let batches = views.len().div_ceil(4).max(1);
+                let interval = Duration::from_millis((1000 / batches as u64).max(1));
+                if views.is_empty() { executor.timer(interval).await; }
+                for batch in views.chunks(4) {
+                    executor.timer(interval).await;
+                    cx.update(|cx| {
+                        for view in batch {
+                            let _ = view.update(cx, |view, cx| {
+                                view.refresh_agent_screen_state(cx);
+                                view.sync_activity_badges(cx);
+                            });
+                        }
+                    });
+                }
+                let Ok(retry_callbacks) = this.update(cx, |workspace, cx| {
                     workspace.publish_tray_agents(cx);
                     workspace.runtime_hub.has_pending_delegation_callbacks()
-                });
-                let Ok(retry_callbacks) = retry_callbacks else { return };
+                }) else { return };
                 if retry_callbacks {
                     cx.update(|cx| {
-                    // 回调可能早于发起方自己的 TurnDone 到达；每秒重投一次只会
-                    // 释放身份仍匹配且已回到 Idle/Finished 的发起方。
-                    crate::gpui_shell::workspace::windowing::publish_runtime_snapshot(cx);
-                    crate::gpui_shell::workspace::windowing::dispatch_ready_delegation_callbacks(
-                        cx,
-                    );
+                        crate::gpui_shell::workspace::windowing::publish_runtime_snapshot(cx);
+                        crate::gpui_shell::workspace::windowing::dispatch_ready_delegation_callbacks(cx);
                     });
                 }
             }
-        })
-        .detach();
+        }).detach();
     }
 
     pub(crate) fn handle_ai_hook(

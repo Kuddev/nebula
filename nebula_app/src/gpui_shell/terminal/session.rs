@@ -23,13 +23,13 @@ use nebula_terminal::tty::EventedPty as _;
 /// 视图层只有一种，SSH 不需要平行的第二套会话结构。
 #[derive(Clone)]
 pub struct EventProxy {
-    events: UnboundedSender<Event>,
+    events: super::event_mailbox::EventSender,
     stages: UnboundedSender<crate::ssh_session::SshStage>,
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
-        let _ = self.events.unbounded_send(event);
+        self.events.send(event);
     }
 }
 
@@ -70,8 +70,11 @@ pub struct TerminalSession {
 
 /// 一次会话 spawn 的完整出口：会话句柄 + 终端事件流 + SSH 阶段流
 /// （本地会话的阶段流永远安静，接收端可以直接丢弃）。
-pub type SpawnedSession =
-    (TerminalSession, UnboundedReceiver<Event>, UnboundedReceiver<crate::ssh_session::SshStage>);
+pub type SpawnedSession = (
+    TerminalSession,
+    super::event_mailbox::EventReceiver,
+    UnboundedReceiver<crate::ssh_session::SshStage>,
+);
 
 /// 启动一个本地 shell 会话。尺寸随后由首帧 prepaint 按真实布局重设；
 /// `term_config` 携带运行时设置（默认光标形状/闪烁等）。
@@ -132,7 +135,7 @@ pub fn spawn(
     term_config: Config,
     options: tty::Options,
 ) -> std::io::Result<SpawnedSession> {
-    let (tx, rx) = unbounded();
+    let (tx, rx) = super::event_mailbox::channel();
     let (stage_tx, stage_rx) = unbounded();
     let proxy = EventProxy { events: tx, stages: stage_tx };
 
@@ -166,7 +169,7 @@ pub fn spawn_ssh(
     term_config: Config,
 ) -> std::io::Result<SpawnedSession> {
     let term_config = crate::ssh_session::terminal_config(term_config);
-    let (tx, rx) = unbounded();
+    let (tx, rx) = super::event_mailbox::channel();
     let (stage_tx, stage_rx) = unbounded();
     let proxy = EventProxy { events: tx, stages: stage_tx };
 

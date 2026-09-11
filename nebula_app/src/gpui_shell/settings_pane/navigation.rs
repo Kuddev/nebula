@@ -1,21 +1,7 @@
 use super::*;
 
 /// 主题下拉（展示名 = 持久化名，与旧壳一致）。
-pub(super) const THEME_VALUES: [&str; 13] = [
-    "Nebula",
-    "SilverLight",
-    "SteelDark",
-    "LimestoneLight",
-    "CoalDark",
-    "LinenLight",
-    "MossDark",
-    "Nord",
-    "Paper",
-    "BreezeLight",
-    "BreezeDark",
-    "MintLight",
-    "MintDark",
-];
+pub(super) const THEME_VALUES: [&str; 13] = ThemeName::BUILTIN_NAMES;
 
 pub(super) const REPOSITORY_URL: &str = "https://github.com/Kuddev/pebrel";
 pub(super) const BUG_REPORT_TEMPLATE: &str = "bug_report.yml";
@@ -42,7 +28,7 @@ pub(super) const SECTION_IDS: [&str; 10] = [
 pub(super) const SECTION_SEARCH_TERMS: [&str; 10] = [
     "application app 应用 update 更新 version 版本 github support 支持",
     "appearance 外观 theme 主题 font 字体 opacity 透明度 background 背景 cursor 光标 icon 图标",
-    "profiles 配置文件 shell terminal 终端 completion 补全 startup 启动",
+    "profiles 配置文件 shell terminal 终端 completion 补全 startup 启动 ai message notifications toast alerts bell 提醒 通知 弹窗 消息 右下角 ai消息通知 ai 消息通知 ai消息弹窗 ai 消息弹窗 铃声",
     "providers provider ai 供应商 模型 api",
     "ssh host 主机 remote 远程 connection 连接",
     "network 网络 proxy 代理 connectivity 连接",
@@ -135,22 +121,7 @@ pub(super) fn section_icon(index: usize) -> SharedString {
 }
 
 pub(super) fn chrome_theme(theme: ThemeName) -> crate::display::NebulaTheme {
-    use crate::display::NebulaTheme;
-    match theme {
-        ThemeName::Nebula => NebulaTheme::Nebula,
-        ThemeName::SilverLight => NebulaTheme::SilverLight,
-        ThemeName::SteelDark => NebulaTheme::SteelDark,
-        ThemeName::LimestoneLight => NebulaTheme::LimestoneLight,
-        ThemeName::CoalDark => NebulaTheme::CoalDark,
-        ThemeName::LinenLight => NebulaTheme::LinenLight,
-        ThemeName::MossDark => NebulaTheme::MossDark,
-        ThemeName::Nord => NebulaTheme::Nord,
-        ThemeName::Paper => NebulaTheme::Paper,
-        ThemeName::BreezeLight => NebulaTheme::BreezeLight,
-        ThemeName::BreezeDark => NebulaTheme::BreezeDark,
-        ThemeName::MintLight => NebulaTheme::MintLight,
-        ThemeName::MintDark => NebulaTheme::MintDark,
-    }
+    crate::gpui_shell::theme::chrome_theme(theme)
 }
 
 pub(super) fn rgb_hsla(r: u8, g: u8, b: u8) -> Hsla {

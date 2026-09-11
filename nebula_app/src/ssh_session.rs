@@ -16,7 +16,6 @@ use nebula_terminal::event::{Event as TerminalEvent, WindowSize};
 use nebula_terminal::event_loop::{EventLoopSender, StreamProcessor};
 use nebula_terminal::sync::FairMutex;
 use nebula_terminal::term::Term;
-use russh::ChannelMsg;
 use russh::client::{self, KeyboardInteractiveAuthResponse};
 use russh::keys::ssh_key;
 use russh::keys::{HashAlg, PrivateKeyWithHashAlg};
@@ -26,6 +25,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::event::EventProxy;
 use crate::proxy_test::{ProxyTestFailure, ProxyTestOutcome, ProxyTestResult, ProxyTestRoute};
 
+mod exec;
 mod lifecycle;
 mod route;
 use route::{ResolvedRoute, RouteTransport};
@@ -879,42 +879,8 @@ pub(crate) async fn exec_capture(
     .map_err(|err| format!("SSH 地址解析任务失败: {err}"))??;
 
     let session = authenticated_session(&destination, &profile, None::<&NoopSshEventHost>).await?;
-    let mut channel = lifecycle::network("exec channel", session.channel_open_session()).await?;
-    channel.exec(true, command).await?;
-    if !script.is_empty() {
-        channel.data_bytes(script.to_vec()).await?;
-        // 不发 EOF 的话远端 `sh` 会一直等更多输入，命令永远不结束。
-        channel.eof().await?;
-    }
-
-    let collect = async {
-        let mut stdout = Vec::new();
-        while let Some(message) = channel.wait().await {
-            match message {
-                ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-                // 标准错误只当诊断线索，不混进结果——远端的 `ps: not found`
-                // 之类抱怨不该被当成路径。
-                ChannelMsg::ExtendedData { data, .. } => {
-                    if let Ok(text) = std::str::from_utf8(&data) {
-                        let text = text.trim();
-                        if !text.is_empty() {
-                            log::debug!("远端命令 stderr（{raw_destination}）: {text}");
-                        }
-                    }
-                },
-                ChannelMsg::Eof | ChannelMsg::Close => break,
-                _ => {},
-            }
-        }
-        stdout
-    };
-
-    match tokio::time::timeout(budget, collect).await {
-        // 远端文件名和路径未必是合法 UTF-8。有损转换让"大部分能读"胜过
-        // "整次探测失败"；真正需要字节精度的路径操作走 SFTP，不走这里。
-        Ok(stdout) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
-        Err(_) => Err(format!("远端命令超过 {} 秒未返回", budget.as_secs()).into()),
-    }
+    let channel = lifecycle::network("exec channel", session.channel_open_session()).await?;
+    exec::capture(channel, command, script, budget, raw_destination).await
 }
 
 /// 在现有认证连接上打开独立 SFTP 子系统；连接池和认证策略仍只有一份。

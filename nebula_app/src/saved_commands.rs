@@ -1,5 +1,7 @@
 //! User-managed shell commands shown by the GPUI command manager.
 
+pub(crate) mod builtins;
+
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};

@@ -67,6 +67,8 @@ pub struct NebulaCompletionItem {
     /// Characters typed into the PTY on acceptance (remainder past what the
     /// user already typed).
     pub insert: String,
+    /// Number of characters immediately before the cursor to replace.
+    pub replace_chars: usize,
     pub kind: NebulaCompletionKind,
 }
 

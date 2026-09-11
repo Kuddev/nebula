@@ -7228,12 +7228,12 @@ impl Display {
         self.keymap_commit();
     }
 
-    /// 捕获态里按 Backspace：删除该动作的自定义绑定，回落内置默认。
+    /// Bare Backspace disables the action, preserving pass-through on reload.
     pub fn keymap_clear_custom(&mut self, row: usize) {
         if row == keymap::QUICK_TERMINAL_ROW {
             self.nebula_keymap_capture = None;
             self.nebula_keymap_capture_preview.clear();
-            self.nebula_quick_terminal_hotkey = keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned();
+            self.nebula_quick_terminal_hotkey.clear();
             self.nebula_quick_hotkey_error = None;
             self.nebula_quick_hotkey_request = Some(self.nebula_quick_terminal_hotkey.clone());
             self.persist_nebula_settings();
@@ -7242,8 +7242,7 @@ impl Display {
         }
         let action_row = row.saturating_sub(1);
         let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(action_row) else { return };
-        let name = keymap::action_storage_name(action);
-        self.nebula_keybinds.retain(|(_, a)| !a.eq_ignore_ascii_case(&name));
+        keymap::clear_action(&mut self.nebula_keybinds, action);
         self.keymap_commit();
     }
 

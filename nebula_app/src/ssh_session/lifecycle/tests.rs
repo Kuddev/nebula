@@ -61,6 +61,8 @@ enum Mode {
     DropWithoutStatus,
     ExitAfterEof,
     HangFirstConnection,
+    ExecEof,
+    ExecHang,
 }
 
 struct Loopback {
@@ -75,6 +77,32 @@ impl server::Handler for Loopback {
 
     async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        _command: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        if self.mode == Mode::ExecEof {
+            session.data(channel, &b"probe result\n"[..])?;
+            session.eof(channel)?;
+        }
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channels.retain(|value| value.id() != channel);
+        if matches!(self.mode, Mode::ExecEof | Mode::ExecHang) {
+            let _ = self.data.send(b"closed".to_vec());
+        }
+        Ok(())
     }
 
     async fn channel_open_session(
@@ -147,6 +175,68 @@ impl server::Handler for Loopback {
         let _ = self.data.send(data.to_vec());
         Ok(())
     }
+}
+
+#[test]
+fn exec_probe_closes_each_channel_after_eof_on_one_connection() {
+    check(async {
+        let mut fixture = Fixture::new(Mode::ExecEof).await;
+        let acquired = fixture.connect().await;
+        for _ in 0..16 {
+            let channel = acquired.session.channel_open_session().await.unwrap();
+            let result = super::super::exec::capture(
+                channel,
+                "probe",
+                &[],
+                Duration::from_secs(1),
+                "loopback",
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, "probe result\n");
+            assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        }
+        fixture.forget(&acquired.session).await;
+    });
+}
+
+#[test]
+fn exec_probe_timeout_and_cancellation_close_the_channel() {
+    check(async {
+        let mut fixture = Fixture::new(Mode::ExecHang).await;
+        let acquired = fixture.connect().await;
+        let channel = acquired.session.channel_open_session().await.unwrap();
+        assert!(
+            super::super::exec::capture(
+                channel,
+                "probe",
+                &[],
+                Duration::from_millis(20),
+                "loopback"
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        let channel = acquired.session.channel_open_session().await.unwrap();
+        // Dropping the whole operation models a cancelled remote-CWD request.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                super::super::exec::capture(
+                    channel,
+                    "probe",
+                    &[],
+                    Duration::from_secs(5),
+                    "loopback",
+                )
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(fixture.data.recv().await.unwrap(), b"closed");
+        fixture.forget(&acquired.session).await;
+    });
 }
 
 #[test]

@@ -141,21 +141,33 @@ impl SettingsPane {
         self.persist_keybinds(cx);
     }
 
-    /// 捕获态裸 Backspace：删除自定义绑定，回落内置默认。
+    /// Bare Backspace and the clear button both disable the binding.
     fn keymap_clear_custom(&mut self, row: usize, cx: &mut Context<Self>) {
         use crate::display::keymap;
         self.keymap_capture = None;
         self.keymap_capture_preview.clear();
         if row == keymap::QUICK_TERMINAL_ROW {
+            self.persist(&[("quick_terminal_hotkey", String::new())], cx);
+            return;
+        }
+        let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(row - 1) else { return };
+        keymap::clear_action(&mut self.keymap_binds, action);
+        self.persist_keybinds(cx);
+    }
+
+    fn keymap_reset_binding(&mut self, row: usize, cx: &mut Context<Self>) {
+        use crate::display::keymap;
+        self.keymap_capture = None;
+        self.keymap_capture_preview.clear();
+        if row == keymap::QUICK_TERMINAL_ROW {
             self.persist(
-                &[("quick_terminal_hotkey", keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.to_owned())],
+                &[("quick_terminal_hotkey", keymap::DEFAULT_QUICK_TERMINAL_HOTKEY.into())],
                 cx,
             );
             return;
         }
         let Some((action, ..)) = keymap::EDITABLE_ACTIONS.get(row - 1) else { return };
-        let name = keymap::action_storage_name(action);
-        self.keymap_binds.retain(|(_, a)| !a.eq_ignore_ascii_case(&name));
+        keymap::reset_action(&mut self.keymap_binds, action);
         self.persist_keybinds(cx);
     }
 
@@ -289,6 +301,14 @@ impl SettingsPane {
             )
             .child(div().flex_1().min_w_0().pl_4().child(label))
             .child(self.keymap_keycap(&cap_text, is_custom, clash, capturing, cx))
+            .child(h_flex().gap_1()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(Button::new(("keymap-clear", flat)).ghost().xsmall().icon(IconName::Close)
+                    .tooltip(language.text(crate::i18n::Message::SettingsKeymapClear))
+                    .on_click(cx.listener(move |this, _, _, cx| this.keymap_clear_custom(flat, cx))))
+                .child(Button::new(("keymap-reset", flat)).ghost().xsmall().icon(IconName::Redo2)
+                    .tooltip(language.text(crate::i18n::Message::SettingsKeymapRestore))
+                    .on_click(cx.listener(move |this, _, _, cx| this.keymap_reset_binding(flat, cx)))))
     }
 
     pub(super) fn section_keymap(&mut self, cx: &mut Context<Self>) -> gpui::Div {
@@ -301,6 +321,14 @@ impl SettingsPane {
         // 分组渲染（旧壳无框分组裁定）：组内可见行为空的组整组隐藏；组
         // 标题 0.86× 小字压在行块上方。
         let mut groups_block = v_flex().w_full().gap_1();
+        if crate::platform::CAPABILITIES.quick_terminal_hotkey {
+            groups_block = groups_block.child(self.select_row(
+                "quick_terminal_mode",
+                language.text(crate::i18n::Message::SettingsQuickTerminalMode),
+                language.text(crate::i18n::Message::SettingsQuickTerminalDescription),
+                cx,
+            ));
+        }
         let mut start = 0usize;
         for (zh, en, count) in keymap::GROUPS {
             let end = start + count;

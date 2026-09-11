@@ -169,6 +169,7 @@ mod tests {
         let mut state = NebulaPaneState::default();
         state.completion_items = (0..30)
             .map(|index| NebulaCompletionItem {
+                replace_chars: 0,
                 label: format!("candidate-{index}"),
                 insert: index.to_string(),
                 kind: NebulaCompletionKind::Command,
@@ -185,7 +186,10 @@ mod tests {
         assert_eq!(viewport.hovered, None);
         assert_eq!(viewport.scrollbar_grab, None);
         assert_eq!(state.completion_selected, Some(3));
-        assert_eq!(super::super::suggest::popup_take(&mut state).as_deref(), Some("3"));
+        assert_eq!(
+            super::super::suggest::popup_take(&mut state).map(|item| item.insert).as_deref(),
+            Some("3")
+        );
     }
 
     #[test]

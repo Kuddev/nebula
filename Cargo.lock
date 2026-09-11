@@ -1153,6 +1153,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "chematic-core"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c4da33c5ba013bd5872ed39343ed94957e0d1940026b4ae51a396dda1bfffbf"
+
+[[package]]
+name = "chematic-depict"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0a7090aba353caeaec7c788485b3f127715da8138a715c3c7211a7f5935421d"
+dependencies = [
+ "chematic-core",
+ "chematic-perception",
+ "chematic-rxn",
+ "chematic-smiles",
+]
+
+[[package]]
+name = "chematic-perception"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "007603c541f81ae5b466ef5d98b14a4508780505f1c672685b6a60da2bdafd1a"
+dependencies = [
+ "chematic-core",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "chematic-rxn"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "074290504dfa9abd90bde715cd5fde592ab45f13e10805e0492a41c8c84b86ae"
+dependencies = [
+ "chematic-core",
+ "chematic-perception",
+ "chematic-smarts",
+ "chematic-smiles",
+ "rustc-hash 2.1.3",
+ "serde",
+]
+
+[[package]]
+name = "chematic-smarts"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "faa830d23953347170257486184c164004a7763e72bb65bbaeaf78d87b4a715f"
+dependencies = [
+ "chematic-core",
+ "chematic-perception",
+ "rustc-hash 2.1.3",
+ "web-time",
+]
+
+[[package]]
+name = "chematic-smiles"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6154faef287e5ed7b516f20a4b695c39ec38faaa48197f3b1e421dbc073ae3fe"
+dependencies = [
+ "chematic-core",
+ "chematic-perception",
+ "smallvec",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2016,7 +2081,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2322,7 +2387,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4858,7 +4923,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5029,6 +5094,8 @@ dependencies = [
  "argon2",
  "base64",
  "bitflags 2.13.0",
+ "chematic-depict",
+ "chematic-smiles",
  "chrono",
  "clap",
  "clap_complete",
@@ -5095,6 +5162,8 @@ dependencies = [
  "unicode-width",
  "ureq",
  "wgpu 25.0.2",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
  "windows-sys 0.59.0",
  "winit",
  "winreg",
@@ -5330,7 +5399,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6803,7 +6872,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7560,7 +7629,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8297,7 +8366,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8433,7 +8502,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8823,7 +8892,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.2",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9658,7 +9727,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10651,7 +10720,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

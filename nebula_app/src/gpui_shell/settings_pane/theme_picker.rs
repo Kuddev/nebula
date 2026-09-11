@@ -1,21 +1,7 @@
 use super::appearance_picker::{AppearanceColors, AppearanceSelection, picker_columns};
 use super::*;
 
-pub(super) const THEME_ORDER: [ThemeName; 13] = [
-    ThemeName::BreezeLight,
-    ThemeName::BreezeDark,
-    ThemeName::MintLight,
-    ThemeName::MintDark,
-    ThemeName::SilverLight,
-    ThemeName::Nebula,
-    ThemeName::SteelDark,
-    ThemeName::Nord,
-    ThemeName::Paper,
-    ThemeName::MossDark,
-    ThemeName::LimestoneLight,
-    ThemeName::CoalDark,
-    ThemeName::LinenLight,
-];
+pub(super) const THEME_ORDER: [ThemeName; 13] = ThemeName::BUILTIN;
 
 fn theme_foreground(name: ThemeName) -> [u8; 3] {
     let theme = name.term_theme();
@@ -50,7 +36,7 @@ pub(super) fn theme_sample(name: ThemeName, token: bool, compact: bool) -> gpui:
         } else {
             76.0
         }))
-        .p(px(if token || compact { 4.0 } else { 6.0 }))
+        .p(px(0.0))
         .rounded(px(8.0))
         .bg(chrome)
         .child(
@@ -59,7 +45,7 @@ pub(super) fn theme_sample(name: ThemeName, token: bool, compact: bool) -> gpui:
                 .justify_center()
                 .gap(px(if token { 4.0 } else { 6.0 }))
                 .p(px(if token { 5.0 } else { 8.0 }))
-                .rounded(px(4.0))
+                .rounded(px(0.0))
                 .bg(rgb_hsla(background[0], background[1], background[2]))
                 .child(
                     h_flex()
@@ -82,7 +68,6 @@ impl SettingsPane {
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui::Div {
-        let palette = chrome_theme(name).palette();
         let term = name.term_theme();
         let background = if typography && !self.runtime.follow_system_theme {
             self.runtime.background.unwrap_or(term.background)
@@ -115,7 +100,7 @@ impl SettingsPane {
                     // GPUI's overflow mask is rectangular; each painted surface
                     // must carry the radius where it meets the outer border.
                     .rounded_t(px(8.0))
-                    .bg(rgb_hsla(palette.shell_bg.r, palette.shell_bg.g, palette.shell_bg.b))
+                    .bg(rgb_hsla(background[0], background[1], background[2]))
                     .child(
                         h_flex()
                             .gap(px(6.0))

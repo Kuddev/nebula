@@ -1,62 +1,41 @@
 //! File snapshots and conditional, atomic saves. No GPUI state or disk I/O in rendering.
 
+use crate::text_document::TextSnapshot;
+pub(super) use crate::text_document::{MAX_BYTES, SaveError};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-pub(super) const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub(super) struct Document {
-    pub(super) text: String,
-    pub(super) read_only: bool,
-    pub(super) truncated: bool,
-    pub(super) invalid_encoding: bool,
+    snapshot: TextSnapshot,
     target: PathBuf,
-    pub(super) bytes: Arc<[u8]>,
-    pub(super) bom: bool,
-    pub(super) crlf: bool,
+    pub(super) total_bytes: u64,
     pub(super) modified: Option<std::time::SystemTime>,
 }
 
-#[derive(Debug)]
-pub(super) enum SaveError {
-    Changed,
-    ReadOnly,
-    Io(std::io::Error),
-}
-
-impl From<std::io::Error> for SaveError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
+impl std::ops::Deref for Document {
+    type Target = TextSnapshot;
+    fn deref(&self) -> &Self::Target {
+        &self.snapshot
     }
 }
 
 impl Document {
     pub(super) fn load(path: &Path) -> std::io::Result<Self> {
         let target = path.canonicalize()?;
-        let file = fs::File::open(&target)?;
+        let mut file = fs::File::open(&target)?;
         let metadata = file.metadata()?;
-        let mut bytes = Vec::new();
-        file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-        let truncated = bytes.len() > MAX_BYTES;
-        bytes.truncate(MAX_BYTES);
-        let bom = bytes.starts_with(b"\xef\xbb\xbf");
-        let body = if bom { &bytes[3..] } else { &bytes };
-        let invalid_encoding = std::str::from_utf8(body).is_err() || body.contains(&0);
-        let text = String::from_utf8_lossy(body);
-        let crlf = text.contains("\r\n") && !text.replace("\r\n", "").contains('\n');
-        let text = text.replace("\r\n", "\n");
+        let (bytes, truncated) =
+            crate::document_io::read_prefix(&mut file, metadata.len(), MAX_BYTES)?;
         Ok(Self {
-            text,
-            read_only: metadata.permissions().readonly() || truncated || invalid_encoding,
-            truncated,
-            invalid_encoding,
+            snapshot: TextSnapshot::decode_prefix(
+                bytes,
+                metadata.permissions().readonly(),
+                truncated,
+            ),
             target,
-            bytes: bytes.into(),
-            bom,
-            crlf,
+            total_bytes: metadata.len(),
             modified: metadata.modified().ok(),
         })
     }
@@ -75,10 +54,7 @@ impl Document {
         }
         let mut current = Vec::new();
         file.take(MAX_BYTES as u64 + 1).read_to_end(&mut current)?;
-        if current.as_slice() != self.bytes.as_ref() {
-            return Err(SaveError::Changed);
-        }
-        Ok(())
+        self.snapshot.verify(&current)
     }
 
     pub(super) fn save(&self, path: &Path, text: String) -> Result<Self, SaveError> {
@@ -89,9 +65,7 @@ impl Document {
         if text == self.text {
             return Ok(self.clone());
         }
-        let mut bytes = if self.bom { b"\xef\xbb\xbf".to_vec() } else { Vec::new() };
-        let encoded = if self.crlf { text.replace('\n', "\r\n") } else { text.clone() };
-        bytes.extend_from_slice(encoded.as_bytes());
+        let bytes = self.snapshot.encode(&text)?;
         let parent = self.target.parent().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "file has no parent")
         })?;
@@ -104,8 +78,8 @@ impl Document {
         self.check_current(path)?;
         staged.persist(&self.target).map_err(|error| SaveError::Io(error.error))?;
         Ok(Self {
-            text,
-            bytes: bytes.into(),
+            total_bytes: bytes.len() as u64,
+            snapshot: TextSnapshot::decode(bytes, false),
             modified: fs::metadata(&self.target).and_then(|meta| meta.modified()).ok(),
             ..self.clone()
         })

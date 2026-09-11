@@ -46,6 +46,10 @@ pub enum NebulaTheme {
     BreezeDark,
     MintLight,
     MintDark,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    GlassLight,
+    GlassDark,
 }
 
 impl Default for NebulaTheme {
@@ -85,6 +89,10 @@ impl NebulaTheme {
             (Self::BreezeLight | Self::BreezeDark, false) => Self::BreezeDark,
             (Self::MintLight | Self::MintDark, true) => Self::MintLight,
             (Self::MintLight | Self::MintDark, false) => Self::MintDark,
+            (Self::CatppuccinMocha | Self::CatppuccinLatte, true) => Self::CatppuccinLatte,
+            (Self::CatppuccinMocha | Self::CatppuccinLatte, false) => Self::CatppuccinMocha,
+            (Self::GlassLight | Self::GlassDark, true) => Self::GlassLight,
+            (Self::GlassLight | Self::GlassDark, false) => Self::GlassDark,
         }
     }
 
@@ -103,11 +111,15 @@ impl NebulaTheme {
             Self::BreezeDark => "Breeze Dark",
             Self::MintLight => "Mint Light",
             Self::MintDark => "Mint Dark",
+            Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::CatppuccinLatte => "Catppuccin Latte",
+            Self::GlassLight => "Glass Light",
+            Self::GlassDark => "Glass Dark",
         }
     }
 
     /// Static command-palette labels share theme metadata rather than a second exhaustive UI match.
-    pub(crate) fn command_label(self) -> &'static str {
+    pub(crate) const fn command_label(self) -> &'static str {
         match self {
             Self::Nebula => "Theme: Nebula",
             Self::SilverLight => "Theme: Silver Light",
@@ -122,6 +134,10 @@ impl NebulaTheme {
             Self::BreezeDark => "Theme: Breeze Dark",
             Self::MintLight => "Theme: Mint Light",
             Self::MintDark => "Theme: Mint Dark",
+            Self::CatppuccinMocha => "Theme: Catppuccin Mocha",
+            Self::CatppuccinLatte => "Theme: Catppuccin Latte",
+            Self::GlassLight => "Theme: Glass Light",
+            Self::GlassDark => "Theme: Glass Dark",
         }
     }
 
@@ -140,6 +156,10 @@ impl NebulaTheme {
             Self::BreezeDark => "BreezeDark",
             Self::MintLight => "MintLight",
             Self::MintDark => "MintDark",
+            Self::CatppuccinMocha => "CatppuccinMocha",
+            Self::CatppuccinLatte => "CatppuccinLatte",
+            Self::GlassLight => "GlassLight",
+            Self::GlassDark => "GlassDark",
         }
     }
 
@@ -160,6 +180,10 @@ impl NebulaTheme {
             "BreezeDark" => Self::BreezeDark,
             "MintLight" => Self::MintLight,
             "MintDark" => Self::MintDark,
+            "CatppuccinMocha" => Self::CatppuccinMocha,
+            "CatppuccinLatte" => Self::CatppuccinLatte,
+            "GlassLight" => Self::GlassLight,
+            "GlassDark" => Self::GlassDark,
 
             _ => return None,
         })
@@ -188,9 +212,14 @@ impl NebulaTheme {
     /// themes a light one).
     pub(crate) fn accent(self) -> Rgb {
         match self {
-            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
-                rgb8(self.fresh_palette().unwrap().accent)
-            },
+            Self::BreezeLight
+            | Self::BreezeDark
+            | Self::MintLight
+            | Self::MintDark
+            | Self::CatppuccinMocha
+            | Self::CatppuccinLatte
+            | Self::GlassLight
+            | Self::GlassDark => rgb8(self.fresh_palette().unwrap().accent),
             Self::Nebula => Rgb::new(82, 168, 255),
             Self::SilverLight => Rgb::new(73, 80, 87),
             Self::SteelDark => Rgb::new(148, 163, 184),
@@ -340,13 +369,18 @@ impl NebulaTheme {
     /// theme switch retroactively, which users read as "the prompt is stuck").
     pub(crate) fn powerline_colors(self) -> [Rgb; 8] {
         match self {
-            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
-                nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
-                    .unwrap()
-                    .term_theme()
-                    .powerline
-                    .map(rgb8)
-            },
+            Self::BreezeLight
+            | Self::BreezeDark
+            | Self::MintLight
+            | Self::MintDark
+            | Self::CatppuccinMocha
+            | Self::CatppuccinLatte
+            | Self::GlassLight
+            | Self::GlassDark => nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
+                .unwrap()
+                .term_theme()
+                .powerline
+                .map(rgb8),
             Self::Nebula => [
                 Rgb::new(57, 75, 112),
                 Rgb::new(192, 202, 245),
@@ -446,193 +480,76 @@ impl NebulaTheme {
     }
 
     pub(crate) fn palette(self) -> NebulaPalette {
-        match self {
-            Self::BreezeLight | Self::BreezeDark | Self::MintLight | Self::MintDark => {
-                let p = self.fresh_palette().unwrap();
-                let rgba = |rgb: [u8; 3], a| Rgba::new(rgb[0], rgb[1], rgb[2], a);
-                NebulaPalette {
-                    panel: rgba(p.shell, 255),
-                    pill: rgba(p.surface, 255),
-                    tab_stroke_l: rgba(p.muted, 32),
-                    tab_bg_l: rgba(p.surface, 255),
-                    tab_bg_r: rgba(p.surface, 255),
-                    edge_l: rgba(p.accent, 255),
-                    edge_r: rgba(p.accent, 255),
-                    edge_glow_l: rgba(p.accent, 0),
-                    glow_l: rgba(p.accent, 0),
-                    glow_r: rgba(p.accent, 0),
-                    is_light: p.is_light,
-                    term_bg: rgb8(p.surface),
-                    shell_bg: rgb8(p.shell),
-                }
-            },
-            Self::Nebula => NebulaPalette {
-                panel: Rgba::new(34, 38, 48, 224),
-                pill: Rgba::new(43, 48, 59, 218),
-                tab_stroke_l: Rgba::new(150, 157, 188, 132),
-                tab_bg_l: Rgba::new(65, 72, 88, 230),
-                tab_bg_r: Rgba::new(48, 54, 67, 226),
-                edge_l: Rgba::new(169, 152, 188, 180),
-                edge_r: Rgba::new(125, 178, 194, 180),
-                edge_glow_l: Rgba::new(169, 152, 188, 24),
-                glow_l: Rgba::new(169, 152, 188, 14),
-                glow_r: Rgba::new(125, 178, 194, 14),
-                is_light: false,
-                term_bg: Rgb::new(15, 17, 26),
-                shell_bg: Rgb::new(34, 38, 48),
-            },
-            // Cool silver — the light half of the steel pair. Chrome layers
-            // follow the premium-light sheet: sidebar #f3f4f6 over app-bg
-            // #f9fafb, terminal pure white for maximum contrast.
-            Self::SilverLight => NebulaPalette {
-                // Neutral silver, blue removed: the panel/tab surfaces sit on a
-                // true-neutral gray ramp (was Tailwind's blue-leaning gray-100),
-                // and the active-tab halo is a soft neutral shadow instead of a
-                // blue wash — a pure-white pill lifting off a flat gray gutter.
-                panel: Rgba::new(245, 245, 246, 236),
-                pill: Rgba::new(233, 233, 234, 230),
-                tab_stroke_l: Rgba::new(198, 198, 200, 150),
-                tab_bg_l: Rgba::new(255, 255, 255, 242),
-                tab_bg_r: Rgba::new(250, 250, 251, 236),
-                edge_l: Rgba::new(110, 112, 116, 170),
-                edge_r: Rgba::new(118, 121, 126, 180),
-                edge_glow_l: Rgba::new(118, 121, 126, 18),
-                // Ambient glows are OFF on light themes: a ~4% alpha radial
-                // gradient over a pale backdrop lands on very few 8-bit steps,
-                // and the quantization contours read as blurry gray "lines"
-                // (invisible on the dark themes' deep backgrounds).
-                glow_l: Rgba::new(82, 168, 255, 0),
-                glow_r: Rgba::new(73, 80, 87, 0),
-                is_light: true,
-                // Pure white terminal on every light theme (premium-light
-                // sheet): highest contrast for the Primer ANSI ink set.
-                term_bg: Rgb::new(255, 255, 255),
-                // Premium-light app-bg layer (#f3f4f6-ish): the white terminal
-                // card floats on this neutral silver.
-                shell_bg: Rgb::new(243, 244, 246),
-            },
-            // Warm limestone — the light half of the coal pair.
-            Self::LimestoneLight => NebulaPalette {
-                panel: Rgba::new(240, 239, 235, 236),
-                pill: Rgba::new(231, 229, 224, 230),
-                tab_stroke_l: Rgba::new(163, 160, 151, 150),
-                tab_bg_l: Rgba::new(255, 255, 255, 242),
-                tab_bg_r: Rgba::new(247, 246, 242, 236),
-                edge_l: Rgba::new(88, 85, 76, 160),
-                edge_r: Rgba::new(206, 178, 126, 190),
-                edge_glow_l: Rgba::new(206, 178, 126, 20),
-                // Ambient glow off on light themes (8-bit banding, see Silver).
-                glow_l: Rgba::new(206, 178, 126, 0),
-                glow_r: Rgba::new(88, 85, 76, 0),
-                is_light: true,
-                term_bg: Rgb::new(255, 255, 255),
-                shell_bg: Rgb::new(240, 239, 235),
-            },
-            // Soft linen — the light half of the moss pair.
-            Self::LinenLight => NebulaPalette {
-                panel: Rgba::new(242, 242, 236, 236),
-                pill: Rgba::new(233, 233, 227, 230),
-                tab_stroke_l: Rgba::new(176, 179, 176, 150),
-                tab_bg_l: Rgba::new(255, 255, 255, 242),
-                tab_bg_r: Rgba::new(251, 251, 246, 236),
-                edge_l: Rgba::new(95, 99, 95, 160),
-                edge_r: Rgba::new(149, 175, 149, 190),
-                edge_glow_l: Rgba::new(149, 175, 149, 20),
-                // Ambient glow off on light themes (8-bit banding, see Silver).
-                glow_l: Rgba::new(149, 175, 149, 0),
-                glow_r: Rgba::new(95, 99, 95, 0),
-                is_light: true,
-                term_bg: Rgb::new(255, 255, 255),
-                shell_bg: Rgb::new(242, 242, 236),
-            },
-            // The three dark themes from the floating-pill design sheet
-            // (steel blue-gray / coal warm-gold / moss green), low-saturation
-            // accents per the powerline sheet.
-            Self::SteelDark => NebulaPalette {
-                panel: Rgba::new(22, 24, 30, 224),
-                pill: Rgba::new(30, 33, 41, 218),
-                tab_stroke_l: Rgba::new(148, 163, 184, 124),
-                tab_bg_l: Rgba::new(52, 58, 72, 230),
-                tab_bg_r: Rgba::new(38, 43, 54, 226),
-                edge_l: Rgba::new(148, 163, 184, 170),
-                edge_r: Rgba::new(82, 168, 255, 168),
-                edge_glow_l: Rgba::new(148, 163, 184, 20),
-                glow_l: Rgba::new(148, 163, 184, 12),
-                glow_r: Rgba::new(82, 168, 255, 12),
-                is_light: false,
-                term_bg: Rgb::new(26, 28, 36),
-                shell_bg: Rgb::new(22, 24, 30),
-            },
-            Self::CoalDark => NebulaPalette {
-                panel: Rgba::new(22, 22, 22, 224),
-                pill: Rgba::new(30, 30, 30, 218),
-                tab_stroke_l: Rgba::new(186, 186, 182, 120),
-                tab_bg_l: Rgba::new(56, 56, 54, 230),
-                tab_bg_r: Rgba::new(41, 41, 40, 226),
-                edge_l: Rgba::new(206, 178, 126, 172),
-                edge_r: Rgba::new(212, 212, 212, 148),
-                edge_glow_l: Rgba::new(206, 178, 126, 22),
-                glow_l: Rgba::new(206, 178, 126, 12),
-                glow_r: Rgba::new(212, 212, 212, 12),
-                is_light: false,
-                term_bg: Rgb::new(23, 23, 23),
-                shell_bg: Rgb::new(22, 22, 22),
-            },
-            Self::MossDark => NebulaPalette {
-                panel: Rgba::new(25, 28, 25, 224),
-                pill: Rgba::new(33, 37, 33, 218),
-                tab_stroke_l: Rgba::new(163, 179, 163, 124),
-                tab_bg_l: Rgba::new(54, 61, 54, 230),
-                tab_bg_r: Rgba::new(40, 46, 40, 226),
-                edge_l: Rgba::new(149, 175, 149, 172),
-                edge_r: Rgba::new(163, 179, 163, 158),
-                edge_glow_l: Rgba::new(149, 175, 149, 22),
-                glow_l: Rgba::new(149, 175, 149, 12),
-                glow_r: Rgba::new(163, 179, 163, 12),
-                is_light: false,
-                term_bg: Rgb::new(30, 33, 30),
-                shell_bg: Rgb::new(25, 28, 25),
-            },
-            Self::Nord => NebulaPalette {
-                // `Nord`: panel/background #2E3440, elevated
-                // surface #3B4252, one cyan accent and no ambient glow.
-                panel: Rgba::new(0x2e, 0x34, 0x40, 255),
-                pill: Rgba::new(0x3b, 0x42, 0x52, 255),
-                tab_stroke_l: Rgba::new(255, 255, 255, 15),
-                tab_bg_l: Rgba::new(0x3b, 0x42, 0x52, 255),
-                tab_bg_r: Rgba::new(0x3b, 0x42, 0x52, 255),
-                edge_l: Rgba::new(0x88, 0xc0, 0xd0, 255),
-                edge_r: Rgba::new(0x88, 0xc0, 0xd0, 255),
-                edge_glow_l: Rgba::new(0x88, 0xc0, 0xd0, 0),
-                glow_l: Rgba::new(0x88, 0xc0, 0xd0, 0),
-                glow_r: Rgba::new(0x88, 0xc0, 0xd0, 0),
-                is_light: false,
-                term_bg: Rgb::new(0x2e, 0x34, 0x40),
-                shell_bg: Rgb::new(0x2e, 0x34, 0x40),
-            },
-            Self::Paper => NebulaPalette {
-                // `Paper`: warm panel #F5F4F0 around the
-                // #FCFBF9 terminal surface, with botanical green accent.
-                panel: Rgba::new(0xf5, 0xf4, 0xf0, 255),
-                pill: Rgba::new(0xfc, 0xfb, 0xf9, 255),
-                tab_stroke_l: Rgba::new(0xe0, 0xdf, 0xd5, 255),
-                tab_bg_l: Rgba::new(255, 255, 255, 255),
-                tab_bg_r: Rgba::new(255, 255, 255, 255),
-                edge_l: Rgba::new(0x2b, 0x5a, 0x38, 255),
-                edge_r: Rgba::new(0x2b, 0x5a, 0x38, 255),
-                edge_glow_l: Rgba::new(0x2b, 0x5a, 0x38, 0),
-                glow_l: Rgba::new(0x2b, 0x5a, 0x38, 0),
-                glow_r: Rgba::new(0x2b, 0x5a, 0x38, 0),
-                is_light: true,
-                term_bg: Rgb::new(0xfc, 0xfb, 0xf9),
-                shell_bg: Rgb::new(0xf5, 0xf4, 0xf0),
-            },
+        let p = self.fresh_palette().expect("reviewed theme palette");
+        let rgba = |rgb: [u8; 3], alpha| Rgba::new(rgb[0], rgb[1], rgb[2], alpha);
+        let reviewed = nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
+            .expect("shared theme identity")
+            .reviewed_palette();
+        NebulaPalette {
+            panel: rgba(p.shell, 255),
+            pill: rgba(p.surface, 255),
+            tab_stroke_l: Rgba::new(
+                reviewed.line[0],
+                reviewed.line[1],
+                reviewed.line[2],
+                reviewed.line[3],
+            ),
+            tab_bg_l: Rgba::new(
+                reviewed.selected[0],
+                reviewed.selected[1],
+                reviewed.selected[2],
+                reviewed.selected[3],
+            ),
+            tab_bg_r: Rgba::new(
+                reviewed.selected[0],
+                reviewed.selected[1],
+                reviewed.selected[2],
+                reviewed.selected[3],
+            ),
+            edge_l: rgba(p.accent, 255),
+            edge_r: rgba(p.accent, 255),
+            edge_glow_l: rgba(p.accent, 0),
+            glow_l: rgba(p.accent, 0),
+            glow_r: rgba(p.accent, 0),
+            is_light: p.is_light,
+            term_bg: rgb8(p.surface),
+            shell_bg: rgb8(p.shell),
         }
     }
 
     /// Theme-derived ink/surface tokens for every floating chrome layer.
     /// See [`Skin`] for what each token means.
     pub(crate) fn skin(self) -> Skin {
+        let mut skin = self.skin_defaults();
+        let p = nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
+            .expect("shared theme identity")
+            .reviewed_palette();
+        let rgba = |rgb: [u8; 3]| Rgba::new(rgb[0], rgb[1], rgb[2], 255);
+        let wash = |rgb: [u8; 4]| Rgba::new(rgb[0], rgb[1], rgb[2], rgb[3]);
+        skin.panel = rgba(p.background);
+        skin.input = rgba(p.background);
+        skin.ink = rgb8(p.foreground);
+        skin.ink_strong = skin.ink;
+        skin.ink_dim = rgb8(p.muted);
+        skin.ink_faint = skin.ink_dim;
+        skin.icon = skin.ink_dim;
+        skin.icon_hover = skin.ink;
+        skin.accent = rgb8(p.accent);
+        skin.accent_soft = wash(p.selected);
+        skin.hover = skin.accent_soft;
+        skin.hover_strong = skin.accent_soft;
+        skin.surface = skin.accent_soft;
+        skin.card = skin.accent_soft;
+        skin.hairline = wash(p.line);
+        skin.danger = rgba(p.red);
+        skin.ok = rgba(p.green);
+        skin.warn = rgba(p.yellow);
+        skin.ink_on_accent =
+            if skin.is_light { Rgb::new(255, 255, 255) } else { rgb8(p.background) };
+        skin
+    }
+
+    fn skin_defaults(self) -> Skin {
         match self {
             Self::Nord => return nord_skin(),
             Self::Paper => return paper_skin(),
@@ -664,7 +581,7 @@ impl NebulaTheme {
         let shell_avg = ((shell.r as f32 + shell.g as f32 + shell.b as f32) / 3.0).max(1.0);
         let lift_factor = (shell_avg + 14.0) / shell_avg;
         let lift = |c: u8| ((c as f32 * lift_factor).round().min(255.0)) as u8;
-        if p.is_light {
+        let mut skin = if p.is_light {
             Skin {
                 // 浅色的三层不是单调递增的明度阶梯，而是**凹槽**（2026-07-31
                 // 裁定，推翻 07-29 的"浮层比内容更暗"）：浮层底与输入面同为
@@ -805,7 +722,22 @@ impl NebulaTheme {
                 scrollbar_thumb: Rgba::new(148, 163, 184, 0), // slate-400
                 is_light: false,
             }
+        };
+        if let Some(palette) = self.fresh_palette() {
+            let rgba = |rgb: [u8; 3], alpha| Rgba::new(rgb[0], rgb[1], rgb[2], alpha);
+            skin.panel = rgba(palette.surface, 255);
+            skin.input = skin.panel;
+            skin.card = rgba(palette.shell, 255);
+            skin.ink = rgb8(palette.foreground);
+            skin.ink_strong = skin.ink;
+            skin.ink_dim = rgb8(palette.muted);
+            skin.icon = skin.ink_dim;
+            skin.icon_hover = skin.ink;
+            skin.accent = rgb8(palette.accent);
+            skin.accent_soft = rgba(palette.accent, if palette.is_light { 28 } else { 38 });
+            skin.hairline = rgba(palette.muted, 36);
         }
+        skin
     }
 }
 

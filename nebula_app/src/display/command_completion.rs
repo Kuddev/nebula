@@ -222,37 +222,16 @@ pub(crate) fn nebula_command_hints<'a>(
     if prefix.is_empty() || limit == 0 {
         return Vec::new();
     }
-    let mut out: Vec<&'a str> = Vec::new();
-
-    for exact_only in [true, false] {
-        for command in commands {
-            if command.len() < prefix.len() || !command.is_char_boundary(prefix.len()) {
-                continue;
-            }
-            let head = &command[..prefix.len()];
-            let exact = command.len() == prefix.len();
-            if exact != exact_only {
-                continue;
-            }
-            #[cfg(windows)]
-            let matches = head.eq_ignore_ascii_case(prefix);
-            #[cfg(not(windows))]
-            let matches = head == prefix;
-
-            #[cfg(windows)]
-            let duplicate = out.iter().any(|seen| seen.eq_ignore_ascii_case(command));
-            #[cfg(not(windows))]
-            let duplicate = out.iter().any(|seen| *seen == command.as_str());
-
-            if matches && !duplicate {
-                out.push(command);
-                if out.len() == limit {
-                    return out;
-                }
-            }
-        }
-    }
-    out
+    let mut query = nebula_completions::command_search::CommandQuery::new(prefix);
+    let mut matches: Vec<_> = commands
+        .iter()
+        .filter_map(|command| query.score(command).map(|score| (score, command.as_str())))
+        .collect();
+    matches.sort_by(|(a_score, a), (b_score, b)| {
+        b_score.cmp(a_score).then(a.len().cmp(&b.len())).then(a.cmp(b))
+    });
+    matches.dedup_by(|a, b| a.1 == b.1);
+    matches.into_iter().take(limit).map(|(_, command)| command).collect()
 }
 
 pub(crate) fn nebula_is_command_position(line: &str) -> bool {
@@ -301,7 +280,7 @@ mod tests {
             nebula_command_hints(&commands, "claude", 8),
             vec!["claude", "claude-agent-acp"]
         );
-        assert_eq!(nebula_command_hints(&commands, "c", 2), vec!["claude", "claude-agent-acp"]);
+        assert_eq!(nebula_command_hints(&commands, "c", 2), vec!["cargo", "claude"]);
         assert_eq!(nebula_command_hints(&strings(&["LsaIso", "lsass", "ls"]), "ls", 8)[0], "ls");
         assert!(nebula_command_hints(&commands, "", 8).is_empty());
     }

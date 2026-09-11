@@ -18,7 +18,7 @@ struct ColorPairKey {
     theme_background: u32,
 }
 
-/// Resolves application-owned colors against the active terminal theme.
+/// Resolves text colors against the actual cell background and active theme.
 ///
 /// The terminal grid keeps the exact PTY colors. Only the draw-time result is
 /// cached, so changing the theme immediately recolors existing scrollback.
@@ -150,7 +150,7 @@ pub(crate) fn is_fixed_color(color: Color, overrides: &Colors) -> bool {
     }
 }
 
-fn ensure_contrast(
+pub(crate) fn ensure_contrast(
     foreground: Rgb,
     background: Rgb,
     theme_foreground: Rgb,
@@ -161,12 +161,20 @@ fn ensure_contrast(
         return foreground;
     }
 
-    let target = if theme_foreground.contrast(*background) >= theme_background.contrast(*background)
-    {
-        theme_foreground
-    } else {
-        theme_background
-    };
+    let mut target =
+        if theme_foreground.contrast(*background) >= theme_background.contrast(*background) {
+            theme_foreground
+        } else {
+            theme_background
+        };
+    // OSC overrides and custom surfaces can make both theme anchors unreadable.
+    // The fallback must itself meet the bound before we interpolate toward it.
+    if target.contrast(*background) < minimum {
+        let black = Rgb::new(0, 0, 0);
+        let white = Rgb::new(255, 255, 255);
+        target =
+            if black.contrast(*background) >= white.contrast(*background) { black } else { white };
+    }
     binary_mix(foreground, target, |candidate| candidate.contrast(*background) >= minimum)
 }
 
@@ -325,5 +333,20 @@ mod tests {
 
         overrides[NamedColor::Red] = Some(VteRgb { r: 1, g: 2, b: 3 });
         assert!(is_fixed_color(Color::Named(NamedColor::Red), &overrides));
+    }
+
+    #[test]
+    fn pale_osc_anchors_cannot_leave_input_unreadable() {
+        let mut resolver = TerminalColorResolver::default();
+        let background = Rgb::new(250, 250, 250);
+        let input = Rgb::new(220, 220, 220);
+        let resolved = resolver.resolve_foreground(
+            input,
+            background,
+            true,
+            Rgb::new(240, 240, 240),
+            Rgb::new(255, 255, 255),
+        );
+        assert!(resolved.contrast(*background) >= FIXED_TEXT_MIN_CONTRAST);
     }
 }

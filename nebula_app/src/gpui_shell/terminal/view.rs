@@ -5,6 +5,7 @@ mod confirmation;
 mod cwd_report;
 mod image_paste;
 mod notifications;
+mod path_drop;
 mod pointer;
 mod runtime;
 
@@ -41,7 +42,6 @@ use super::{KEY_CONTEXT, TerminalBackTab, TerminalTab};
 use crate::gpui_shell::config::Settings;
 use crate::gpui_shell::prelude::{ActiveTheme as _, Colorize as _};
 use crate::{config::UiConfig, font_install::REQUIRED_FONT_FAMILY};
-use futures::StreamExt as _;
 
 /// 等宽字体描述。GPUI 的 Windows 后端收到空 feature 列表会在
 /// `apply_font_features` 里提前返回，Maple 的 contextual ligature 因而不会
@@ -258,7 +258,6 @@ pub struct TerminalView {
     pub(super) answers: crate::assistant_answer::AnswerInbox,
     confirmation: super::confirmation::ConfirmationState,
     pub(super) answer_reader: Option<gpui::Entity<super::answer_reader::AnswerReader>>,
-    preserve_agent_math_source: bool,
     pub pane_id: u64,
     pub session: Option<TerminalSession>,
     pub focus_handle: FocusHandle,
@@ -340,6 +339,7 @@ pub struct TerminalView {
     /// 只用事件携带的绝对行锚定到对应的 scrollback 位置。
     pub(super) inline_images: super::inline_image::InlineImageStore,
     image_paste: image_paste::ImagePasteState,
+    path_drop: path_drop::PathDropState,
     /// SSH 直连目的地（`user@host[:port]`）；本地会话为 None。
     pub ssh_destination: Option<String>,
     /// 创建本地 PTY 时冻结的受控环境，供独立 `pane.exec` child 复用。
@@ -354,6 +354,12 @@ pub struct TerminalView {
     /// Hook-reported identity for exact resume/fork. Process/title inference is
     /// never accepted here because a wrong id would continue the wrong chat.
     pub ai_session: Option<crate::display::AiSessionIdentity>,
+    /// A hook is not guaranteed to be present when a pane starts. The Codex
+    /// rollout probe runs in the background and uses this generation to reject
+    /// a result from a previous foreground command.
+    pub(super) ai_session_probe_pending: bool,
+    pub(super) ai_session_probe_epoch: u64,
+    pub(super) last_ai_session_probe: Option<std::time::Instant>,
     error: Option<String>,
     exited: Option<String>,
     /// 滚动条拖拽中：按下时记下的「指针在拇指内的 y 偏移」，拖动全程据此
@@ -684,7 +690,7 @@ impl TerminalView {
             };
         let is_ssh = ssh_destination.is_some();
         let (session, error) = match spawned {
-            Ok((session, mut rx, mut stage_rx)) => {
+            Ok((session, rx, stage_rx)) => {
                 // 新会话欢迎屏（设置 fetch=1，旧壳 fastfetch 同一入口）：
                 // 命令先进 conhost 输入队列，shell 出提示符即执行。宽度按
                 // 出生网格裁定双列/堆叠版式；bash/WSL id 走 fastfetch 回退
@@ -714,48 +720,7 @@ impl TerminalView {
                         ),
                     );
                 }
-                cx.spawn(async move |this, cx| {
-                    while let Some(event) = rx.next().await {
-                        // 合并同一批到达的事件，避免每个 Wakeup 都独立触发一帧。
-                        let mut batch = vec![event];
-                        while batch.len() < 128 {
-                            match rx.try_recv() {
-                                Ok(event) => batch.push(event),
-                                _ => break,
-                            }
-                        }
-                        let done = batch.iter().any(|e| matches!(e, TermEvent::Exit));
-                        if this
-                            .update(cx, |view: &mut Self, cx| {
-                                for event in batch {
-                                    view.process_event(event, cx);
-                                }
-                            })
-                            .is_err()
-                            || done
-                        {
-                            break;
-                        }
-                    }
-                })
-                .detach();
-                if is_ssh {
-                    // SSH 连接阶段泵：横幅数据源（与旧壳连接卡片同一
-                    // 上报流，350ms 门槛之类的视觉策略交给渲染端）。
-                    cx.spawn(async move |this, cx| {
-                        while let Some(stage) = stage_rx.next().await {
-                            if this
-                                .update(cx, |view: &mut Self, cx| {
-                                    view.apply_ssh_stage(stage, cx);
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    })
-                    .detach();
-                }
+                super::session_pump::attach(rx, stage_rx, is_ssh, cx);
                 (Some(session), None)
             },
             Err(err) => {
@@ -802,7 +767,6 @@ impl TerminalView {
             answers: crate::assistant_answer::AnswerInbox::default(),
             answer_reader: None,
             confirmation: super::confirmation::ConfirmationState::default(),
-            preserve_agent_math_source: false,
             font: mono_font(&families[0], FontWeight::NORMAL, FontStyle::Normal),
             font_bold: mono_font(&families[1], FontWeight::BOLD, FontStyle::Normal),
             font_italic: mono_font(&families[2], FontWeight::NORMAL, FontStyle::Italic),
@@ -837,12 +801,16 @@ impl TerminalView {
             pending_runtime_submit: None,
             inline_images: super::inline_image::InlineImageStore::default(),
             image_paste: image_paste::ImagePasteState::default(),
+            path_drop: path_drop::PathDropState::default(),
             ssh_destination,
             exec_context,
             ssh_stage: None,
             ssh_connect: None,
             ssh_connect_last_step: std::time::Instant::now(),
             ai_session: None,
+            ai_session_probe_pending: false,
+            ai_session_probe_epoch: 0,
+            last_ai_session_probe: None,
             error,
             exited: None,
             scrollbar_drag: None,
@@ -903,7 +871,7 @@ impl TerminalView {
         view
     }
 
-    fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
+    pub(super) fn process_event(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         let cwd_changed = cwd_report::apply(&mut self.cwd, &event);
         // Both shell metadata channels update completion and directory history.
         if cwd_changed
@@ -1014,8 +982,13 @@ impl TerminalView {
                     crate::ai_agents::AgentKind::parse_command(&self.suggest.last_committed)
                         .map(|agent| agent.slug().to_owned())
                         .or_else(|| crate::display::extract_program(&self.suggest.last_committed));
+                // A probe belongs to one foreground command. Invalidate it
+                // before replacing the command identity so a slow WSL result
+                // from Codex A cannot become the identity of Codex B.
+                self.invalidate_ai_session_probe();
                 if identity != self.running_program {
                     self.running_program = identity;
+                    self.ai_session = None;
                     cx.emit(TerminalViewEvent::TitleChanged);
                 }
                 if self
@@ -1029,6 +1002,7 @@ impl TerminalView {
                     self.agent_status_rule = None;
                 }
                 self.mark_command_running();
+                self.probe_missing_codex_session(cx);
                 // 首个词就是一个交互式 shell（`cmd`、`wsl`、裸 `bash`）：133;C
                 // 是真的，但这条「命令」其实是一个新提示符，133;D 永远不会来
                 // ——那个 shell 接管了终端，而我们的集成不在它里面。立刻按「已被
@@ -1133,22 +1107,6 @@ impl TerminalView {
         }
     }
 
-    /// 旧壳 `WindowContext::busy_process_in` 的单 Pane 形态：进程树只负责
-    /// 判断 shell 下面是否仍有子进程；展示名称优先采用终端协议识别出的
-    /// 程序名，避免把 Claude Code 一律显示成承载它的 `node.exe`。
-    pub fn busy_process(&self) -> Option<String> {
-        let shell_pid = self.session.as_ref()?.shell_pid;
-        if shell_pid == 0 {
-            return None;
-        }
-        let executable = crate::process_tree::busy_child(shell_pid)?;
-        Some(
-            self.running_program
-                .clone()
-                .unwrap_or_else(|| crate::process_tree::display_name(&executable)),
-        )
-    }
-
     fn write_bytes(&self, bytes: Vec<u8>) {
         if let Some(session) = &self.session {
             session.notifier.notify(bytes);
@@ -1157,6 +1115,7 @@ impl TerminalView {
 
     /// 输入后回到底部并请求重绘。
     fn write_input(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.path_drop.invalidate();
         self.image_paste.observe_input(&bytes);
         self.confirmation.observe_input(&bytes);
         self.awaiting_input = false;
@@ -2184,6 +2143,11 @@ impl Render for TerminalView {
             .on_mouse_up(MouseButton::Right, cx.listener(Self::on_right_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_middle_up))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
+            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(drop_highlight))
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                this.drop_external_paths(paths.paths(), window, cx);
+            }))
             // 文件树拖进来 = 把路径粘进 shell（旧壳 `FileDrag` 同一合同：只
             // 粘贴，绝不代按 Enter）。`drag_over` 给一层落点高亮，否则用户拖
             // 到一半不知道松手会不会生效。
@@ -2195,17 +2159,8 @@ impl Render for TerminalView {
                  drag: &crate::gpui_shell::file_drop::FileTreeDrag,
                  window: &mut Window,
                  cx| {
-                    let Some(bytes) =
-                        crate::display::side_panel::drop_text_for_path(&drag.path_text)
-                    else {
-                        // 含控制字符的路径写进 PTY 等于替用户执行命令。
-                        return;
-                    };
-                    this.write_bytes(bytes);
-                    // 粘完把焦点交回终端：用户接着就要敲命令，还要先点一下
-                    // 才能输入的话，这个手势就白省了。
-                    window.focus(&this.focus_handle, cx);
-                    cx.notify();
+                    cx.stop_propagation();
+                    this.paste_dropped_paths(&[drag.path_text.clone()], window, cx);
                 },
             ))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -2310,18 +2265,6 @@ impl TerminalView {
         window.focus(&focus, cx);
         self.answer_reader = Some(reader);
         cx.notify();
-    }
-
-    pub(super) fn uses_source_reader_math(&mut self) -> bool {
-        self.preserve_agent_math_source |= self
-            .running_program
-            .as_deref()
-            .is_some_and(|program| matches!(program, "claude" | "codex"))
-            || self
-                .ai_session
-                .as_ref()
-                .is_some_and(|session| matches!(session.source.as_str(), "claude" | "codex"));
-        self.preserve_agent_math_source
     }
 }
 

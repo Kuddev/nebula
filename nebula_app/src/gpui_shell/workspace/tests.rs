@@ -735,8 +735,13 @@ fn sidebar_resize_hot_zone_follows_the_theme_boundary() {
     assert_eq!((nord.gutter, nord.divider), (0.0, 1.0), "Nord 是铺满 + 竖线形态");
     assert_eq!(sidebar_resize_offset_for(nord.divider, nord.gutter), 0.5, "对准 1px 线心");
 
-    let floating = nebula_settings::ThemeName::Nebula.card_geometry();
-    assert_eq!((floating.gutter, floating.divider), (8.0, 0.0), "其余主题是浮起圆角卡");
+    let floating = nebula_settings::ThemeCardGeometry {
+        radius: 14.0,
+        gutter: 8.0,
+        shadow: false,
+        divider: 0.0,
+    };
+    assert_eq!((floating.gutter, floating.divider), (8.0, 0.0), "显式自定义圆角仍按外缝定位");
     assert_eq!(
         sidebar_resize_offset_for(floating.divider, floating.gutter),
         8.0,

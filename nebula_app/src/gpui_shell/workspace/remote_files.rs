@@ -20,6 +20,12 @@
 //! 就会出现"点进 c 目录，界面却显示 b 目录的内容"。世代号对不上的响应直接
 //! 丢弃——它描述的是一个已经不存在的意图。
 
+mod drag;
+mod target;
+mod transfers;
+use target::RemoteTransferTarget;
+
+use gpui::AppContext as _;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,8 +42,8 @@ use crate::ssh_sftp::{
     SftpSnapshot, SftpTransferOptions,
 };
 
-use super::NebulaWorkspace;
 use super::file_tree::{DRAWER_TEXT_INSET, ROW_PITCH, ROW_WASH_H, ROW_WASH_INSET};
+use super::{NebulaWorkspace, workspace_ui_language};
 
 /// 工具栏与说明文字沿用本地树的抽屉内边距。
 const TEXT_INSET: f32 = DRAWER_TEXT_INSET;
@@ -88,6 +94,9 @@ pub(super) struct RemoteBrowser {
     /// 控制器世代号。旧控制器的 wake 可能晚到，不能因此读取刚装上的新控制器。
     transfer_id: u64,
     skip_unchanged: bool,
+    preflighting: bool,
+    preflight_id: u64,
+    last_outcome: Option<crate::i18n::Message>,
     /// 远端复制载荷必须带稳定的源 destination，不能从当前标题反推源主机。
     clipboard: Option<RemoteClipboard>,
 }
@@ -105,12 +114,12 @@ enum PendingRemoteTransfer {
     Copy(RemoteClipboard),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RemoteTransferTarget {
-    pane: u64,
-    destination: String,
-    path: String,
-    navigation_generation: u64,
+impl Drop for RemoteBrowser {
+    fn drop(&mut self) {
+        if let Some(controller) = &self.transfer {
+            controller.cancel();
+        }
+    }
 }
 
 impl RemoteBrowser {
@@ -138,6 +147,7 @@ impl RemoteBrowser {
 
     /// 绑定 pane。返回 `true` 表示已有完整快照，调用方不得再列目录。
     fn bind(&mut self, pane: u64, destination: String) -> bool {
+        self.last_outcome = None;
         self.park_active();
         self.generation = self.generation.wrapping_add(1);
         self.pane = Some(pane);
@@ -326,6 +336,7 @@ impl NebulaWorkspace {
 
     /// 列出一个远端目录并显示它。
     pub(super) fn navigate_remote(&mut self, path: String, cx: &mut Context<'_, Self>) {
+        self.remote_browser.last_outcome = None;
         let Some(pane) = self.remote_browser.pane else { return };
         let Some(session) = self.remote_browser.browse_sessions.get(&pane).cloned() else {
             self.remote_browser.loading = false;
@@ -385,522 +396,6 @@ impl NebulaWorkspace {
         self.remote_browser.entries.iter().find(|entry| entry.path == selected).cloned()
     }
 
-    fn remote_transfer_snapshot(&self) -> Option<SftpSnapshot> {
-        self.remote_browser.transfer.as_ref().map(SftpController::snapshot)
-    }
-
-    fn remote_transfer_working(&self) -> bool {
-        self.remote_transfer_snapshot().is_some_and(|snapshot| snapshot.phase == SftpPhase::Working)
-    }
-
-    /// 为当前 pane/目录取得控制器，并启动一条常驻 wake 接收协程。
-    ///
-    /// 接收协程只持有 channel，不持有 controller；否则 controller 的 wake 闭包
-    /// 持有 sender、协程再持有 controller，会形成直到进程退出才释放的环。
-    fn remote_transfer_controller(
-        &mut self,
-        cx: &mut Context<'_, Self>,
-    ) -> Result<SftpController, String> {
-        let pane = self.remote_browser.pane.ok_or_else(|| "当前没有可用的 SSH pane".to_owned())?;
-        let destination = self.remote_browser.destination.clone();
-        let path = self.remote_browser.path.clone();
-        if destination.is_empty() || path.is_empty() {
-            return Err("远端目录尚未就绪".to_owned());
-        }
-
-        if let Some(controller) = self.remote_browser.transfer.as_ref() {
-            let snapshot = controller.snapshot();
-            if snapshot.phase == SftpPhase::Working {
-                return Err(format!("已有传输正在进行：{}", snapshot.destination));
-            }
-            if snapshot.destination == destination && snapshot.path == path {
-                return Ok(controller.clone());
-            }
-        }
-
-        self.remote_browser.transfer_id = self.remote_browser.transfer_id.wrapping_add(1).max(1);
-        let transfer_id = self.remote_browser.transfer_id;
-        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel();
-        let wake = Arc::new(move || {
-            let _ = wake_tx.send(());
-        });
-        let controller = SftpController::new_at(destination.clone(), path, wake)
-            .map_err(|error| error.to_string())?;
-        self.remote_browser.transfer = Some(controller.clone());
-
-        cx.spawn(async move |this, cx| {
-            while wake_rx.recv().await.is_some() {
-                let finished = this
-                    .update(cx, |workspace, cx| {
-                        workspace.sync_remote_transfer(transfer_id, pane, &destination, cx)
-                    })
-                    .unwrap_or(true);
-                if finished {
-                    break;
-                }
-            }
-        })
-        .detach();
-        Ok(controller)
-    }
-
-    /// 把 controller 快照落回 GPUI 状态。返回 true 表示接收协程可以退出。
-    fn sync_remote_transfer(
-        &mut self,
-        transfer_id: u64,
-        pane: u64,
-        destination: &str,
-        cx: &mut Context<'_, Self>,
-    ) -> bool {
-        if self.remote_browser.transfer_id != transfer_id {
-            return true;
-        }
-        let Some(controller) = self.remote_browser.transfer.as_ref() else {
-            return true;
-        };
-        let snapshot = controller.snapshot();
-        if snapshot.destination != destination {
-            return true;
-        }
-
-        let visible = self.remote_browser.pane == Some(pane)
-            && self.remote_browser.destination == destination;
-        if visible {
-            match snapshot.phase {
-                SftpPhase::Ready => {
-                    // 用户可在传输期间继续浏览；只有仍停在传输起始目录时才替换
-                    // 列表，否则完成结果会把用户从刚进入的目录拉回去。
-                    if self.remote_browser.path == snapshot.path {
-                        self.remote_browser.entries = snapshot.entries.clone();
-                        self.remote_browser.selected = None;
-                    }
-                    self.remote_browser.error = None;
-                },
-                SftpPhase::Error => self.remote_browser.error = snapshot.error.clone(),
-                SftpPhase::Working => {},
-                SftpPhase::Connecting | SftpPhase::Loading => {},
-            }
-        }
-
-        let finished = snapshot.phase == SftpPhase::Ready;
-        if finished {
-            self.remote_browser.transfer = None;
-        }
-        cx.notify();
-        finished
-    }
-
-    fn start_remote_transfer(
-        &mut self,
-        pending: PendingRemoteTransfer,
-        conflict: SftpConflictPolicy,
-        target: &RemoteTransferTarget,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if !self.remote_transfer_target_matches(target) {
-            self.remote_browser.error =
-                Some("远端目标已改变，请在当前目录重新发起并确认传输".to_owned());
-            cx.notify();
-            return;
-        }
-        let controller = match self.remote_transfer_controller(cx) {
-            Ok(controller) => controller,
-            Err(message) => {
-                self.remote_browser.error = Some(message);
-                cx.notify();
-                return;
-            },
-        };
-        let options =
-            SftpTransferOptions { conflict, skip_unchanged: self.remote_browser.skip_unchanged };
-        self.remote_browser.error = None;
-        match pending {
-            PendingRemoteTransfer::Upload(paths) => {
-                controller.upload_paths_with_options(paths, options)
-            },
-            PendingRemoteTransfer::Download { entry, local_directory } => {
-                controller.download_with_options(entry, local_directory, options)
-            },
-            PendingRemoteTransfer::Copy(source) => {
-                controller.copy_from(source.source_destination, source.entry, options)
-            },
-        }
-        cx.notify();
-    }
-
-    fn current_remote_transfer_target(&self) -> Option<RemoteTransferTarget> {
-        Some(RemoteTransferTarget {
-            pane: self.remote_browser.pane?,
-            destination: self.remote_browser.destination.clone(),
-            path: self.remote_browser.path.clone(),
-            navigation_generation: self.remote_browser.generation,
-        })
-    }
-
-    fn remote_transfer_target_matches(&self, target: &RemoteTransferTarget) -> bool {
-        self.remote_browser.pane == Some(target.pane)
-            && self.remote_browser.destination == target.destination
-            && self.remote_browser.path == target.path
-            && self.remote_browser.generation == target.navigation_generation
-    }
-
-    fn remote_cancel_transfer(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(controller) = self.remote_browser.transfer.as_ref() {
-            controller.cancel();
-            cx.notify();
-        }
-    }
-
-    /// 返回根级冲突数，以及当前已知类型是否允许覆盖。
-    ///
-    /// 这里只负责决定是否询问用户；真正执行前内核还会重新 stat，防止对话框
-    /// 打开期间目标被别的进程替换。
-    fn pending_remote_conflicts(&self, pending: &PendingRemoteTransfer) -> (usize, bool, bool) {
-        match pending {
-            PendingRemoteTransfer::Upload(paths) => {
-                let mut conflicts = 0;
-                let mut overwrite_allowed = true;
-                let mut follows_symlink = false;
-                let mut root_names = HashSet::with_capacity(paths.len());
-                for path in paths {
-                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                        continue;
-                    };
-                    let collides_with_batch = !root_names.insert(name.to_owned());
-                    let target =
-                        self.remote_browser.entries.iter().find(|entry| entry.name == name);
-                    let source = std::fs::symlink_metadata(path).ok();
-                    if !collides_with_batch
-                        && self.remote_browser.skip_unchanged
-                        && source
-                            .as_ref()
-                            .zip(target)
-                            .is_some_and(|(source, target)| local_metadata_matches(source, target))
-                    {
-                        continue;
-                    }
-                    if !collides_with_batch && target.is_none() {
-                        continue;
-                    }
-                    conflicts += 1;
-                    follows_symlink |=
-                        target.is_some_and(|target| target.kind == SftpEntryKind::Symlink);
-                    if collides_with_batch {
-                        overwrite_allowed = false;
-                    }
-                    if let (Some(target), Some(source)) = (target, source) {
-                        let compatible = (source.is_dir()
-                            && target.kind == SftpEntryKind::Directory)
-                            || (source.is_file()
-                                && matches!(
-                                    target.kind,
-                                    SftpEntryKind::File | SftpEntryKind::Symlink
-                                ));
-                        overwrite_allowed &= compatible;
-                    }
-                }
-                (conflicts, overwrite_allowed, follows_symlink)
-            },
-            PendingRemoteTransfer::Download { entry, local_directory } => {
-                let target = local_directory.join(&entry.name);
-                let Ok(metadata) = std::fs::symlink_metadata(target) else {
-                    return (0, true, false);
-                };
-                if self.remote_browser.skip_unchanged && local_metadata_matches(&metadata, entry) {
-                    return (0, true, false);
-                }
-                let compatible = match entry.kind {
-                    SftpEntryKind::Directory => metadata.is_dir(),
-                    SftpEntryKind::File => metadata.is_file() || metadata.file_type().is_symlink(),
-                    // 链接的目标类型必须由远端 lstat/readlink 后才能确定，交给
-                    // 内核的执行时校验，UI 不凭列表图标猜。
-                    SftpEntryKind::Symlink => true,
-                };
-                (1, compatible, metadata.file_type().is_symlink())
-            },
-            PendingRemoteTransfer::Copy(source) => {
-                let Some(target) = self
-                    .remote_browser
-                    .entries
-                    .iter()
-                    .find(|entry| entry.name == source.entry.name)
-                else {
-                    return (0, true, false);
-                };
-                if self.remote_browser.skip_unchanged
-                    && source.entry.kind == SftpEntryKind::File
-                    && target.kind == SftpEntryKind::File
-                    && source.entry.size == target.size
-                    && source.entry.modified != 0
-                    && source.entry.modified == target.modified
-                {
-                    return (0, true, false);
-                }
-                let compatible = match source.entry.kind {
-                    SftpEntryKind::Directory => target.kind == SftpEntryKind::Directory,
-                    SftpEntryKind::File => {
-                        matches!(target.kind, SftpEntryKind::File | SftpEntryKind::Symlink)
-                    },
-                    SftpEntryKind::Symlink => true,
-                };
-                (1, compatible, target.kind == SftpEntryKind::Symlink)
-            },
-        }
-    }
-
-    fn request_remote_transfer(
-        &mut self,
-        pending: PendingRemoteTransfer,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(target) = self.current_remote_transfer_target() else {
-            self.remote_browser.error = Some("远端目录尚未就绪".to_owned());
-            cx.notify();
-            return;
-        };
-        if self.remote_transfer_working() {
-            self.remote_browser.error = Some("已有传输正在进行，请等待完成或先取消".to_owned());
-            cx.notify();
-            return;
-        }
-        let (conflicts, overwrite_allowed, follows_symlink) =
-            self.pending_remote_conflicts(&pending);
-        if conflicts == 0 {
-            self.start_remote_transfer(pending, SftpConflictPolicy::Overwrite, &target, cx);
-            return;
-        }
-        self.open_remote_conflict_dialog(
-            pending,
-            target,
-            conflicts,
-            overwrite_allowed,
-            follows_symlink,
-            window,
-            cx,
-        );
-    }
-
-    fn open_remote_conflict_dialog(
-        &mut self,
-        pending: PendingRemoteTransfer,
-        target: RemoteTransferTarget,
-        conflicts: usize,
-        overwrite_allowed: bool,
-        follows_symlink: bool,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let workspace = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, window, _cx| {
-            let skip_workspace = workspace.clone();
-            let skip_pending = pending.clone();
-            let skip_target = target.clone();
-            let keep_workspace = workspace.clone();
-            let keep_pending = pending.clone();
-            let keep_target = target.clone();
-            let overwrite_workspace = workspace.clone();
-            let overwrite_pending = pending.clone();
-            let overwrite_target = target.clone();
-            let footer = DialogFooter::new()
-                .child(DialogClose::new().child(Button::new("sftp-conflict-cancel").label("取消")))
-                .child(div().flex_1())
-                .child(DialogClose::new().child(
-                    Button::new("sftp-conflict-skip").label("跳过").on_click(move |_, _, cx| {
-                        let Some(workspace) = skip_workspace.upgrade() else { return };
-                        let _ = workspace.update(cx, |workspace, cx| {
-                            workspace.start_remote_transfer(
-                                skip_pending.clone(),
-                                SftpConflictPolicy::Skip,
-                                &skip_target,
-                                cx,
-                            );
-                        });
-                    }),
-                ))
-                .child(DialogClose::new().child(
-                    Button::new("sftp-conflict-keep-both").label("保留两者").on_click(
-                        move |_, _, cx| {
-                            let Some(workspace) = keep_workspace.upgrade() else { return };
-                            let _ = workspace.update(cx, |workspace, cx| {
-                                workspace.start_remote_transfer(
-                                    keep_pending.clone(),
-                                    SftpConflictPolicy::KeepBoth,
-                                    &keep_target,
-                                    cx,
-                                );
-                            });
-                        },
-                    ),
-                ))
-                .child(
-                    DialogClose::new().child(
-                        Button::new("sftp-conflict-overwrite")
-                            .label("覆盖")
-                            .danger()
-                            .disabled(!overwrite_allowed)
-                            .on_click(move |_, _, cx| {
-                                let Some(workspace) = overwrite_workspace.upgrade() else { return };
-                                let _ = workspace.update(cx, |workspace, cx| {
-                                    workspace.start_remote_transfer(
-                                        overwrite_pending.clone(),
-                                        SftpConflictPolicy::Overwrite,
-                                        &overwrite_target,
-                                        cx,
-                                    );
-                                });
-                            }),
-                    ),
-                );
-
-            center_modal_dialog(dialog, window, 220.0)
-                .close_button(false)
-                .overlay_closable(true)
-                .title(div().text_lg().font_semibold().child("发现同名项目"))
-                .footer(footer)
-                .child(
-                    v_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(format!("目标位置已有 {conflicts} 个同名根项目。"))
-                        .when(!overwrite_allowed, |body| {
-                            body.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(_cx.theme().danger)
-                                    .child("其中包含文件与目录类型不一致的项目，不能覆盖。"),
-                            )
-                        })
-                        .when(follows_symlink, |body| {
-                            body.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(_cx.theme().danger)
-                                    .child(
-                                        "覆盖符号链接会直接改写链接指向的实际文件；该路径不具备原子回滚，失败或取消可能留下部分内容。",
-                                    ),
-                            )
-                        }),
-                )
-        });
-    }
-
-    fn remote_copy_selected(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some(entry) = self.selected_remote_entry() else { return };
-        self.remote_browser.clipboard = Some(RemoteClipboard {
-            source_destination: self.remote_browser.destination.clone(),
-            entry: entry.clone(),
-        });
-        crate::gpui_shell::toast::toast(
-            window,
-            cx,
-            crate::display::ToastKind::Info,
-            format!("已复制远端项目：{}", entry.name),
-        );
-        cx.notify();
-    }
-
-    fn remote_paste(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some(source) = self.remote_browser.clipboard.clone() else { return };
-        self.request_remote_transfer(PendingRemoteTransfer::Copy(source), window, cx);
-    }
-
-    fn remote_pick_upload_files(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        #[cfg(windows)]
-        let picked = pick_remote_upload_files(window);
-        #[cfg(not(windows))]
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("选择要上传的文件".into()),
-        });
-
-        cx.spawn_in(window, async move |this, cx| {
-            #[cfg(windows)]
-            let Ok(paths) = picked.await else { return };
-            #[cfg(not(windows))]
-            let paths = {
-                let Ok(Ok(Some(paths))) = picked.await else { return };
-                paths
-            };
-            if paths.is_empty() {
-                return;
-            }
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                workspace.request_remote_transfer(PendingRemoteTransfer::Upload(paths), window, cx);
-            });
-        })
-        .detach();
-    }
-
-    fn remote_pick_upload_directory(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        #[cfg(windows)]
-        let picked = pick_remote_directory(window, "选择要上传的文件夹");
-        #[cfg(not(windows))]
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("选择要上传的文件夹".into()),
-        });
-
-        cx.spawn_in(window, async move |this, cx| {
-            #[cfg(windows)]
-            let Ok(Some(path)) = picked.await else { return };
-            #[cfg(not(windows))]
-            let path = {
-                let Ok(Ok(Some(paths))) = picked.await else { return };
-                let Some(path) = paths.into_iter().next() else { return };
-                path
-            };
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                workspace.request_remote_transfer(
-                    PendingRemoteTransfer::Upload(vec![path]),
-                    window,
-                    cx,
-                );
-            });
-        })
-        .detach();
-    }
-
-    fn remote_pick_download_directory(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some(entry) = self.selected_remote_entry() else { return };
-        #[cfg(windows)]
-        let picked = pick_remote_directory(window, "选择下载位置");
-        #[cfg(not(windows))]
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("选择下载位置".into()),
-        });
-
-        cx.spawn_in(window, async move |this, cx| {
-            #[cfg(windows)]
-            let Ok(Some(local_directory)) = picked.await else { return };
-            #[cfg(not(windows))]
-            let local_directory = {
-                let Ok(Ok(Some(paths))) = picked.await else { return };
-                let Some(path) = paths.into_iter().next() else { return };
-                path
-            };
-            let _ = this.update_in(cx, |workspace, window, cx| {
-                workspace.request_remote_transfer(
-                    PendingRemoteTransfer::Download { entry, local_directory },
-                    window,
-                    cx,
-                );
-            });
-        })
-        .detach();
-    }
-
-    /// 当前目录里可见的行，含合成的"上一级"。
-    ///
-    /// `..` 是导航项而不是真实条目，所以必须显式标记：双击它是换目录，而下载
-    /// 或删除对它没有意义。判据和本地树的 `is_parent` 同源。
     fn remote_rows(&self) -> Vec<SftpEntry> {
         let mut rows = Vec::with_capacity(self.remote_browser.entries.len() + 1);
         if self.remote_browser.path != "/" {
@@ -919,13 +414,26 @@ impl NebulaWorkspace {
     }
 
     /// 单击选中，双击目录进入。
-    fn remote_activate(&mut self, row: SftpEntry, open: bool, cx: &mut Context<'_, Self>) {
+    fn remote_activate(
+        &mut self,
+        row: SftpEntry,
+        open: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         if open && matches!(row.kind, SftpEntryKind::Directory | SftpEntryKind::Symlink) {
             self.navigate_remote(row.path, cx);
             return;
         }
-        // 目录也必须能被选中，否则下载目录和跨主机复制目录没有入口。双击才
-        // 导航，文件双击仍只选中，传输动作统一由工具栏明确触发。
+        if open && row.kind == SftpEntryKind::File {
+            self.open_remote_document(
+                self.remote_browser.destination.clone(),
+                row.path,
+                window,
+                cx,
+            );
+            return;
+        }
         self.remote_browser.selected = Some(row.path);
         cx.notify();
     }
@@ -950,8 +458,6 @@ impl NebulaWorkspace {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let foreground = theme.foreground;
-        let popover = theme.popover;
-        let is_dark = theme.is_dark();
         let drop_highlight = theme.accent.opacity(0.18);
         let rows = self.remote_rows();
         let row_count = rows.len();
@@ -972,23 +478,23 @@ impl NebulaWorkspace {
             .gap_2()
             .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
             .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
-            .bg(popover)
-            .shadow(gpui_component::popover_shadow(is_dark))
+            .bg(cx.theme().sidebar)
             .occlude()
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_highlight))
-            .on_drop(cx.listener(
-                |this, paths: &ExternalPaths, window: &mut Window, cx| {
-                    let paths = paths.paths().to_owned();
-                    if !paths.is_empty() {
-                        this.request_remote_transfer(
-                            PendingRemoteTransfer::Upload(paths),
-                            window,
-                            cx,
-                        );
-                    }
-                },
-            ))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                cx.stop_propagation();
+                this.drop_upload_paths(paths.paths().to_owned(), None, window, cx);
+            }))
+            .drag_over::<crate::gpui_shell::file_drop::FileTreeDrag>(move |style, _, _, _| style.bg(drop_highlight))
+            .on_drop(cx.listener(|this, file: &crate::gpui_shell::file_drop::FileTreeDrag, window, cx| {
+                cx.stop_propagation();
+                this.drop_upload_paths(vec![file.local_path.clone()], None, window, cx);
+            }))
             .child(view_switch)
+            .child(div().px(px(TEXT_INSET)).text_xs().text_color(muted)
+                .child(workspace_ui_language().text(if crate::platform::file_drag::supported() {
+                    crate::i18n::Message::TransferDragHint
+                } else { crate::i18n::Message::TransferUploadHint })))
             // 主机名单独一行：远端浏览器最危险的误操作是"以为在另一台机器上"，
             // 所以目的地必须一直在视野里，而不是只在标题栏或 tab 上。
             .child(
@@ -1233,6 +739,12 @@ impl NebulaWorkspace {
         let symbol_family: SharedString = crate::font_install::REQUIRED_FONT_FAMILY.into();
         let label = row.name.clone();
         let activate = row.clone();
+        let source = (!row.is_parent).then(|| self.current_remote_transfer_target()).flatten();
+        let native_drag = source.map(|source| drag::RemoteFileDrag { source, entry: row.clone() });
+        let weak = cx.entity().downgrade();
+        let directory = (row.kind == SftpEntryKind::Directory).then(|| row.path.clone());
+        let upload_directory = directory.clone();
+        let highlight = theme.accent.opacity(0.18);
 
         h_flex()
             .h(px(ROW_PITCH))
@@ -1274,8 +786,64 @@ impl NebulaWorkspace {
                             .whitespace_nowrap()
                             .child(label),
                     )
-                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                        this.remote_activate(activate.clone(), event.click_count() >= 2, cx);
+                    .when_some(
+                        native_drag.filter(|_| crate::platform::file_drag::supported()),
+                        |item, drag| {
+                            item.on_drag(drag, move |drag, _, window, cx| {
+                                let preview = cx.new(|_| {
+                                    crate::gpui_shell::file_drop::FileDragGhost::new(
+                                        drag.entry.name.clone(),
+                                    )
+                                });
+                                let owner = weak.clone();
+                                let drag = drag.clone();
+                                window.defer(cx, move |window, cx| {
+                                    let _ = owner.update(cx, |workspace, cx| {
+                                        workspace.begin_native_download_drag(drag, window, cx)
+                                    });
+                                });
+                                preview
+                            })
+                        },
+                    )
+                    .when_some(directory, |item, directory| {
+                        item.drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(highlight))
+                            .on_drop(cx.listener(move |this, paths: &ExternalPaths, window, cx| {
+                                cx.stop_propagation();
+                                this.drop_upload_paths(
+                                    paths.paths().to_owned(),
+                                    Some(directory.clone()),
+                                    window,
+                                    cx,
+                                );
+                            }))
+                    })
+                    .when_some(upload_directory, |item, directory| {
+                        item.drag_over::<crate::gpui_shell::file_drop::FileTreeDrag>(
+                            move |style, _, _, _| style.bg(highlight),
+                        )
+                        .on_drop(cx.listener(
+                            move |this,
+                                  file: &crate::gpui_shell::file_drop::FileTreeDrag,
+                                  window,
+                                  cx| {
+                                cx.stop_propagation();
+                                this.drop_upload_paths(
+                                    vec![file.local_path.clone()],
+                                    Some(directory.clone()),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ))
+                    })
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        this.remote_activate(
+                            activate.clone(),
+                            event.click_count() >= 2,
+                            window,
+                            cx,
+                        );
                     })),
             )
             .into_any_element()
@@ -1289,6 +857,11 @@ impl NebulaWorkspace {
         if let Some(error) = self.remote_browser.error.as_deref() {
             return Some(format!("{error}（点右上角重新读取）"));
         }
+        if self.remote_browser.preflighting {
+            return Some(
+                workspace_ui_language().text(crate::i18n::Message::TransferChecking).to_owned(),
+            );
+        }
         if let Some(snapshot) = self.remote_transfer_snapshot()
             && snapshot.phase == SftpPhase::Working
             && snapshot.destination != self.remote_browser.destination
@@ -1297,6 +870,9 @@ impl NebulaWorkspace {
         }
         if self.remote_browser.loading {
             return Some("正在读取远端目录…".to_owned());
+        }
+        if let Some(outcome) = self.remote_browser.last_outcome {
+            return Some(workspace_ui_language().text(outcome).to_owned());
         }
         self.remote_browser.entries.is_empty().then(|| "此目录为空。".to_owned())
     }

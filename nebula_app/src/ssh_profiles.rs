@@ -3,9 +3,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+#[path = "ssh_profiles/connection.rs"]
 mod connection;
+#[path = "ssh_profiles/exchange.rs"]
+pub(crate) mod exchange;
+#[path = "ssh_profiles/organization.rs"]
+mod organization;
 pub(crate) use connection::validate_ssh_destination;
 pub use connection::{SshConnectionOptions, SshHostJumpMode, SshHostProxyMode};
+pub(crate) use organization::{HostOrganization, merge_host_sources};
 
 const PROFILE_VERSION: u32 = 1;
 const USERNAME_HISTORY_CAP: usize = 12;
@@ -67,11 +73,21 @@ pub struct SshProfiles {
     /// Profile 一起持久化；旧文件缺少字段时由 `serde(default)` 读成空列表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     usernames: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    organization: std::collections::BTreeMap<String, HostOrganization>,
+    #[serde(skip)]
+    source_bytes: Option<Vec<u8>>,
 }
 
 impl Default for SshProfiles {
     fn default() -> Self {
-        Self { version: PROFILE_VERSION, profiles: Vec::new(), usernames: Vec::new() }
+        Self {
+            version: PROFILE_VERSION,
+            profiles: Vec::new(),
+            usernames: Vec::new(),
+            organization: Default::default(),
+            source_bytes: None,
+        }
     }
 }
 
@@ -87,23 +103,39 @@ impl SshProfiles {
         for profile in &mut profiles.profiles {
             deduplicate_key_paths(&mut profile.private_keys);
         }
+        for value in profiles.organization.values() {
+            value.validate().map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        }
         normalize_usernames(&mut profiles.usernames);
         profiles.version = PROFILE_VERSION;
+        profiles.source_bytes = Some(data);
         Ok(profiles)
     }
 
-    pub fn save(&self, path: &Path) -> io::Result<()> {
+    pub fn save(&mut self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let data = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        let temporary = path.with_extension(format!("nebula-tmp-{}", std::process::id()));
-        std::fs::write(&temporary, data)?;
-        let result = replace_file(&temporary, path);
-        if result.is_err() {
-            let _ = std::fs::remove_file(&temporary);
+        // Reuse the OS-handle lease, scoped to this write. A stale snapshot must
+        // never replace a profile another window has just edited.
+        let _lease = crate::atomic_file::try_lifetime_lock(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Host profiles are being saved by another window",
+            )
+        })?;
+        let current = match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if current != self.source_bytes {
+            return Err(io::Error::other("Host profiles changed. Reload before saving."));
         }
-        result
+        let data = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
+        crate::atomic_file::write(path, &data)?;
+        self.source_bytes = Some(data);
+        Ok(())
     }
 
     pub fn for_destination(&self, destination: &str) -> SshProfileAuth {
@@ -203,6 +235,7 @@ impl SshProfiles {
 
     pub fn remove(&mut self, destination: &str) {
         self.profiles.retain(|profile| profile.destination != destination);
+        self.organization.remove(destination);
     }
 
     pub fn jump_dependents(&self, destination: &str) -> Vec<String> {
@@ -218,12 +251,16 @@ impl SshProfiles {
     }
 
     pub fn rename(&mut self, old: &str, new: &str) {
+        let organization = self.organization.remove(old);
         if let Some(mut profile) =
             self.profiles.iter().find(|profile| profile.destination == old).cloned()
         {
             self.remove(old);
             profile.destination = new.to_owned();
             self.upsert(profile);
+        }
+        if let Some(organization) = organization {
+            self.organization.insert(new.to_owned(), organization);
         }
         for profile in &mut self.profiles {
             if profile.connection.jump_mode == SshHostJumpMode::Host
@@ -278,12 +315,6 @@ fn deduplicate_key_paths(paths: &mut Vec<PathBuf>) {
             true
         }
     });
-}
-
-/// 原子替换走 [`crate::atomic_file::replace`]：Windows `MoveFileExW`、Unix
-/// `rename`，两端语义同为「目标要么旧要么新」。此前这里复制了一份 Windows 版。
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    crate::atomic_file::replace(source, destination)
 }
 
 #[cfg(test)]

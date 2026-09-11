@@ -347,6 +347,17 @@ impl SettingsPane {
         let backup_remote_inputs: Vec<Entity<InputState>> =
             (0..4).map(|_| cx.new(|cx| InputState::new(window, cx))).collect();
 
+        let ssh_library =
+            crate::gpui_shell::ssh_settings::library::HostLibraryState::new(window, cx);
+        subscriptions.push(cx.subscribe(
+            &ssh_library.search,
+            |this: &mut Self, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.ssh_library.reset_scroll();
+                    cx.notify();
+                }
+            },
+        ));
         let ssh_username_input = cx.new(|cx| InputState::new(window, cx).placeholder("root"));
         // 地址框现在只承担 host/IP；仍兼容粘贴整段 user@host，由共享 helper
         // 在保存/测试时拆出内嵌用户名。
@@ -392,6 +403,9 @@ impl SettingsPane {
                 .placeholder(localized_input_placeholder("ssh_jump_host", language))
         });
         for input in [
+            ssh_library.group.clone(),
+            ssh_library.tags.clone(),
+            ssh_library.notes.clone(),
             ssh_username_input.clone(),
             ssh_destination_input.clone(),
             ssh_port_input.clone(),
@@ -503,6 +517,7 @@ impl SettingsPane {
             provider_test_seq: 0,
             provider_test_running: false,
             provider_codex_confirm: None,
+            ssh_library,
             ssh_hosts: crate::gpui_shell::ssh_hosts::SshHostLists::load(),
             ssh_username_input,
             ssh_destination_input,

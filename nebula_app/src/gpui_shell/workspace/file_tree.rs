@@ -118,6 +118,7 @@ impl NebulaWorkspace {
         let guest_path = row.guest_path.clone();
         let menu_guest_path = guest_path.clone();
         let drag_guest_path = guest_path.clone();
+        let preview_path = path.clone();
         let drag_path = path.clone();
         let drag_name = row.name.clone();
         let is_dir = row.is_dir;
@@ -161,6 +162,11 @@ impl NebulaWorkspace {
                 .text_color(fg)
                 .when(selected, |item| item.bg(selected_bg).border_color(selected_ring))
                 .hover(|item| item.bg(hover))
+                .when(!is_dir && crate::platform::file_preview::supports(&preview_path), |item| {
+                    item.tooltip(move |_, cx| {
+                        cx.new(|cx| crate::gpui_shell::file_preview::FilePreview::new(preview_path.clone(), cx)).into()
+                    })
+                })
                 .child(
                     div()
                         .w(px(12.0))
@@ -198,6 +204,7 @@ impl NebulaWorkspace {
                         .text_sm()
                         .overflow_hidden()
                         .whitespace_nowrap()
+                        .when(row.ignored, |label| label.italic())
                         .child(row.name),
                 )
                 .when_some(path_hint.filter(|hint| !hint.is_empty()), |item, hint| {
@@ -256,6 +263,10 @@ impl NebulaWorkspace {
                     // WSL 行拖的是**来宾**路径：宿主那份拼写只是展开用的键，
                     // 在来宾的 shell 里不存在。
                     let drag = crate::gpui_shell::file_drop::FileTreeDrag {
+                        local_path: drag_guest_path.as_ref()
+                            .zip(self.side_panel.file_wsl_root())
+                            .map(|(guest, root)| crate::shell_detect::wsl_unc_path(&root.distro, guest))
+                            .unwrap_or_else(|| drag_path.clone()),
                         path_text: drag_guest_path
                             .clone()
                             .unwrap_or_else(|| drag_path.display().to_string()),
@@ -436,18 +447,10 @@ impl NebulaWorkspace {
             .flex_shrink_0()
             .p_2()
             .gap_2()
-            // 抽屉圆角只给左侧两角（用户 08-26 裁定「最右侧去掉圆角，左侧保留」）：
-            // 右缘贴住窗口边框，倒角只会在那里啃出两个壳色缺口；左缘隔着终端卡的
-            // 8px 卡缝、下缘隔着槽位的 8px，圆角落在壳色上才有浮板感。左侧也不画
-            // 发丝线——有卡缝就不需要线分界，只留一条线反而像把面板压在终端上。
+            // Flat presets share the tab sidebar surface; the workspace paints the seam.
             .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
             .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
-            .bg(theme.popover)
-            // 抽屉在窗口右侧；右键菜单常翻到左缘。Tailwind `shadow_lg`
-            //（10px 下偏移 + 15px 模糊，再加一层）会垫在菜单周围，比 Tab
-            // 右键的 `popover_shadow` 厚一截。抽屉本身也是 popover 面，跟
-            // 菜单用同一套紧凑投影。
-            .shadow(gpui_component::popover_shadow(theme.is_dark()))
+            .bg(theme.sidebar)
             .occlude()
             .child(view_switch)
             .child(
@@ -688,7 +691,9 @@ impl NebulaWorkspace {
             .as_ref()
             .and_then(|_| self.side_panel.file_wsl_root().map(|root| root.distro.clone()));
         let workspace = cx.entity().downgrade();
-        let menu = PopupMenu::build(window, cx, move |menu, window, _cx| {
+        let ignored = self.side_panel.file_rows().iter().any(|row| row.path == path && row.ignored);
+        let language = crate::gpui_shell::config::ui_language(cx);
+        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
             file_tree_popup_menu(
                 menu.external_link_icon(false),
                 workspace,
@@ -696,7 +701,8 @@ impl NebulaWorkspace {
                 guest_path,
                 wsl_distro,
                 is_dir,
-                window,
+                ignored,
+                language,
             )
         });
         menu.focus_handle(cx).focus(window, cx);
@@ -817,29 +823,48 @@ impl NebulaWorkspace {
             })
         });
     }
-    /// 把一条路径写进仓库根的 `.gitignore`。
-    ///
-    /// 不弹确认框：这是追加一行、随时能删掉的动作，代价远低于多一次点击的
-    /// 摩擦。但**必须回报写了什么**——忽略规则的语义（锚定到根、目录带尾斜杠、
-    /// 元字符转义过）和用户点的那个文件名并不一字不差，看不到写进去的那一行
-    /// 就没法判断范围对不对。
-    fn ignore_file_tree_path(&mut self, path: PathBuf, is_dir: bool, cx: &mut Context<Self>) {
-        use crate::display::side_panel::IgnoreOutcome;
-
-        match crate::display::side_panel::append_to_gitignore(&path, is_dir) {
-            Ok(IgnoreOutcome::Added { entry, .. }) => {
-                self.side_panel.set_notice(format!("已写入 .gitignore：{entry}"));
-                // 忽略状态由 `git check-ignore` 现算，所以重跑一次快照这一行
-                // 就会转成灰色——用户能立刻看到规则生效了。
-                self.side_panel.request_refresh();
-                self.sync_side_panel_to_active(false, cx);
-            },
-            Ok(IgnoreOutcome::AlreadyPresent { entry }) => {
-                self.side_panel.set_notice(format!(".gitignore 已有这条规则：{entry}"));
-            },
-            Err(error) => self.side_panel.set_notice(error),
-        }
-        cx.notify();
+    fn ignore_file_tree_path(
+        &mut self,
+        path: PathBuf,
+        is_dir: bool,
+        ignored: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let task = cx.background_executor().spawn(async move {
+            if ignored {
+                crate::display::side_panel::remove_from_gitignore(&path, is_dir)
+            } else {
+                crate::display::side_panel::append_to_gitignore(&path, is_dir)
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                use crate::display::side_panel::IgnoreOutcome;
+                use crate::i18n::Message;
+                let language = crate::gpui_shell::config::ui_language(cx);
+                let notice = match result {
+                    Ok(IgnoreOutcome::Added { entry, .. }) => {
+                        language.format(Message::FilesIgnoreAdded, &[("entry", &entry)])
+                    },
+                    Ok(IgnoreOutcome::Removed { entry, .. }) => {
+                        language.format(Message::FilesIgnoreRemoved, &[("entry", &entry)])
+                    },
+                    Ok(IgnoreOutcome::AlreadyPresent { entry }) => {
+                        language.format(Message::FilesIgnorePresent, &[("entry", &entry)])
+                    },
+                    Ok(IgnoreOutcome::AlreadyVisible { entry }) => {
+                        language.format(Message::FilesIgnoreVisible, &[("entry", &entry)])
+                    },
+                    Err(error) => language.format(Message::FilesIgnoreFailed, &[("error", &error)]),
+                };
+                this.side_panel.set_notice(notice);
+                this.side_panel.request_refresh();
+                this.sync_side_panel_to_active(false, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -850,7 +875,8 @@ fn file_tree_popup_menu(
     guest_path: Option<String>,
     wsl_distro: Option<String>,
     is_dir: bool,
-    _window: &mut Window,
+    ignored: bool,
+    language: crate::i18n::UiLanguage,
 ) -> PopupMenu {
     if let Some(guest_path) = guest_path {
         let copy_guest = guest_path.clone();
@@ -930,13 +956,20 @@ fn file_tree_popup_menu(
     let ignore_item = crate::display::side_panel::git_repository_root(&path).map(|_| {
         let ignore = workspace.clone();
         let ignore_path = path.clone();
-        PopupMenuItem::new("加入 .gitignore").icon(IconName::EyeOff).on_click(move |_, _, cx| {
-            if let Some(workspace) = ignore.upgrade() {
-                workspace.update(cx, |this, cx| {
-                    this.ignore_file_tree_path(ignore_path.clone(), is_dir, cx);
-                });
-            }
-        })
+        let label = language.text(if ignored {
+            crate::i18n::Message::FilesIgnoreRemove
+        } else {
+            crate::i18n::Message::FilesIgnoreAdd
+        });
+        PopupMenuItem::new(label)
+            .icon(if ignored { IconName::Eye } else { IconName::EyeOff })
+            .on_click(move |_, _, cx| {
+                if let Some(workspace) = ignore.upgrade() {
+                    workspace.update(cx, |this, cx| {
+                        this.ignore_file_tree_path(ignore_path.clone(), is_dir, ignored, cx);
+                    });
+                }
+            })
     });
     let delete = workspace;
     menu.item(first)

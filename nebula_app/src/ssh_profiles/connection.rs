@@ -186,4 +186,5 @@ fn normalized_destination(destination: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "connection/tests.rs"]
 mod tests;

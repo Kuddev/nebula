@@ -102,12 +102,92 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
 - **Revisit condition:** Remove compatibility readers only after support for old
   clients and persisted configurations is explicitly retired.
 
+## ADR-0004 - Molecular diagrams and file hover previews
+
+- **Status:** Requested in the current working session, 2026-09-08; implementation
+  and validation in progress, pending normal review.
+- **Context:** Markdown and AI CLI output need the same SMILES interpretation.
+  File tree previews must not decode large images or PDFs during row rendering.
+- **Decision:** Keep SMILES parsing and SVG depiction in one presentation-independent
+  application module, using exact `chematic-smiles` / `chematic-depict` 1.0.9 pins
+  (MIT OR Apache-2.0). Use the existing GPUI SVG image pipeline. Disable the
+  depiction crate's optional PNG/PDF backends; they add unrelated renderers.
+  Bound input, molecule size and cache capacity, perform layout in background work,
+  and preserve source text on invalid or unsupported input. UI adapters own their
+  pending work; discarded views cannot receive stale results.
+- **Preview boundary:** Native Windows PDF first-page rendering lives under
+  `platform`, through Windows.Data.Pdf using the already-resolved `windows` 0.61.3
+  family. Image decoding and thumbnail caching share a bounded application adapter.
+  Cache identity includes path, modification time and length; no preview changes
+  the user's file or creates a persistent format.
+- **Alternatives:** Handwritten SMILES geometry would duplicate specialized ring
+  and stereochemistry rules. A Python/Node subprocess or a web service would add
+  deployment or availability requirements. A whole PDF viewer is outside hover
+  preview responsibility.
+- **Validation:** Regression fixtures cover common rings, branches, charges and
+  invalid SMILES; unsupported stereo notation preserves source because the pinned
+  depiction backend does not project atom parity / alkene direction. Preview checks
+  cover dimension bounds, cache invalidation and
+  real first-page rendering. Real product compilation and UI inspection are
+  reported separately from these behavior tests.
+- **Revisit condition:** Remove or replace an adapter when upstream support covers
+  the same behavior, or measured parsing/rendering cost exceeds the bounded use.
+
+## ADR-0005 — Remote file workflows and persistent host organization
+
+- **Status:** Implemented in the working tree on 2026-09-08 for the maintainer's
+  requested workflows. Native compilation and focused regression checks passed;
+  full GPUI/Explorer/server acceptance and normal maintainer review remain separate.
+- **Context:** Upload drops only target the currently visible directory; Windows
+  has no outbound remote-file drag. Remote files cannot enter the editable document
+  lifecycle. The saved-host MRU also serves as the long-term host list.
+- **Decision:** Keep transfer policy and I/O in the existing SSH/SFTP capability.
+  A gesture captures the source and destination identities; asynchronous directory
+  checks and native dialogs cannot retarget it when the focused pane changes.
+  Windows outbound drag uses a scoped native OLE adapter and virtual file streams;
+  its worker owns the drag, materialization, cancellation and temporary resources.
+  The GPUI thread never waits for file contents. Reuse the already pinned Windows
+  bindings rather than adding another native framework or changing the GPUI fork.
+  The worker associates its input queue with the captured source window thread
+  for the native gesture, then detaches it. File descriptors are prepared lazily,
+  and initialization rechecks the physical button state before entering OLE.
+  The direct `windows-core` 0.61.2 edge is required by the official COM implement
+  macro and shares the version already resolved by `windows` 0.61.3.
+- **Documents:** Share text decoding, BOM/newline handling and conditional-save
+  semantics between local and remote documents. The editor owns a fixed document
+  source, dirty buffer and in-flight revision. SFTP reads and writes run on the
+  existing network runtime, use bounded text snapshots and preserve drafts on
+  failure. Source conflicts and unsupported replacement semantics remain visible.
+- **Hosts:** Existing profiles remain the authority for explicitly managed hosts;
+  recent connections remain bounded separately. Optional organization metadata is
+  backward compatible, excludes credentials, and survives profile edits/renames.
+  UI search and grouping consume cached profile data, indexing profiles once per
+  filter pass instead of scanning every profile for every candidate. Import/export must validate
+  before changing persisted state and must never serialize private credentials.
+  Profile saves reuse the existing OS-handle lock and atomic state writer, and
+  reject a snapshot that differs from the file last loaded by that writer.
+- **Alternatives:** A second SSH transport, renderer-specific persistence engine,
+  synchronous download in a drag callback, or enlarged MRU alone would preserve
+  the workflow gaps or duplicate existing contracts.
+- **Validation:** Windows GPUI product compilation, architecture, i18n, settings
+  and line-budget checks passed. Production-source regressions cover destination
+  identity, cancellation, names, encoding, host retention and import. Eight remote
+  save cases use the real SFTP codec over an injected peer, including permission
+  failure, publication rollback and competing writes. A separately invoked desktop
+  OLE test copies a Unicode filename and its contents between owned test windows.
+  These tests do not exercise real Explorer, GPUI gestures or SSH authentication.
+  Full-workspace formatting still reports differences in other working-tree
+  changes; the files modified for these workflows have no remaining format findings.
+- **Revisit condition:** Replace the OLE adapter when the pinned GPUI exposes an
+  equivalent Windows virtual-file drag with the same ownership contract. Revisit
+  persistent host identity before adding shared/cloud mutation or credential export.
+
 ## 中文说明
 
 记录重大取舍而非每次小修复；事实与测试能推翻旧决定。规范误伤、安全修复与旧预算冲突时，
 先记录问题和最小修订，维护者审查后更新合同；不能将“只减不增”变成拒绝纠正规范的理由。
 
-## ADR-0005 — Editable documents, reusable layouts and pane drop targets
+## ADR-0006 — Editable documents, reusable layouts and pane drop targets
 
 - **Status:** Implemented in the working tree, 2026-09-08, for the requested editor,
   recipe and quick-terminal workflows; pending normal maintainer review.
@@ -146,3 +226,50 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
 - **Revisit condition:** Add command replay or externally imported recipes only
   with a deliberate replay contract. Replace the preview block adapter when the
   pinned TextView exposes an equivalent public heading/navigation API.
+
+## ADR-0007 — Formula bitmap admission and preview view lifetime
+
+- **Status:** Implemented for the maintainer's memory reduction request,
+  2026-09-09; validation and normal review tracked separately.
+- **Context:** The shared 48 MiB scientific cache bounded completed resources,
+  but two workers could allocate formula bitmaps before cache eviction. Reading
+  created lazy preview views that remained retained after switching to source.
+- **Decision:** Reuse bitmap geometry preflight for both worker admission and
+  allocation. Reserve formula output bytes against the existing cache allowance
+  before starting a worker; shrink the LRU allowance while reservations live and
+  release reservations on success/failure. Compose alpha directly in the final
+  BGRA allocation. Source mode releases parsed preview views while preserving
+  the outline, source, scroll position and editor undo state.
+- **Boundaries:** This does not change worker count, persistence, terminal
+  identity or dependencies. It does not cap the entire process: compiler/glyph
+  scratch, GPU copies, queued inputs, other images and references outside the
+  cache remain separate costs. Molecular rendering is currently disabled.
+- **Alternatives:** Evicting only after allocation retains the peak; shrinking
+  the cache constant alone does not reserve in-flight output. Evicting arbitrary
+  actively selected Markdown blocks would lose selection state.
+- **Validation:** Regression tests cover fractional-DPI preflight/allocation,
+  alpha overlap, reservations exceeding available bytes, failure release,
+  cold-entry eviction and source/preview transitions. Native product checks and
+  any measured memory reduction are reported separately.
+- **Revisit condition:** Extend reservations to other resource types when they
+  are enabled/profiled; add viewport eviction only with preserved selection and
+  measured parsed-view accounting. No 50 MB process-wide guarantee is implied.
+
+## ADR-0008 — Optional in-app AI message toasts
+
+- **Status:** Requested by the maintainer, 2026-09-11; implemented in the working
+  tree, with native validation pending.
+- **Decision:** Add the default-on `ai_toasts` preference to `nebula_settings` and
+  its existing persistence/reset contracts. The GPUI adapter caches it with other
+  runtime settings. Disabling it hides only in-app AI completion/confirmation
+  cards; native system notifications, tab indicators and terminal state retain
+  their existing behavior. Source identity reuses the shared agent registry.
+- **Lifetime:** Existing cards use the component notification identity and
+  dismissal lifecycle. A settings observer dismisses only AI cards across open
+  windows; deferred startup delivery rechecks the preference. No second queue,
+  background service, dependency or per-event settings-file read is introduced.
+- **Validation:** Regression coverage includes defaults, parsing, round trips,
+  reset, independent delivery channels, search, and component-card dismissal.
+  Native compilation and UI results must be reported separately.
+- **Revisit condition:** Add separate system-notification or per-agent controls
+  only when requested, rather than expanding the meaning of this persisted key.

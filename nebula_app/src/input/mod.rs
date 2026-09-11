@@ -106,7 +106,7 @@ pub trait ActionContext<T: EventListener> {
     /// 弹窗补齐：高亮行上下移动（循环）。
     fn nebula_completion_popup_move(&mut self, _delta: isize) {}
     /// 弹窗补齐：取走选中候选要输入的余量并关闭列表。
-    fn nebula_completion_popup_take(&mut self) -> Option<String> {
+    fn nebula_completion_popup_take(&mut self) -> Option<crate::display::NebulaCompletionItem> {
         None
     }
     /// 弹窗补齐：Esc 关闭列表；返回是否真的关闭了（决定按键是否吞掉）。

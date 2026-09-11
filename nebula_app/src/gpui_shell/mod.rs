@@ -25,13 +25,17 @@ macro_rules! eprintln {
 mod assets;
 pub mod code_tab;
 pub mod config;
+pub(crate) mod copy_feedback;
 pub mod doc_tabs;
 pub mod file_drop;
 mod file_editor;
+mod file_preview;
 pub mod http;
 pub mod math_view;
+mod molecule_view;
 pub mod network_settings;
 pub mod prelude;
+mod scientific_render;
 pub mod session_restore;
 pub mod settings_pane;
 pub mod ssh_hosts;
@@ -172,6 +176,7 @@ fn init(cx: &mut App) {
     let settings = config::Settings::load(theme::effective_theme_name(cx));
     gpui_component::set_locale(settings.ui_language.gpui_component_locale());
     cx.set_global(settings);
+    toast::init(cx);
 }
 
 fn register_bundled_fonts(cx: &App) {

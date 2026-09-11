@@ -1,5 +1,45 @@
 use super::*;
 
+#[cfg(feature = "gpui-test-support")]
+#[gpui::test]
+fn ai_toast_setting_is_searchable_and_has_a_visible_switch(cx: &mut gpui::TestAppContext) {
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        let mut settings = crate::gpui_shell::config::Settings::load(ThemeName::Nord);
+        settings.ai_toasts = true;
+        cx.set_global(settings);
+    });
+    let mut pane = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| SettingsPane::new(window, cx));
+        view.update(cx, |pane, _| {
+            pane.runtime = RuntimeSettings::from_raw(&nebula_settings::RawSettings::default());
+        });
+        pane = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let pane = pane.unwrap();
+    cx.simulate_resize(gpui::size(px(1280.0), px(1600.0)));
+    cx.update(|window, cx| {
+        pane.update(cx, |pane, cx| {
+            pane.settings_search_input
+                .update(cx, |input, cx| input.replace_all("AI 消息弹窗", window, cx));
+        });
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(pane.read_with(cx, |pane, _| pane.active_section), 2);
+    let bounds = cx.debug_bounds("nebula-switch-ai_toasts").expect("AI toast switch is rendered");
+    assert!(bounds.size.width > px(0.0) && bounds.size.height > px(0.0));
+    assert!(bounds.origin.y >= px(0.0) && bounds.bottom() <= px(1600.0));
+    assert_eq!(
+        pane.read_with(cx, |pane, _| pane.setting_override("ai_toasts")),
+        Some((false, "1".to_owned()))
+    );
+}
+
 #[test]
 fn settings_nav_visibility_keeps_stable_routes_but_hides_two_entries() {
     let visibility: Vec<_> = (0..SECTION_IDS.len()).map(is_nav_section_visible).collect();

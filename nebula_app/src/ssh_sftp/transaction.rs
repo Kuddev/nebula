@@ -15,7 +15,58 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::transfer::TransferObserver as _;
 use super::{SftpError, SftpResult, TRANSFER_NONCE, TaskContext, normalize_remote_path, transfer};
+use crate::text_document::SaveError;
 use std::sync::atomic::Ordering;
+
+pub(super) struct RemotePrecondition {
+    pub requested: String,
+    pub canonical: String,
+    pub bytes: std::sync::Arc<[u8]>,
+    pub metadata: FileAttributes,
+}
+
+fn metadata_matches(expected: &FileAttributes, current: &FileAttributes) -> bool {
+    current.is_regular()
+        && expected.size == current.size
+        && (expected.mtime.is_none() || expected.mtime == current.mtime)
+        && expected.permissions == current.permissions
+        && expected.uid == current.uid
+        && expected.gid == current.gid
+}
+
+pub(super) async fn verify_remote_precondition(
+    sftp: &SftpSession,
+    expected: &RemotePrecondition,
+    context: &TaskContext,
+) -> SftpResult<()> {
+    let metadata = remote_metadata_optional(sftp, &expected.canonical).await?;
+    if metadata.as_ref().is_none_or(|current| !metadata_matches(&expected.metadata, current)) {
+        return Err(SaveError::Changed.into());
+    }
+    if sftp.canonicalize(expected.requested.clone()).await? != expected.canonical {
+        return Err(SaveError::Changed.into());
+    }
+    let current = super::document::read_bounded(sftp, &expected.canonical, Some(context)).await?;
+    if current != expected.bytes.as_ref() {
+        return Err(SaveError::Changed.into());
+    }
+    Ok(())
+}
+
+async fn restore_remote_backup(
+    sftp: &SftpSession,
+    backup: &str,
+    destination: &str,
+) -> SftpResult<()> {
+    if remote_metadata_optional(sftp, destination).await?.is_some() {
+        return Err(io::Error::other(format!(
+            "A new file exists at {destination}; the previous file remains at {backup}"
+        ))
+        .into());
+    }
+    sftp.rename(backup.to_owned(), destination.to_owned()).await?;
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct FileStamp {
@@ -142,12 +193,17 @@ async fn set_remote_staging_metadata(
     staging: &str,
     source: FileStamp,
     existing: Option<&FileAttributes>,
+    preserve_owner: bool,
 ) -> SftpResult<()> {
     if let Some(permissions) =
         existing.and_then(|metadata| metadata.permissions).or(source.permissions)
     {
         let mut attributes = FileAttributes::empty();
         attributes.permissions = Some(permissions);
+        if preserve_owner {
+            attributes.uid = existing.and_then(|metadata| metadata.uid);
+            attributes.gid = existing.and_then(|metadata| metadata.gid);
+        }
         sftp.set_metadata(staging.to_owned(), attributes).await?;
     }
     if let Some(modified) = source.modified {
@@ -171,6 +227,24 @@ pub(super) async fn upload_file(
     skip_unchanged: bool,
     context: &TaskContext,
 ) -> SftpResult<()> {
+    upload_file_checked(sftp, local, destination, source, skip_unchanged, context, None).await
+}
+
+pub(super) async fn upload_file_checked(
+    sftp: &SftpSession,
+    local: &Path,
+    destination: &str,
+    source: FileStamp,
+    skip_unchanged: bool,
+    context: &TaskContext,
+    expected: Option<&RemotePrecondition>,
+) -> SftpResult<()> {
+    if let Some(expected) = expected {
+        if expected.canonical != destination {
+            return Err(SaveError::Changed.into());
+        }
+        verify_remote_precondition(sftp, expected, context).await?;
+    }
     let existing = remote_metadata_optional(sftp, destination).await?;
     if skip_unchanged {
         let comparable = match existing.as_ref() {
@@ -192,6 +266,9 @@ pub(super) async fn upload_file(
         );
     }
     if existing.as_ref().is_some_and(FileAttributes::is_symlink) {
+        if expected.is_some() {
+            return Err(SaveError::Changed.into());
+        }
         // rename 会替换链接节点本身。原地写让服务器沿链接打开真实目标，保留
         // 链接身份；代价是这条路径无法提供 rename 级原子性。
         transfer::upload_stream(sftp, local, destination, context).await?;
@@ -204,7 +281,8 @@ pub(super) async fn upload_file(
     let mut preserve_staging = false;
     let result = async {
         transfer::upload_stream(sftp, local, &staging, context).await?;
-        set_remote_staging_metadata(sftp, &staging, source, existing.as_ref()).await?;
+        set_remote_staging_metadata(sftp, &staging, source, existing.as_ref(), expected.is_some()).await?;
+        if let Some(expected) = expected { verify_remote_precondition(sftp, expected, context).await?; }
         let _publish = context.begin_publish()?;
 
         if existing.is_none() {
@@ -213,8 +291,27 @@ pub(super) async fn upload_file(
         }
 
         sftp.rename(destination.to_owned(), backup.clone()).await?;
+        if let Some(expected) = expected {
+            // Once publication begins, cancellation waits for this bounded
+            // verification and the publish/rollback decision to finish.
+            let verify_backup = async {
+                let metadata = sftp.symlink_metadata(backup.clone()).await?;
+                let bytes = super::document::read_bounded(sftp, &backup, None).await?;
+                if !metadata_matches(&expected.metadata, &metadata) || bytes != expected.bytes.as_ref() {
+                    return Err(SftpError::from(SaveError::Changed));
+                }
+                Ok(())
+            }.await;
+            if let Err(error) = verify_backup {
+                if let Err(restore_error) = restore_remote_backup(sftp, &backup, destination).await {
+                    preserve_staging = true;
+                    return Err(io::Error::other(format!("{error}; {restore_error}; draft data remains at {staging}")).into());
+                }
+                return Err(error);
+            }
+        }
         if let Err(publish_error) = sftp.rename(staging.clone(), destination.to_owned()).await {
-            if let Err(restore_error) = sftp.rename(backup.clone(), destination.to_owned()).await {
+            if let Err(restore_error) = restore_remote_backup(sftp, &backup, destination).await {
                 preserve_staging = true;
                 return Err(io::Error::other(format!(
                     "替换远端文件失败，且旧文件自动恢复失败；旧文件位于 {backup}，新文件位于 {staging}。发布错误: {publish_error}；恢复错误: {restore_error}"

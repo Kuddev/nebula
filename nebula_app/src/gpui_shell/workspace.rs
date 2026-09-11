@@ -47,6 +47,8 @@ use nebula_split::{DIVIDER_GAP, HIT_SLOP, RemoveOutcome, SplitDirection, SplitNa
 
 mod agents;
 mod command_manager;
+mod keyboard_bindings;
+use keyboard_bindings::custom_workspace_binding;
 mod documents;
 mod file_tree;
 mod key_actions;
@@ -197,48 +199,6 @@ const STATIC_DEFAULT_COMBOS: &[&str] = &[
 /// 存储格式 combo（`ctrl+shift+t`）→ gpui 绑定串（`ctrl-shift-t`）。键名
 /// 两套体系同构（小写命名键 + 单字符）；digitN 折回数字，plus/minus 折回
 /// `+`/`-`（`+` 是存储分隔符，必须先占位再替换）。
-fn custom_workspace_binding(combo: &str, action: &crate::config::Action) -> Option<KeyBinding> {
-    use crate::config::Action;
-    let combo = gpui_binding_combo(combo);
-    match action {
-        Action::ToggleCommandPalette => Some(KeyBinding::new(&combo, ToggleCommandPalette, None)),
-        Action::ToggleShellPicker => Some(KeyBinding::new(&combo, ToggleShellPicker, None)),
-        Action::CreateNewTab => Some(KeyBinding::new(&combo, NewTerminal, None)),
-        Action::CreateNewWindow => Some(KeyBinding::new(&combo, NewWindow, None)),
-        Action::CloseTab => Some(KeyBinding::new(&combo, CloseActiveTerminal, None)),
-        Action::ToggleFilesPanel => Some(KeyBinding::new(&combo, ToggleFileTree, None)),
-        Action::ToggleGitPanel => Some(KeyBinding::new(&combo, ToggleGitPanel, None)),
-        Action::SplitRight => Some(KeyBinding::new(&combo, SplitRight, None)),
-        Action::SplitDown => Some(KeyBinding::new(&combo, SplitDown, None)),
-        Action::ToggleZoom => Some(KeyBinding::new(&combo, ToggleZoom, None)),
-        Action::FocusPaneLeft => Some(KeyBinding::new(&combo, FocusPaneLeft, None)),
-        Action::FocusPaneRight => Some(KeyBinding::new(&combo, FocusPaneRight, None)),
-        Action::FocusPaneUp => Some(KeyBinding::new(&combo, FocusPaneUp, None)),
-        Action::FocusPaneDown => Some(KeyBinding::new(&combo, FocusPaneDown, None)),
-        Action::SelectNextTab => Some(KeyBinding::new(&combo, SelectNextTab, None)),
-        Action::SelectPreviousTab => Some(KeyBinding::new(&combo, SelectPreviousTab, None)),
-        Action::IncreaseFontSize => Some(KeyBinding::new(&combo, IncreaseFontSize, None)),
-        Action::DecreaseFontSize => Some(KeyBinding::new(&combo, DecreaseFontSize, None)),
-        Action::ResetFontSize => Some(KeyBinding::new(&combo, ResetFontSize, None)),
-        Action::Copy => Some(KeyBinding::new(
-            &combo,
-            CopySelection,
-            Some(crate::gpui_shell::terminal::KEY_CONTEXT),
-        )),
-        Action::Paste => Some(KeyBinding::new(
-            &combo,
-            PasteClipboard,
-            Some(crate::gpui_shell::terminal::KEY_CONTEXT),
-        )),
-        Action::ToggleFullscreen => Some(KeyBinding::new(&combo, ToggleFullscreen, None)),
-        Action::OpenQuickJump => Some(KeyBinding::new(&combo, OpenQuickJump, None)),
-        // `none` 禁用键：gpui 的 NoAction 绑定在最高优先级命中时吞掉按键，
-        // 与旧壳 keybind=combo:none 的语义一致。
-        Action::None => Some(KeyBinding::new(&combo, gpui::NoAction, None)),
-        _ => None,
-    }
-}
-
 fn gpui_binding_combo(combo: &str) -> String {
     combo
         .replace("plus", "\u{1}")
@@ -394,6 +354,13 @@ enum WorkspaceTab {
         view: Entity<crate::gpui_shell::code_tab::CodeTabView>,
         _subscription: Subscription,
     },
+}
+
+/// Temporary reader focus state. It belongs to the active document session,
+/// not to runtime settings: entering focus hides surrounding chrome and exit
+/// restores exactly what was visible before the document took focus.
+struct ReaderFocusState {
+    file: Entity<crate::gpui_shell::doc_tabs::DocTabView>,
 }
 
 impl WorkspaceTab {
@@ -1008,6 +975,9 @@ pub struct NebulaWorkspace {
     /// 进行中的侧栏拖宽（设置「面板拖拽调节」开启时才有入口）；宽度实时
     /// 生效，松手写盘 `sidebar_w`（旧壳同合同）。
     sidebar_resizing: bool,
+    /// Markdown reader focus is a temporary presentation mode. The entity key
+    /// makes it safe across tab reordering and prevents a stale global bool.
+    reader_focus: Option<ReaderFocusState>,
     /// Split 节点视口的帧记录（拖拽换算与提交吸附用）。
     split_bounds: SplitBoundsStore,
     /// pane 矩形的帧记录（ctrl+alt+方向 的最近邻导航用）。
@@ -1286,6 +1256,7 @@ impl NebulaWorkspace {
             cross_window_dock: None,
             split_drag: None,
             sidebar_resizing: false,
+            reader_focus: None,
             split_bounds: Rc::new(RefCell::new(HashMap::new())),
             pane_bounds: Rc::new(RefCell::new(HashMap::new())),
             command_palette_open: false,
@@ -1530,44 +1501,6 @@ impl NebulaWorkspace {
             crate::session::LaunchSession::Profile { name, shell_id, .. } => Some(
                 crate::shell_detect::shell_short_tag(shell_id.as_deref().unwrap_or(name)).into(),
             ),
-        }
-    }
-
-    /// 把 `keybind=` 自定义表注入 gpui 键位表（两壳共读同一份文件）。gpui
-    /// 绑定按注册逆序匹配，后注即覆盖：自定义同 combo 压过静态默认、`none`
-    /// 行用 NoAction 吞键——与旧壳「后写行先匹配」的语义对齐。
-    ///
-    /// 键位表没有删除 API：撤销旧注入靠对失效 combo 后注 NoAction。排除
-    /// 两类——仍在生效集里的（后注 NoAction 会盖掉刚注入的新绑定）与静态
-    /// 默认键（误杀基础功能）。启动时与设置页每次 `Changed` 后各跑一次。
-    fn apply_custom_keybinds(&mut self, cx: &mut Context<Self>) {
-        let mut to_bind: Vec<KeyBinding> = Vec::new();
-        let mut applied: Vec<String> = Vec::new();
-        for (combo, action) in nebula_settings::keybind_pairs() {
-            // 解析失败的行（手编文件里残留）跳过：旧壳读表同样静默容错。
-            let Some(action) = crate::display::keymap::parse_action(&action) else { continue };
-            if crate::display::keymap::parse_combo(&combo).is_none() {
-                continue;
-            }
-            let Some(binding) = custom_workspace_binding(&combo, &action) else { continue };
-            let gpui_combo = gpui_binding_combo(&combo);
-            applied.push(gpui_combo.clone());
-            to_bind.push(binding);
-        }
-        let stale = self
-            .custom_keybinds_applied
-            .iter()
-            .filter(|combo| {
-                !applied.contains(combo) && !STATIC_DEFAULT_COMBOS.contains(&combo.as_str())
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        for combo in stale {
-            to_bind.push(KeyBinding::new(&combo, gpui::NoAction, None));
-        }
-        self.custom_keybinds_applied = applied;
-        if !to_bind.is_empty() {
-            cx.bind_keys(to_bind);
         }
     }
 
@@ -2582,6 +2515,10 @@ impl NebulaWorkspace {
     }
 
     fn finish_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Focus mode is scoped to the current document view. Closing any tab
+        // must first restore workspace chrome so an old entity cannot leave the
+        // next active tab in an immersive layout.
+        self.clear_reader_focus(cx);
         let Some((tab, _meta)) = self.remove_tab_at(ix) else { return };
         if let WorkspaceTab::Terminal { panes, .. } = &tab {
             let mut bounds = self.pane_bounds.borrow_mut();
@@ -2618,6 +2555,7 @@ impl NebulaWorkspace {
             self.close_settings(window, cx);
         }
         if ix < self.tabs.len() && ix != self.active {
+            self.clear_reader_focus(cx);
             self.active = ix;
             if let Some(meta) = self.tab_meta.get_mut(ix) {
                 meta.has_bell = false;
@@ -3434,7 +3372,7 @@ impl NebulaWorkspace {
                     .relative()
                     .h_full()
                     .flex_shrink_0()
-                    .pb_2()
+                    .pb(px(crate::gpui_shell::theme::PaneCardStyle::current(cx).margin.bottom))
                     .child(panel)
                     .with_animation(
                         ("side-panel-push", open as usize),
@@ -4061,6 +3999,7 @@ impl Render for NebulaWorkspace {
         // 终端卡几何取一次，布局与壳色带共用同一个实例——两处各取一次也算
         // 「各写一份」，主题在这一帧中途换掉就会出现半旧半新的卡缝。
         let card_style = crate::gpui_shell::theme::PaneCardStyle::current(cx);
+        let draw_file_divider = self.side_panel.open;
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
         if sidebar_logo_target_px != self.sidebar_logo_target_px {
@@ -4069,6 +4008,9 @@ impl Render for NebulaWorkspace {
             self.sidebar_logo_images = sidebar_logo_images(sidebar_logo_target_px);
             self.sidebar_logo_target_px = sidebar_logo_target_px;
         }
+        // Some tab-open/restore paths assign `active` directly. Clear a focus
+        // record tied to a different entity before deriving layout booleans.
+        self.clear_stale_reader_focus(cx);
         let content: Option<gpui::AnyElement> = if self.settings_open {
             self.settings_surface
                 .as_ref()
@@ -4099,6 +4041,7 @@ impl Render for NebulaWorkspace {
             && self.side_panel.view == crate::display::side_panel::PanelView::Git;
         let settings_active = self.settings_open;
         let top_tabs = self.tabs_position == nebula_settings::TabsPositionName::Top;
+        let reader_focus = self.reader_focus_active(cx);
         // dock 预览：被拖 tab 悬于终端区时高亮目标半区（松手即挂到那侧）。
         let dock_preview = self
             .tab_drag
@@ -4330,7 +4273,7 @@ impl Render for NebulaWorkspace {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .when(!top_tabs && !settings_active, |row| {
+                    .when(!top_tabs && !settings_active && !reader_focus, |row| {
                         row.child(self.render_sidebar_slot(window, cx)).when(
                             // 侧栏拖宽热区（旧壳 `panel_resize` 设置门控）：贴在
                             // 侧栏右缘、零布局宽，不挤压终端卡。
@@ -4432,30 +4375,22 @@ impl Render for NebulaWorkspace {
                                 .children(content),
                         )
                             .child(
-                                // 竖线必须在卡内容之后覆盖绘制：内容底色带透明度，
-                                // 若只盖住正文段，会让同一条线在标题栏下沿变色。
+                                // Both sidebar boundaries share the same snapped line and color.
                                 gpui::canvas(
                                     |_, _, _| (),
-                                    |bounds, _, window, cx| {
-                                        let card =
-                                            crate::gpui_shell::theme::PaneCardStyle::current(cx);
-                                        if let Some(divider_bounds) = pane_card_divider_bounds(
-                                            bounds,
-                                            card.divider,
-                                            window.scale_factor(),
-                                        ) {
-                                            window.paint_quad(fill(
-                                                divider_bounds,
-                                                crate::gpui_shell::theme::card_divider_color(cx),
-                                            ));
-                                        }
+                                    move |bounds, _, window, cx| {
+                                        window_titlebar::paint_pane_dividers(
+                                            bounds, draw_file_divider, window, cx,
+                                        );
                                     },
                                 )
                                 .absolute()
                                 .inset_0(),
                             ),
                     )
-                    .child(self.render_side_panel_slot(window, cx)),
+                    .when(!reader_focus, |row| {
+                        row.child(self.render_side_panel_slot(window, cx))
+                    }),
             )
             .when_some(dock_preview, |root, (x, y, w, h)| {
                 root.child(

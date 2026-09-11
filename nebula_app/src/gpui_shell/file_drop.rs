@@ -17,6 +17,8 @@ use crate::gpui_shell::prelude::*;
 /// 一次从文件树拖向终端的条目。
 #[derive(Clone, Debug)]
 pub struct FileTreeDrag {
+    /// Host filesystem identity for file transfers, distinct from shell spelling.
+    pub local_path: std::path::PathBuf,
     /// 落进 PTY 的路径**原文**。
     ///
     /// WSL 行带的是来宾路径（`/home/x`）而不是那个只用作展开键的 `PathBuf`：

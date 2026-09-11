@@ -5,7 +5,7 @@ use super::*;
 use crate::i18n::Message;
 
 impl WorkspaceTab {
-    fn file_editor(&self, cx: &App) -> Option<Entity<TextFileView>> {
+    pub(super) fn file_editor(&self, cx: &App) -> Option<Entity<TextFileView>> {
         match self {
             Self::Document { view, .. } => Some(view.clone()),
             Self::Code { view, .. } => view.read(cx).file_editor(),
@@ -76,7 +76,7 @@ impl NebulaWorkspace {
                     let prompt = window.prompt(
                         gpui::PromptLevel::Warning,
                         language.text(Message::EditorCloseTitle),
-                        Some(&file.read(cx).path.display().to_string()),
+                        Some(&file.read(cx).source_label()),
                         &[
                             language.text(Message::EditorSave),
                             language.text(Message::EditorDiscard),
@@ -208,6 +208,25 @@ impl NebulaWorkspace {
         cx.notify();
     }
 
+    pub(super) fn open_remote_document(
+        &mut self,
+        destination: String,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let location = crate::ssh_sftp::document::RemoteLocation { destination, path };
+        if let Some(index) = self.tabs.iter().position(|tab| matches!(tab, WorkspaceTab::Document { view, .. } if view.read(cx).is_remote_location(&location))) {
+            self.activate_tab(index, window, cx);
+            return;
+        }
+        let view = cx.new(|cx| TextFileView::new_remote(location, window, cx));
+        let subscription = cx.subscribe_in(&view, window, Self::on_document_event);
+        self.insert_new_tab(WorkspaceTab::Document { view, _subscription: subscription });
+        self.focus_active(window, cx);
+        cx.notify();
+    }
+
     fn open_doc_tab(
         &mut self,
         path: std::path::PathBuf,
@@ -215,7 +234,7 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         if let Some(ix) = self.tabs.iter().position(
-            |tab| matches!(tab, WorkspaceTab::Document { view, .. } if view.read(cx).path == path),
+            |tab| matches!(tab, WorkspaceTab::Document { view, .. } if view.read(cx).is_local_path(&path)),
         ) {
             if let Some(WorkspaceTab::Document { view, .. }) = self.tabs.get(ix) {
                 view.clone().update(cx, |view, cx| {
@@ -290,7 +309,7 @@ impl NebulaWorkspace {
 
     fn on_document_event(
         &mut self,
-        _: &Entity<crate::gpui_shell::doc_tabs::DocTabView>,
+        file: &Entity<crate::gpui_shell::doc_tabs::DocTabView>,
         event: &DocTabViewEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -300,7 +319,98 @@ impl NebulaWorkspace {
             DocTabViewEvent::SelectionContextMenuRequested { position, text } => {
                 self.open_document_selection_context_menu(*position, text.clone(), window, cx);
             },
+            DocTabViewEvent::ReaderFocusChanged { focused: true } => {
+                self.enter_reader_focus(file.clone(), cx);
+            },
+            DocTabViewEvent::ReaderFocusChanged { focused: false } => {
+                self.exit_reader_focus_for(file, cx);
+            },
         }
+    }
+
+    /// Whether the active tab is currently using the temporary reader focus
+    /// presentation. The entity check prevents a stale tab index from hiding
+    /// chrome after a reorder or close.
+    pub(super) fn reader_focus_active(&self, cx: &App) -> bool {
+        let Some(state) = self.reader_focus.as_ref() else { return false };
+        let entity_matches = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.file_editor(cx))
+            .is_some_and(|file| file == state.file);
+        Self::reader_focus_should_hide_chrome(entity_matches, state.file.read(cx).reader_focus())
+    }
+
+    /// Derived presentation contract: a focus record can hide chrome only if
+    /// it still belongs to the active entity and that entity remains focused.
+    /// This is deliberately independent of sidebar persistence state.
+    pub(super) fn reader_focus_should_hide_chrome(
+        active_entity_matches: bool,
+        document_focus: bool,
+    ) -> bool {
+        active_entity_matches && document_focus
+    }
+
+    fn enter_reader_focus(
+        &mut self,
+        file: Entity<crate::gpui_shell::doc_tabs::DocTabView>,
+        cx: &mut Context<Self>,
+    ) {
+        let is_active = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.file_editor(cx))
+            .is_some_and(|active| active == file);
+        if !is_active || self.reader_focus.is_some() {
+            return;
+        }
+        // Keep workspace state untouched. Render derives the immersive view
+        // from this Entity and temporarily omits surrounding chrome, so tab
+        // changes and command actions cannot strand a collapsed sidebar.
+        self.reader_focus = Some(super::ReaderFocusState { file });
+        cx.notify();
+    }
+
+    fn exit_reader_focus_for(
+        &mut self,
+        file: &Entity<crate::gpui_shell::doc_tabs::DocTabView>,
+        cx: &mut Context<Self>,
+    ) {
+        let matches = self.reader_focus.as_ref().is_some_and(|state| state.file == *file);
+        if matches {
+            self.restore_reader_focus(cx);
+        }
+    }
+
+    /// Leave focus before activating/closing/reordering another tab. The
+    /// document restores its own details panel; this restores workspace chrome.
+    pub(super) fn clear_reader_focus(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.reader_focus.is_none() {
+            return false;
+        }
+        self.restore_reader_focus(cx)
+    }
+
+    /// `insert_new_tab` and a few restore paths update `active` directly. Run
+    /// this before render-derived layout so an old focused document cannot
+    /// reappear in focus after opening a new tab and later returning to it.
+    pub(super) fn clear_stale_reader_focus(&mut self, cx: &mut Context<Self>) -> bool {
+        let stale = self.reader_focus.as_ref().is_some_and(|state| {
+            let active_matches = self
+                .tabs
+                .get(self.active)
+                .and_then(|tab| tab.file_editor(cx))
+                .is_some_and(|file| file == state.file);
+            !active_matches || !state.file.read(cx).reader_focus()
+        });
+        stale && self.restore_reader_focus(cx)
+    }
+
+    fn restore_reader_focus(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(state) = self.reader_focus.take() else { return false };
+        let _ = state.file.update(cx, |file, cx| file.clear_reader_focus(cx));
+        cx.notify();
+        true
     }
 
     fn on_code_tab_event(
@@ -316,5 +426,17 @@ impl NebulaWorkspace {
                 cx.notify();
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod reader_focus_contract_tests {
+    use super::NebulaWorkspace;
+
+    #[test]
+    fn stale_focus_record_cannot_hide_a_new_active_tab() {
+        assert!(!NebulaWorkspace::reader_focus_should_hide_chrome(false, true));
+        assert!(!NebulaWorkspace::reader_focus_should_hide_chrome(true, false));
+        assert!(NebulaWorkspace::reader_focus_should_hide_chrome(true, true));
     }
 }

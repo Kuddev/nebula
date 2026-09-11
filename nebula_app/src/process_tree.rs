@@ -90,6 +90,20 @@ pub fn display_name(exe: &str) -> String {
     name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name).to_owned()
 }
 
+/// Host descendants establish local liveness; a remote pane also has terminal
+/// lifecycle evidence, since its actual foreground process is on another OS.
+pub(crate) fn close_warning_process(
+    remote: bool,
+    foreground: Option<&str>,
+    child: Option<&str>,
+) -> Option<String> {
+    let foreground = foreground.filter(|program| !is_interactive_shell_command(program));
+    if remote && let Some(program) = foreground {
+        return Some(program.to_owned());
+    }
+    child.map(|child| foreground.map(str::to_owned).unwrap_or_else(|| display_name(child)))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEntry {
     pub pid: u32,
@@ -397,6 +411,23 @@ fn resolve_agent_ancestor(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_close_uses_foreground_lifecycle_without_a_host_child() {
+        for program in ["claude", "codex", "gemini", "cargo"] {
+            assert_eq!(
+                super::close_warning_process(true, Some(program), None).as_deref(),
+                Some(program)
+            );
+        }
+        assert_eq!(super::close_warning_process(true, None, None), None);
+        assert_eq!(super::close_warning_process(true, Some("bash"), None), None);
+        assert_eq!(super::close_warning_process(false, Some("claude"), None), None);
+        assert_eq!(
+            super::close_warning_process(false, Some("claude"), Some("node.exe")).as_deref(),
+            Some("claude")
+        );
+    }
+
     use std::collections::HashMap;
 
     use super::{

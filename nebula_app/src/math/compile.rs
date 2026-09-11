@@ -486,3 +486,18 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod text_newline_regression {
+    use super::*;
+    #[test]
+    fn tex_text_newlines_never_become_single_glyph_fallback_operations() {
+        let source = "\\text{第一行\n第二行}+x";
+        for compile in [compile_formula, compile_formula_source] {
+            let layout = compile(source, true, 18.0, 1.0, crate::math::DEFAULT_LIMITS).unwrap();
+            assert!(!layout.text.iter().any(|op| matches!(op.character, '\r' | '\n')));
+            assert!(layout.text.iter().any(|op| op.character == '第'));
+        }
+        assert!(source.contains('\n'));
+    }
+}

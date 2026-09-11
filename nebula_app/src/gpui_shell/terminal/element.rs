@@ -127,8 +127,8 @@ impl TerminalElement {
     /// 部同源。没有这一步，codex/cc 用 truecolor 写死的配色在切主题后原样留在屏
     /// 幕上——它们只在启动那一刻用 OSC 11 问过一次底色。
     ///
-    /// 主题自己的颜色（ANSI 0-15、powerline 16-23）不进这条路：`is_fixed_color`
-    /// 把它们判成非 fixed，它们本来就跟着 palette 走。
+    /// Palette entries stay unchanged. Ordinary text, including ANSI gray/white,
+    /// is checked against its actual cell background; readable pairs are preserved.
     ///
     /// 三个实现选择：
     /// - **写回 `Color::Spec` 而不是另开一张色表**：下游 `theme.resolve` 对 `Spec`
@@ -306,12 +306,13 @@ impl Element for TerminalElement {
                 (fg.g * 255.0).round() as u8,
                 (fg.b * 255.0).round() as u8,
             );
-            self.view.update(cx, |view, _| {
+            self.view.update(cx, |view, cx| {
+                view.math.bind_resources(cx);
                 let size_info =
                     super::math_overlay::grid_size_info(layout.cols, layout.rows, cell_w, line_h);
-                if view.uses_source_reader_math() {
-                    return view.math.clear_frame(&size_info, math_pixels_per_point);
-                }
+                // CLI identity must not disable grid math. The answer reader
+                // replaces TerminalElement in TerminalView::render only while
+                // actually open; merely detecting Codex/Claude is not a handoff.
                 let Some(term) = view.session.as_ref().map(|session| session.term.clone()) else {
                     return view.math.clear_frame(&size_info, math_pixels_per_point);
                 };
@@ -526,8 +527,8 @@ impl Element for TerminalElement {
                 continue;
             };
             let origin = point(
-                bounds.origin.x + layout.cell_width * visual_col as f32,
-                bounds.origin.y + layout.line_height * glyph.row as f32,
+                snap_to_device(bounds.origin.x + layout.cell_width * visual_col as f32, scale),
+                snap_to_device(bounds.origin.y + layout.line_height * glyph.row as f32, scale),
             );
             let at = |p: &[f32; 2]| point(origin.x + px(p[0]), origin.y + px(p[1]));
             for prim in prims {
@@ -631,6 +632,17 @@ impl Element for TerminalElement {
                 cx,
             );
         }
+
+        super::molecule_overlay::paint(
+            &self.view,
+            &snap,
+            bounds,
+            layout.cell_width,
+            layout.line_height,
+            !theme_is_light,
+            window,
+            cx,
+        );
 
         // Terminal images are ordinary scrollback content: the PTY reader
         // reserved rows when it saw the protocol sequence, while this pass
@@ -787,6 +799,7 @@ impl Element for TerminalElement {
             let marked = self.view.read(cx).marked_text.clone();
             self.view.update(cx, |view, _| view.ime_bounds = anchor);
             if let Some(marked) = marked.filter(|m| !m.is_empty()) {
+                let marked = crate::text_preview::single_line_label(&marked).into_owned();
                 let run = TextRun {
                     len: marked.len(),
                     font: font.clone(),
@@ -887,6 +900,16 @@ fn paint_dashed_underline(
     }
 }
 
+/// Align geometry-only terminal primitives to the device pixel grid. Cell
+/// widths/heights are already measured in device pixels and converted back to
+/// logical units, but a pane origin can still be fractional after a split or
+/// DPI-scaled layout. Rounding the absolute origin keeps box-drawing fills and
+/// polygon edges on the same physical pixels as their neighbouring cells.
+fn snap_to_device(value: Pixels, scale: f32) -> Pixels {
+    let scale = scale.max(0.5);
+    px((value.as_f32() * scale).round() / scale)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_link_preview(
     window: &mut Window,
@@ -899,6 +922,7 @@ fn paint_link_preview(
     font: &gpui::Font,
     font_size: Pixels,
 ) {
+    let preview = crate::text_preview::single_line_label(preview);
     let line =
         if anchor_row + 1 < layout.rows { anchor_row + 1 } else { anchor_row.saturating_sub(1) };
     let label_size = px(font_size.as_f32() * 0.85);
@@ -911,7 +935,7 @@ fn paint_link_preview(
         strikethrough: None,
     };
     let shaped = window.text_system().shape_line(
-        SharedString::from(preview.to_owned()),
+        SharedString::from(preview.into_owned()),
         label_size,
         &[run],
         None,
@@ -1552,9 +1576,8 @@ fn resolve_app_colors_into(
     use crate::display::content::is_terminal_graphic;
     use crate::display::terminal_color::is_fixed_color;
 
-    let named = |name| rgb_from_rgba(theme.resolve(Color::Named(name), overrides, false));
-    let theme_fg = named(NamedColor::Foreground);
-    let theme_bg = named(NamedColor::Background);
+    let theme_fg = rgb_from_rgba(theme.foreground);
+    let theme_bg = rgb_from_rgba(theme.background);
 
     for run in &mut snap.bg_runs {
         let base = rgb_from_rgba(theme.resolve(run.color, overrides, false));
@@ -1567,7 +1590,7 @@ fn resolve_app_colors_into(
         // 图形字符的颜色表达图形本身，不是正文对比度——图标被「矫正」成另一个
         // 颜色就是另一张图了。
         let graphic = cell.text.chars().next().is_some_and(is_terminal_graphic);
-        if graphic || !is_fixed_color(cell.fg, overrides) {
+        if graphic {
             continue;
         }
         // 对比度是一对颜色的属性：这个前景可不可读，取决于它**这一格**底下是
@@ -1608,7 +1631,7 @@ fn themed_anchor(palette: &super::colors::Palette, cx: &App) -> (crate::display:
 
 #[cfg(test)]
 mod tests {
-    use super::completion_popup_layout;
+    use super::{completion_popup_layout, snap_to_device};
     use crate::display::{NebulaCompletionItem, NebulaCompletionKind};
 
     mod app_color_resolution {
@@ -1661,12 +1684,35 @@ mod tests {
             );
         }
 
-        /// 主题自己的 ANSI 色一根手指都不许动：它们本来就跟着 palette 走，
-        /// 换主题时会自动变。碰了就等于把用户的配色改掉。
+        /// Readable ANSI text keeps its original color identity.
         #[test]
         fn theme_owned_ansi_colors_are_left_alone() {
             let (fg, _) = resolved(b"\x1b[31mred text");
             assert_eq!(fg, Color::Named(NamedColor::Red));
+        }
+
+        #[test]
+        fn ansi_input_and_osc_foreground_are_readable_on_light_surfaces() {
+            let mut theme = Palette::default();
+            theme.background = gpui::rgb(0xfcfbf9);
+            theme.foreground = gpui::rgb(0x1a1a1a);
+            theme.ansi[7] = gpui::rgb(0xdddddd);
+            theme.ansi[15] = gpui::rgb(0xffffff);
+            for bytes in [b"\x1b[37m/seagull".as_slice(), b"\x1b[97mURL", b"\x1b[38;5;7mtext"] {
+                let mut snap = snapshot_of(bytes);
+                let mut resolver = TerminalColorResolver::default();
+                resolve_app_colors_into(&mut snap, &theme, &Colors::default(), &mut resolver);
+                let fg =
+                    rgb_from_rgba(theme.resolve(first_cell_fg(&snap), &Colors::default(), false));
+                assert!(fg.contrast(*rgb_from_rgba(theme.background)) >= FIXED_TEXT_MIN_CONTRAST);
+            }
+            let mut overrides = Colors::default();
+            overrides[NamedColor::Foreground] = Some(ansi::Rgb { r: 238, g: 238, b: 238 });
+            let mut snap = snapshot_of("你好".as_bytes());
+            let mut resolver = TerminalColorResolver::default();
+            resolve_app_colors_into(&mut snap, &theme, &overrides, &mut resolver);
+            let fg = rgb_from_rgba(theme.resolve(first_cell_fg(&snap), &overrides, false));
+            assert!(fg.contrast(*rgb_from_rgba(theme.background)) >= FIXED_TEXT_MIN_CONTRAST);
         }
 
         /// 图形字符（Nerd Font 私用区、emoji）的颜色表达图形本身。哪怕它写死了
@@ -1687,6 +1733,7 @@ mod tests {
     #[test]
     fn popup_keeps_a_single_short_exact_command_visible() {
         let items = [NebulaCompletionItem {
+            replace_chars: 0,
             label: "cat".to_owned(),
             insert: " ".to_owned(),
             kind: NebulaCompletionKind::Command,
@@ -1711,6 +1758,7 @@ mod tests {
     #[test]
     fn popup_layout_preserves_the_unselected_state() {
         let items = [NebulaCompletionItem {
+            replace_chars: 0,
             label: "git pull upstream".to_owned(),
             insert: " upstream".to_owned(),
             kind: NebulaCompletionKind::History,
@@ -1727,6 +1775,7 @@ mod tests {
     fn scrolling_is_independent_of_selection_and_popup_position() {
         let items = (0..30)
             .map(|index| NebulaCompletionItem {
+                replace_chars: 0,
                 label: format!("command-{index}"),
                 insert: format!("{index}"),
                 kind: NebulaCompletionKind::Command,
@@ -1758,6 +1807,7 @@ mod tests {
     #[test]
     fn popup_flips_above_the_cursor_near_the_bottom_edge() {
         let items = [NebulaCompletionItem {
+            replace_chars: 0,
             label: "completion.rs".to_owned(),
             insert: "ompletion.rs".to_owned(),
             kind: NebulaCompletionKind::File,
@@ -1779,5 +1829,14 @@ mod tests {
         .expect("底部空间不足时仍应在光标上方显示候选");
         let cursor_top = line_height * cursor_row;
         assert!(popup.content_y + popup.row_height < cursor_top);
+    }
+
+    #[test]
+    fn boxdraw_origin_snaps_in_absolute_device_pixels() {
+        let snapped = snap_to_device(gpui::px(10.2), 2.0);
+        assert!((snapped.as_f32() - 10.0).abs() < 1e-5);
+
+        let snapped = snap_to_device(gpui::px(10.25), 1.5);
+        assert!((snapped.as_f32() - 10.0).abs() < 1e-5);
     }
 }

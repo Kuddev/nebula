@@ -15,6 +15,7 @@
 //! 上限（5s 自动退场，溢出概率低）；重复冷却在本层补齐（600ms，同文本）。
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, App, IntoElement as _, ParentElement as _, Styled as _, Window, div, px};
@@ -47,6 +48,28 @@ const BANNER_TTL: Duration = Duration::from_secs(90);
 
 static LAST_TOAST: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 static PANE_BANNERS: Mutex<PaneBannerGate> = Mutex::new(PaneBannerGate { recent: Vec::new() });
+static NEXT_AI_TOAST: AtomicU64 = AtomicU64::new(1);
+
+/// A component notification identity, not a separate queue or lifetime manager.
+struct AiToast;
+
+/// Apply preference changes to existing in-app notices in every open window.
+/// Native system notifications have a separate delivery path and remain intact.
+pub(crate) fn init(cx: &mut App) {
+    cx.observe_global::<super::config::Settings>(|cx| {
+        if super::config::ai_toasts_enabled(cx) {
+            return;
+        }
+        for handle in cx.windows() {
+            let _ = handle.update(cx, |_, window, cx| {
+                if window.root::<Root>().flatten().is_some() {
+                    window.remove_notification::<AiToast>(cx);
+                }
+            });
+        }
+    })
+    .detach();
+}
 
 #[derive(Default)]
 struct PaneBannerGate {
@@ -157,7 +180,7 @@ pub fn banner(window: &mut Window, cx: &mut App, kind: ToastKind, text: impl Int
         return;
     }
     log::warn!("banner [{kind:?}]: {text}");
-    push_banner(window, cx, note(kind, text));
+    push_banner(window, cx, note(kind, text), false);
 }
 
 pub(crate) fn banner_for_pane(
@@ -166,6 +189,7 @@ pub(crate) fn banner_for_pane(
     kind: ToastKind,
     text: impl Into<String>,
     pane_id: u64,
+    ai_toast: bool,
 ) {
     let text = text.into();
     if text.trim().is_empty()
@@ -179,10 +203,14 @@ pub(crate) fn banner_for_pane(
         return;
     }
     log::info!("pane banner [{kind:?}] pane={pane_id}: {text}");
-    let notification = note(kind, text).on_click(move |_, _, cx| {
+    let mut notification = note(kind, text).on_click(move |_, _, cx| {
         cx.defer(move |cx| super::workspace::windowing::focus_notification(Some(pane_id), cx));
     });
-    push_banner(window, cx, notification);
+    if ai_toast {
+        notification = notification
+            .id1::<AiToast>(("ai-banner", NEXT_AI_TOAST.fetch_add(1, Ordering::Relaxed)));
+    }
+    push_banner(window, cx, notification, ai_toast);
 }
 
 pub(crate) fn confirmation_for_pane(
@@ -192,16 +220,12 @@ pub(crate) fn confirmation_for_pane(
     pane_id: u64,
     confirmation: crate::gpui_shell::terminal::confirmation::BinaryConfirmation,
 ) {
-    struct ConfirmationNotice;
-
-    let language =
-        crate::display::LanguagePreference::from(nebula_settings::RuntimeSettings::load().language)
-            .resolved();
+    let language = super::config::ui_language(cx);
     let allow_label = language.text(crate::i18n::Message::CommonYes).to_owned();
     let deny_label = language.text(crate::i18n::Message::CommonNo).to_owned();
     let request_id = confirmation.id;
     let notification = note(ToastKind::Warning, text)
-        .id1::<ConfirmationNotice>(format!("pane-{pane_id}-request-{request_id}"))
+        .id1::<AiToast>(format!("pane-{pane_id}-request-{request_id}"))
         .on_click(move |_, _, cx| {
             cx.defer(move |cx| super::workspace::windowing::focus_notification(Some(pane_id), cx));
         })
@@ -250,7 +274,7 @@ pub(crate) fn confirmation_for_pane(
                 )
                 .into_any_element()
         });
-    push_banner(window, cx, notification);
+    push_banner(window, cx, notification, true);
 }
 
 fn reply_to_confirmation(
@@ -280,13 +304,20 @@ fn reply_to_confirmation(
     }
 }
 
-fn push_banner(window: &mut Window, cx: &mut App, notification: Notification) {
+fn push_banner(window: &mut Window, cx: &mut App, notification: Notification, ai_toast: bool) {
+    if ai_toast && !super::config::ai_toasts_enabled(cx) {
+        return;
+    }
     let note = notification.autohide(false);
     if window.root::<Root>().flatten().is_some() {
         window.push_notification(note, cx);
         schedule_banner_dismiss(window, cx);
     } else {
         window.defer(cx, move |window, cx| {
+            // The preference may change before the startup Root is installed.
+            if ai_toast && !super::config::ai_toasts_enabled(cx) {
+                return;
+            }
             if window.root::<Root>().flatten().is_some() {
                 window.push_notification(note, cx);
                 schedule_banner_dismiss(window, cx);
@@ -344,5 +375,112 @@ mod tests {
         assert!(!gate.accepts(1, ToastKind::Warning, "permission", now));
         assert!(gate.accepts(1, ToastKind::Info, "done", now + DUPLICATE_COOLDOWN));
         assert_eq!(gate.recent.len(), 1);
+    }
+
+    #[cfg(feature = "gpui-test-support")]
+    mod interaction {
+        use super::*;
+        use gpui::{
+            AppContext as _, BorrowAppContext as _, Context, EntityId, Render, TestAppContext,
+            VisualTestContext,
+        };
+
+        use crate::gpui_shell::config::Settings;
+        use crate::gpui_shell::terminal::confirmation::BinaryConfirmation;
+
+        struct Empty;
+
+        impl Render for Empty {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+                div()
+            }
+        }
+
+        fn initialize(cx: &mut TestAppContext, enabled: bool) {
+            cx.update(|cx| {
+                gpui_component::init(cx);
+                let mut settings = Settings::load(nebula_settings::ThemeName::Nord);
+                settings.ai_toasts = enabled;
+                cx.set_global(settings);
+                init(cx);
+            });
+        }
+
+        fn ids(cx: &mut VisualTestContext) -> Vec<EntityId> {
+            cx.update(|window, cx| {
+                window.notifications(cx).iter().map(|note| note.entity_id()).collect()
+            })
+        }
+
+        fn settle_dismissal(cx: &mut VisualTestContext) {
+            cx.run_until_parked();
+            cx.background_executor.advance_clock(Duration::from_millis(200));
+            cx.run_until_parked();
+        }
+
+        #[gpui::test]
+        fn disabling_ai_toasts_removes_only_ai_cards_and_can_be_reenabled(cx: &mut TestAppContext) {
+            initialize(cx, true);
+            let (_, cx) = cx.add_window_view(|window, cx| Root::new(cx.new(|_| Empty), window, cx));
+            cx.update(|window, cx| {
+                banner_for_pane(window, cx, ToastKind::Info, "AI completed", 7101, true);
+                confirmation_for_pane(
+                    window,
+                    cx,
+                    "AI confirmation".into(),
+                    7101,
+                    BinaryConfirmation { id: 7201, question: "Continue?".into() },
+                );
+                banner(window, cx, ToastKind::Warning, "Configuration needs attention");
+            });
+            cx.run_until_parked();
+            let original = ids(cx);
+            assert_eq!(original.len(), 3);
+            cx.update(|_, cx| {
+                cx.update_global::<Settings, _>(|settings, _| settings.ai_toasts = false);
+            });
+            settle_dismissal(cx);
+            assert_eq!(ids(cx), vec![original[2]]);
+            cx.update(|_, cx| {
+                cx.update_global::<Settings, _>(|settings, _| settings.ai_toasts = true);
+            });
+            cx.run_until_parked();
+            assert_eq!(ids(cx), vec![original[2]], "reenabling must not replay old notices");
+            cx.update(|window, cx| {
+                banner_for_pane(window, cx, ToastKind::Info, "Next AI turn", 7101, true);
+            });
+            assert_eq!(ids(cx).len(), 2);
+        }
+
+        #[gpui::test]
+        fn disabled_ai_cards_cannot_reenter_the_component_queue(cx: &mut TestAppContext) {
+            initialize(cx, false);
+            let (_, cx) = cx.add_window_view(|window, cx| Root::new(cx.new(|_| Empty), window, cx));
+            cx.update(|window, cx| {
+                banner_for_pane(window, cx, ToastKind::Info, "Hidden AI turn", 7102, true);
+                confirmation_for_pane(
+                    window,
+                    cx,
+                    "Hidden AI confirmation".into(),
+                    7102,
+                    BinaryConfirmation { id: 7202, question: "Continue?".into() },
+                );
+                banner_for_pane(window, cx, ToastKind::Info, "Build finished", 7102, false);
+            });
+            cx.run_until_parked();
+            assert_eq!(ids(cx).len(), 1, "ordinary terminal notices remain available");
+        }
+
+        #[gpui::test]
+        fn deferred_startup_banner_rechecks_the_current_preference(cx: &mut TestAppContext) {
+            initialize(cx, true);
+            let (_, cx) = cx.add_window_view(|window, cx| {
+                banner_for_pane(window, cx, ToastKind::Info, "Queued AI turn", 7103, true);
+                cx.update_global::<Settings, _>(|settings, _| settings.ai_toasts = false);
+                Root::new(cx.new(|_| Empty), window, cx)
+            });
+            settle_dismissal(cx);
+            assert!(ids(cx).is_empty());
+        }
     }
 }

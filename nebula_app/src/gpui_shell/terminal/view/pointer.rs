@@ -305,13 +305,30 @@ impl TerminalView {
     /// 接受当前候选时只写入补全余量。即使余量为空也算已处理，Enter 不能
     /// 继续透传成一次命令执行。
     pub(super) fn accept_completion_popup(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(insert) = suggest::popup_take(&mut self.suggest) else { return false };
+        let Some(item) = suggest::popup_take(&mut self.suggest) else { return false };
+        let insert = item.insert;
         self.completion_viewport.clear();
-        let before = if self.suggest.screen_line.is_empty() {
+        let mut before = if self.suggest.screen_line.is_empty() {
             self.suggest.line_buf.clone()
         } else {
             self.suggest.screen_line.clone()
         };
+        if item.replace_chars > 0 {
+            let backspace = super::super::keymap::encode(
+                &gpui::Keystroke::parse("backspace").unwrap(),
+                &self
+                    .session
+                    .as_ref()
+                    .map(|session| *session.term.lock().mode())
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_else(|| vec![0x7f]);
+            self.write_bytes(backspace.repeat(item.replace_chars));
+            for _ in 0..item.replace_chars {
+                before.pop();
+                crate::display::nebula_input_backspace(&mut self.suggest);
+            }
+        }
         for c in insert.chars() {
             crate::display::nebula_input_char(&mut self.suggest, c);
         }

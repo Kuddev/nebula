@@ -122,14 +122,15 @@ pub(crate) fn merge_ssh_hosts(
     pinned: &[String],
     hidden: &[String],
 ) -> Vec<String> {
-    let mut hosts: Vec<_> = saved.iter().filter(|host| !hidden.contains(host)).cloned().collect();
-    for host in crate::ssh::ssh_config_hosts() {
-        if !hidden.contains(&host) && !hosts.contains(&host) {
-            hosts.push(host);
-        }
-    }
-    hosts.sort_by_key(|host| pinned.iter().position(|pinned| pinned == host).unwrap_or(usize::MAX));
-    hosts
+    // This adapter retains the legacy recent/config list. The GPUI host library
+    // supplies managed profiles to the same presentation-independent merge rule.
+    crate::ssh_profiles::merge_host_sources(
+        saved,
+        pinned,
+        hidden,
+        &crate::ssh::ssh_config_hosts(),
+        std::iter::empty(),
+    )
 }
 
 #[derive(Debug)]

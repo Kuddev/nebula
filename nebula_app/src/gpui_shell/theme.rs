@@ -6,43 +6,31 @@ use crate::display::ui::theme::NebulaTheme;
 use crate::renderer::ui::Rgba;
 use nebula_settings::ThemeName;
 
-/// settings 的 [`ThemeName`] → 旧壳 chrome 主题。变体一一同名；chrome
-/// 色表的权威在 `display::ui::theme`，GPUI 壳与旧壳取同一份数据。
-fn chrome_theme(name: ThemeName) -> NebulaTheme {
-    match name {
-        ThemeName::Nebula => NebulaTheme::Nebula,
-        ThemeName::SilverLight => NebulaTheme::SilverLight,
-        ThemeName::SteelDark => NebulaTheme::SteelDark,
-        ThemeName::LimestoneLight => NebulaTheme::LimestoneLight,
-        ThemeName::CoalDark => NebulaTheme::CoalDark,
-        ThemeName::LinenLight => NebulaTheme::LinenLight,
-        ThemeName::MossDark => NebulaTheme::MossDark,
-        ThemeName::Nord => NebulaTheme::Nord,
-        ThemeName::Paper => NebulaTheme::Paper,
-        ThemeName::BreezeLight => NebulaTheme::BreezeLight,
-        ThemeName::BreezeDark => NebulaTheme::BreezeDark,
-        ThemeName::MintLight => NebulaTheme::MintLight,
-        ThemeName::MintDark => NebulaTheme::MintDark,
-    }
+mod syntax;
+
+struct DocumentColors {
+    background: Hsla,
+    foreground: Hsla,
+}
+impl gpui::Global for DocumentColors {}
+
+pub(crate) fn code_block_background(cx: &App) -> Hsla {
+    cx.try_global::<DocumentColors>().map_or(cx.theme().secondary, |colors| colors.background)
 }
 
-/// [`chrome_theme`] 的逆映射。两张表相邻放置：加主题时一起改。
+pub(crate) fn code_block_foreground(cx: &App) -> Hsla {
+    cx.try_global::<DocumentColors>().map_or(cx.theme().foreground, |colors| colors.foreground)
+}
+
+/// settings 的 [`ThemeName`] → 旧壳 chrome 主题。变体一一同名；chrome
+/// 色表的权威在 `display::ui::theme`，GPUI 壳与旧壳取同一份数据。
+pub(crate) fn chrome_theme(name: ThemeName) -> NebulaTheme {
+    NebulaTheme::from_prompt_name(name.available().prompt_name()).expect("shared theme identity")
+}
+
+/// Reverse the shared stable-name mapping and resolve retired preferences.
 fn settings_theme_name(theme: NebulaTheme) -> ThemeName {
-    match theme {
-        NebulaTheme::Nebula => ThemeName::Nebula,
-        NebulaTheme::SilverLight => ThemeName::SilverLight,
-        NebulaTheme::SteelDark => ThemeName::SteelDark,
-        NebulaTheme::LimestoneLight => ThemeName::LimestoneLight,
-        NebulaTheme::CoalDark => ThemeName::CoalDark,
-        NebulaTheme::LinenLight => ThemeName::LinenLight,
-        NebulaTheme::MossDark => ThemeName::MossDark,
-        NebulaTheme::Nord => ThemeName::Nord,
-        NebulaTheme::Paper => ThemeName::Paper,
-        NebulaTheme::BreezeLight => ThemeName::BreezeLight,
-        NebulaTheme::BreezeDark => ThemeName::BreezeDark,
-        NebulaTheme::MintLight => ThemeName::MintLight,
-        NebulaTheme::MintDark => ThemeName::MintDark,
-    }
+    ThemeName::from_prompt_name(theme.prompt_name()).expect("shared theme identity").available()
 }
 
 /// 当前生效的旧壳 chrome 主题（SSH 连接卡片等复用旧 Skin/palette 的
@@ -67,6 +55,7 @@ pub(crate) fn resolve_theme_name(
     follow_system: bool,
     system_is_light: bool,
 ) -> ThemeName {
+    let preference = preference.available();
     if !follow_system {
         return preference;
     }
@@ -83,11 +72,15 @@ pub fn effective_theme_name(cx: &App) -> ThemeName {
 
 /// 点选一张主题卡时要写盘的键：对齐旧壳 `select_nebula_theme`
 /// （关掉跟随系统）+ `apply_nebula_theme`（底色换成该主题 `term_bg`）。
-pub(crate) fn theme_card_persist_updates(name: ThemeName) -> [(&'static str, String); 3] {
+pub(crate) fn theme_card_persist_updates(name: ThemeName) -> [(&'static str, String); 7] {
     [
         ("theme", name.prompt_name().to_owned()),
         ("follow_system_theme", "0".to_owned()),
         ("background", nebula_settings::format_hex_rgb(name.term_theme().background)),
+        ("pane_card_radius", "0".to_owned()),
+        ("pane_card_gutter", "0".to_owned()),
+        ("pane_card_shadow", "0".to_owned()),
+        ("pane_card_divider", "1".to_owned()),
     ]
 }
 
@@ -223,15 +216,9 @@ pub struct PaneCardStyle {
 }
 
 impl Default for PaneCardStyle {
-    /// 全局设置还没装载时的回落：卡片形态 + 默认卡缝。
+    /// Before settings are installed, use the same flat shape as the presets.
     fn default() -> Self {
-        let gutter = nebula_settings::DEFAULT_PANE_CARD_GUTTER;
-        Self {
-            radius: nebula_settings::DEFAULT_PANE_CARD_RADIUS,
-            margin: gpui::Edges { top: 0.0, right: gutter, bottom: gutter, left: gutter },
-            shadow: false,
-            divider: 0.0,
-        }
+        Self { radius: 0.0, margin: gpui::Edges::default(), shadow: false, divider: 1.0 }
     }
 }
 
@@ -261,14 +248,22 @@ impl PaneCardStyle {
     }
 }
 
+/// A flush pane extends its background through the titlebar; explicit custom
+/// gutters/radii retain a surrounding shell instead.
+pub(crate) fn pane_is_flush(cx: &App) -> bool {
+    let card = PaneCardStyle::current(cx);
+    card.radius == 0.0
+        && card.margin.top == 0.0
+        && card.margin.right == 0.0
+        && card.margin.bottom == 0.0
+        && card.margin.left == 0.0
+}
+
 /// 侧栏与终端之间那条竖线的颜色。从壳色推导而不新增 palette 色位：9 个主题
 /// 一个都不用改，而且亮暗自动反向——浅色主题压暗、深色主题提亮，两边都能
 /// 读作一条分界而不是一道亮缝。
 pub fn card_divider_color(cx: &App) -> Hsla {
-    let mut color = cx.theme().background;
-    let is_light = chrome_theme_resolved(cx).palette().is_light;
-    color.l = if is_light { (color.l - 0.10).max(0.0) } else { (color.l + 0.10).min(1.0) };
-    color
+    wash(chrome_theme_resolved(cx).skin().hairline)
 }
 
 /// 终端卡圆角。默认值的权威在 `nebula_settings::DEFAULT_PANE_CARD_RADIUS`，
@@ -495,6 +490,10 @@ pub fn apply_chrome_theme(cx: &mut App) {
     let mode = if chrome.skin().is_light { ThemeMode::Light } else { ThemeMode::Dark };
     Theme::change(mode, None, cx);
     apply_skin_tokens(chrome, cx);
+    let colors = settings_theme_name(chrome).reviewed_palette();
+    let [r, g, b] = colors.code_background();
+    let [fr, fg, fb] = colors.foreground;
+    cx.set_global(DocumentColors { background: to_hsla(r, g, b), foreground: to_hsla(fr, fg, fb) });
     apply_shell_opacity(chrome, cx);
 }
 
@@ -579,17 +578,9 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     theme.overlay = wash(sk.veil);
 
     // 悬停 / 选中水洗。
-    let hover = if sk.is_light {
-        wash(Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 10))
-    } else {
-        wash(sk.hover)
-    };
-    let selected = if sk.is_light {
-        wash(Rgba::new(sk.accent.r, sk.accent.g, sk.accent.b, 18))
-    } else {
-        wash(sk.accent_soft)
-    };
-    let list_selected = if sk.is_light { selected } else { wash(sk.hover_strong) };
+    let hover = wash(sk.hover);
+    let selected = wash(sk.accent_soft);
+    let list_selected = selected;
     theme.accent = hover;
     theme.accent_foreground = ink(sk.ink_strong);
     theme.list_hover = hover;
@@ -607,11 +598,18 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     // 按钮是成片的色块，link / caret / 焦点环是发丝级的细节。饱和度决定「刺
     // 不刺眼」，亮度差决定「看不看得见」——所以色块压饱和（暗底上 #52a8ff
     // 这种亮蓝铺开会发光，一整页只剩几个块在跳），细元素保持原值换辨识度。
-    let soft_accent = soften(sk.accent, 0.62);
+    let soft_accent = sk.accent;
     theme.primary = ink(soft_accent);
     theme.primary_hover = shift3(soft_accent.r, soft_accent.g, soft_accent.b, 0.10);
     theme.primary_active = shift3(soft_accent.r, soft_accent.g, soft_accent.b, 0.18);
     theme.primary_foreground = ink(sk.ink_on_accent);
+    theme.primary_foreground = ink(crate::display::terminal_color::ensure_contrast(
+        sk.ink_on_accent,
+        sk.accent,
+        sk.ink,
+        sk.ink_strong,
+        4.5,
+    ));
     theme.secondary = wash(sk.surface);
     theme.secondary_hover = hover;
     theme.secondary_active = list_selected;
@@ -705,6 +703,7 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
     // 1.16 的 Button、Slider、Switch 等背景统一读取 ThemeTokens。Nebula 的
     // Skin 是纯色权威来源，因此在所有 ThemeColor 覆写完成后一次性解析，避免
     // 新组件悄悄回落到 gpui-component 的默认主题色。
+    syntax::apply(theme, settings_theme_name(chrome).reviewed_palette());
     theme.tokens = (&theme.colors).into();
 }
 
@@ -715,8 +714,8 @@ mod tests {
 
     #[test]
     fn follow_system_remaps_theme_family_and_manual_mode_keeps_preference() {
-        assert_eq!(resolve_theme_name(ThemeName::SilverLight, true, false), ThemeName::SteelDark);
-        assert_eq!(resolve_theme_name(ThemeName::Nebula, true, true), ThemeName::SilverLight);
+        assert_eq!(resolve_theme_name(ThemeName::SilverLight, true, false), ThemeName::Nord);
+        assert_eq!(resolve_theme_name(ThemeName::Nebula, true, true), ThemeName::CatppuccinLatte);
         assert_eq!(
             resolve_theme_name(ThemeName::SilverLight, false, false),
             ThemeName::SilverLight

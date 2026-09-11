@@ -887,9 +887,7 @@ impl NebulaWorkspace {
             // 右缘贴窗口边框不倒角，四边无描边。
             .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
             .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
-            .bg(theme.popover)
-            // 与文件树抽屉同一套紧凑投影，避免右侧抽屉语言再出现 shadow_lg。
-            .shadow(gpui_component::popover_shadow(theme.is_dark()))
+            .bg(theme.sidebar)
             .occlude()
             .child(view_switch)
             // VCS 状态现在跟着侧栏定位走（`SidePanel::vcs_root`），所以必须在

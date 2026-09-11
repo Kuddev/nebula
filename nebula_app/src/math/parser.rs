@@ -37,11 +37,74 @@ pub(crate) fn parse_formula_source(
     limits: MathLimits,
 ) -> Result<ParsedFormula, MathError> {
     validate(source, limits)?;
+    reject_ambiguous_row_breaks(source)?;
     let source = super::compile::brace_unbraced_fraction_arguments(source)
         .map(Cow::Owned)
         .unwrap_or(Cow::Borrowed(source));
     let style = if display { MathStyle::Display } else { MathStyle::Text };
-    parse_normalized_formula(source.as_ref(), display, style, limits)
+    let presentation = substitute_unsupported_presentation(source.as_ref());
+    parse_normalized_formula(presentation.as_ref(), display, style, limits)
+}
+
+/// A lone line-ending backslash in a matrix can be accepted as TeX space,
+/// silently flattening several damaged rows into one. Literal documents keep
+/// that ambiguous source visible. Terminal transport repair runs separately.
+fn reject_ambiguous_row_breaks(source: &str) -> Result<(), MathError> {
+    let bytes = source.as_bytes();
+    let mut environments = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            at += source[at..].find('\n').unwrap_or(bytes.len() - at);
+            continue;
+        }
+        if bytes[at] != b'\\' {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        at += 1;
+        if bytes.get(at) == Some(&b'\\') {
+            at += 1;
+            continue;
+        }
+        if bytes.get(at).is_some_and(|byte| matches!(byte, b'\r' | b'\n'))
+            && environments.iter().any(|structured| *structured)
+        {
+            return Err(MathError::new(MathErrorKind::Parse, start));
+        }
+        let end = at + source[at..].bytes().take_while(u8::is_ascii_alphabetic).count();
+        match &source[at..end] {
+            "begin" | "end" => {
+                if let Some(group) = brace_group(source, end) {
+                    if &source[at..end] == "begin" {
+                        let name = &source[group.clone()];
+                        environments.push(
+                            name.contains("matrix")
+                                || name.contains("align")
+                                || matches!(
+                                    name,
+                                    "array"
+                                        | "cases"
+                                        | "rcases"
+                                        | "split"
+                                        | "gathered"
+                                        | "gather"
+                                        | "multline"
+                                ),
+                        );
+                    } else {
+                        environments.pop();
+                    }
+                    at = group.end + 1;
+                } else {
+                    at = end;
+                }
+            },
+            _ => at = end.max(at + usize::from(at < bytes.len())),
+        }
+    }
+    Ok(())
 }
 
 fn parse_normalized_formula(
@@ -722,7 +785,9 @@ impl Builder {
     ) -> Result<NodeId, MathError> {
         match content {
             Content::Text(text) => self.characters_node(
-                text.chars(),
+                text.chars().map(
+                    |character| if matches!(character, '\r' | '\n') { ' ' } else { character },
+                ),
                 AtomClass::Ord,
                 ParseState { variant: FontVariant::UpRight, ..state },
             ),

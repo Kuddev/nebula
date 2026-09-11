@@ -251,10 +251,26 @@ impl Drop for Opening {
     }
 }
 
-struct ShellChannel {
+pub(super) struct ShellChannel {
     channel: Option<Channel<client::Msg>>,
     pending: VecDeque<ChannelMsg>,
     pending_bytes: usize,
+}
+
+/// The same close-on-drop ownership applies to shell and short-lived exec channels.
+pub(super) fn own_channel(channel: Channel<client::Msg>) -> ShellChannel {
+    ShellChannel { channel: Some(channel), pending: VecDeque::new(), pending_bytes: 0 }
+}
+
+impl ShellChannel {
+    pub(super) async fn finish(&mut self) -> Result<(), SessionError> {
+        if let Some(channel) = &self.channel {
+            // Retain ownership across await: cancellation still runs close-on-drop.
+            network("channel close", channel.close()).await?;
+        }
+        self.channel.take();
+        Ok(())
+    }
 }
 
 impl Deref for ShellChannel {

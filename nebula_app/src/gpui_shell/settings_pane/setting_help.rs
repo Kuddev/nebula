@@ -87,6 +87,10 @@ pub(super) fn help(key: &str, language: UiLanguage) -> SettingHelp {
             language.pick("程序提示时，选择声音或闪烁提醒。", "Chooses sound or visual feedback for terminal alerts."),
             None,
         ),
+        "ai_toasts" => (
+            language.text(crate::i18n::Message::SettingsNotificationsAiMessagesDescription),
+            Some(language.text(crate::i18n::Message::SettingsNotificationsAiMessagesDetails)),
+        ),
         "font_family" => (
             language.pick("按字体组顺序查找可用字形。", "Uses the font group in order to find available glyphs."),
             Some(language.pick("前面的字体缺少字形时，会继续尝试后面的字体。", "When a font lacks a glyph, the next font in the group is tried.")),
@@ -183,6 +187,7 @@ mod tests {
             "shell",
             "startup_directory",
             "bell",
+            "ai_toasts",
             "font_family",
             "ghost",
             "accept",

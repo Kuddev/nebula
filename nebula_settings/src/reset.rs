@@ -33,6 +33,7 @@ const RESET_KEYS: &[&str] = &[
     "cell_width_mode",
     "vcs_display",
     "bell",
+    "ai_toasts",
     "fetch",
     "auto_check_updates",
     "keep_session",
@@ -114,6 +115,15 @@ fn restore_defaults_at(path: &Path) -> io::Result<Option<PathBuf>> {
 mod tests {
     use super::*;
     use crate::{RawSettings, RuntimeSettings};
+
+    #[test]
+    fn resetting_preferences_reenables_ai_toasts_without_erasing_other_data() {
+        let original = "ai_toasts=0\ncustom_data=keep\n";
+        assert!(!RuntimeSettings::from_raw(&RawSettings::from_text(original)).ai_toasts);
+        let restored = default_settings_text(original);
+        assert_eq!(restored, "custom_data=keep\n");
+        assert!(RuntimeSettings::from_raw(&RawSettings::from_text(&restored)).ai_toasts);
+    }
 
     #[test]
     fn reset_removes_all_overrides_and_keeps_user_data() {

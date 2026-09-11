@@ -1020,7 +1020,12 @@ impl<T: EventListener, A: ActionContext<T>> Processor<T, A> {
                 _ => false,
             };
             if popup_accept {
-                if let Some(insert) = self.ctx.nebula_completion_popup_take() {
+                if let Some(item) = self.ctx.nebula_completion_popup_take() {
+                    for _ in 0..item.replace_chars {
+                        self.ctx.nebula_input_backspace();
+                    }
+                    self.ctx.write_to_pty(vec![0x7f; item.replace_chars]);
+                    let insert = item.insert;
                     if !insert.is_empty() {
                         for c in insert.chars() {
                             self.ctx.nebula_input_char(c);
