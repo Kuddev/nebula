@@ -1,5 +1,19 @@
 use super::*;
 
+/// 命令面板 / Shell 选择弹窗里图标轨的逻辑边长。品牌贴图、Nerd Font 字形
+/// 与组件库线性图标都排进同一个槽，行与行之间才不会有的缩进有的不缩进。
+const PALETTE_ICON_PX: f32 = 22.0;
+
+/// 非 shell 行（SSH 主机等）的字形字号。shell 行另有配平后的字号，见
+/// `shell_glyph_size`。
+const PALETTE_GLYPH_PX: f32 = 16.0;
+
+/// shell 行字形的字号：与品牌贴图按同一视觉尺寸配平（`shell_detect` 的
+/// 安全边距/墨迹比例是这条换算的唯一出处）。
+fn shell_glyph_size() -> f32 {
+    PALETTE_ICON_PX * crate::shell_detect::FALLBACK_ICON_SCALE
+}
+
 impl NebulaWorkspace {
     pub(super) fn render_command_palette(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         use crate::display::ui::tokens::{control, radius, space};
@@ -103,20 +117,31 @@ impl NebulaWorkspace {
             let icon_content = if let Some(image) = item.icon.clone() {
                 Some(
                     gpui::StyledImage::object_fit(
-                        img(image).size(px(22.0)),
+                        img(image).size(px(PALETTE_ICON_PX)),
                         gpui::ObjectFit::Contain,
                     )
                     .into_any_element(),
                 )
             } else if let Some(glyph) = item.icon_glyph {
+                // shell 行没有品牌贴图时画的是同一个 id-keyed 字形，字号要
+                // 跟品牌贴图配平；SSH 主机等行保持原来的字号。
+                let glyph_px = if matches!(
+                    &item.action,
+                    WorkspacePaletteAction::LaunchShell(_)
+                        | WorkspacePaletteAction::LaunchProfile(_)
+                ) {
+                    shell_glyph_size()
+                } else {
+                    PALETTE_GLYPH_PX
+                };
                 Some(
                     div()
-                        .size(px(22.0))
+                        .size(px(PALETTE_ICON_PX))
                         .flex()
                         .items_center()
                         .justify_center()
                         .font_family(crate::font_install::REQUIRED_FONT_FAMILY)
-                        .text_size(px(16.0))
+                        .text_size(px(glyph_px))
                         .text_color(foreground)
                         .child(glyph.to_string())
                         .into_any_element(),
@@ -124,7 +149,7 @@ impl NebulaWorkspace {
             } else {
                 item.icon_path.clone().map(|path| {
                     div()
-                        .size(px(22.0))
+                        .size(px(PALETTE_ICON_PX))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -133,8 +158,12 @@ impl NebulaWorkspace {
                 })
             };
             let icon_slot = has_icon_rail.then(|| {
-                let slot =
-                    div().size(px(22.0)).flex_shrink_0().flex().items_center().justify_center();
+                let slot = div()
+                    .size(px(PALETTE_ICON_PX))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center();
                 match icon_content {
                     Some(icon) => slot.child(icon).into_any_element(),
                     None => slot.into_any_element(),

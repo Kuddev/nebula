@@ -15,6 +15,21 @@ pub(super) struct ShellSelectItem {
 /// `wsl:<distro>`、`profile:<家族>|<id>`），双下划线包裹不可能与之相撞。
 pub(super) const SHELL_IMPORT_ACTION_ID: &str = "__nebula_import_terminal_dir__";
 
+/// 菜单行的逻辑边长（品牌贴图与图标槽同用）。
+pub(super) const SHELL_ROW_ICON_SIZE: f32 = 24.0;
+
+/// 回落字形的字号系数：见 `shell_detect::FALLBACK_ICON_SCALE`。
+const FALLBACK_ICON_SCALE: f32 = crate::shell_detect::FALLBACK_ICON_SCALE;
+
+/// 真实 shell 行之间的垂直间距。
+///
+/// `gpui-component` 的虚拟列表不支持条目 `gap_y`（`list.rs` 里明确写了），
+/// 每行背景按同一槽高首尾相接。可用的唯一着力点：它只量**首行**的槽高再拿
+/// 这个高度排所有行。给置顶的「导入终端目录」动作行加一段下内边距，槽高就
+/// 比普通行多出这一段，余下每一行之间便空出同样的间隔；动作行自身也在文字
+/// 下方留出这段空白，选中高亮不再贴着它。
+pub(super) const SHELL_ROW_GAP: f32 = 4.0;
+
 impl ShellSelectItem {
     pub(super) fn new(id: String, name: String, scale_factor: f32) -> Self {
         // Select 的闭态和菜单行尺寸不同。分别生成与物理像素一一对应的纹理，
@@ -47,15 +62,36 @@ impl ShellSelectItem {
             .into_any_element()
         } else if self.is_import_action() {
             // 动作行与真实 shell 行必须一眼分得开：文件夹口 = 「去别处拿」。
-            Icon::new(IconName::FolderOpen).xsmall().into_any_element()
+            Icon::new(IconName::FolderOpen).size(px(size * FALLBACK_ICON_SCALE)).into_any_element()
         } else {
-            Icon::new(IconName::SquareTerminal).xsmall().into_any_element()
+            // 没有品牌贴图的 shell 沿用旧壳那张按 id 取字的 Nerd Font 表
+            // （`icon_for_id`，设置行/命令面板同一口径）。字号按回落字形的
+            // 墨迹比例配平：品牌 PNG 的可见部分是自己边长的约 0.77（12%
+            // 安全边距），codicon terminal 的墨迹约 0.88 em——乘 0.88 之后
+            // 两种图标才真的同尺寸。
+            div()
+                .font_family(crate::font_install::REQUIRED_FONT_FAMILY)
+                .text_size(px(size * FALLBACK_ICON_SCALE))
+                .child(crate::shell_detect::icon_for_id(&self.id))
+                .into_any_element()
         };
         h_flex()
             .gap_2()
             .items_center()
-            .child(icon)
-            .child(div().flex_1().min_w_0().child(self.name.clone()))
+            // 图标槽固定成同一个边长，绝不随图标种类伸缩：gpui-component 的
+            // `List` 只量首行（这里是「导入终端目录」动作行）的高度，再拿它
+            // 排所有行；品牌 PNG 有 24px、回落图标只有 xsmall，混排时高行会
+            // 溢出自己的槽位，压住上下相邻行（选中高亮错位就是这么来的）。
+            .child(
+                div()
+                    .size(px(size))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(self.name.clone()))
             .into_any_element()
     }
 }
@@ -171,7 +207,14 @@ impl SelectItem for ShellSelectItem {
 
     fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
         // 旧壳 ShellPickerRow 的品牌图标是 24×24 逻辑像素。
-        self.view(24.0, self.row_image.as_ref())
+        let row = div().child(self.view(SHELL_ROW_ICON_SIZE, self.row_image.as_ref()));
+        if self.is_import_action() {
+            // 见 SHELL_ROW_GAP：首行独自垫高，成为所有行的槽高，才谈得上
+            // 「行与行之间有间隔」。
+            row.pb(px(SHELL_ROW_GAP))
+        } else {
+            row
+        }
     }
 
     fn value(&self) -> &Self::Value {
