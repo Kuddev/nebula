@@ -585,7 +585,16 @@ jobs:
             echo "refusing to replace existing Release: $tag" >&2
             exit 1
           fi
-          existing_tag_ref="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.type + " " + .object.sha' 2>/dev/null || true)"
+          existing_tag_response="$RUNNER_TEMP/stable-existing-tag.json"
+          existing_tag_error="$RUNNER_TEMP/stable-existing-tag-error.log"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >"$existing_tag_response" 2>"$existing_tag_error"; then
+            existing_tag_ref="$(jq -er '.object | select(.type == "tag" or .type == "commit") | .type + " " + .sha' "$existing_tag_response")"
+          elif jq -e '(.status | tostring) == "404"' "$existing_tag_response" >/dev/null; then
+            existing_tag_ref=""
+          else
+            cat "$existing_tag_error" >&2
+            exit 1
+          fi
           existing_tag_commit=""
           if [[ -n "$existing_tag_ref" ]]; then
             read -r existing_tag_type existing_tag_object <<<"$existing_tag_ref"
