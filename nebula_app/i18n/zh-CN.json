@@ -462,5 +462,27 @@
     "exported": "主机信息已导出，不含凭据",
     "imported": "已新增 {added} 台主机，跳过 {skipped} 台已有主机",
     "imported_partial": "已新增 {added} 台主机，但显示状态未能更新。请重试导入：{error}"
+  },
+  "menu": {
+    "file": "文件",
+    "view": "显示",
+    "window": "窗口",
+    "services": "服务",
+    "hide": "隐藏 Pebrel",
+    "hide_others": "隐藏其他应用",
+    "show_all": "显示全部",
+    "quit": "退出 Pebrel",
+    "split_right": "向右分屏",
+    "split_down": "向下分屏",
+    "close_pane": "关闭标签页或窗格",
+    "command_palette": "命令面板",
+    "toggle_sidebar": "显示/隐藏侧栏",
+    "toggle_files": "显示/隐藏文件树",
+    "toggle_git": "显示/隐藏 Git 面板",
+    "reset_font": "重置字号",
+    "toggle_fullscreen": "切换全屏",
+    "next_tab": "下一个标签页",
+    "previous_tab": "上一个标签页",
+    "zoom_pane": "切换窗格最大化"
   }
 }

@@ -33,6 +33,8 @@ mod file_preview;
 pub mod http;
 pub mod math_view;
 mod molecule_view;
+#[cfg(target_os = "macos")]
+mod native_menu;
 pub mod network_settings;
 pub mod prelude;
 mod scientific_render;
@@ -176,6 +178,8 @@ fn init(cx: &mut App) {
     let settings = config::Settings::load(theme::effective_theme_name(cx));
     gpui_component::set_locale(settings.ui_language.gpui_component_locale());
     cx.set_global(settings);
+    #[cfg(target_os = "macos")]
+    native_menu::init(cx);
     toast::init(cx);
 }
 
