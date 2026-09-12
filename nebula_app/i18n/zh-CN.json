@@ -6,6 +6,13 @@
     "en_us": "English"
   },
   "settings": {
+    "startup": {
+      "launch_at_login": "登录时自启动",
+      "launch_at_login_help": "登录 Windows 后启动 Pebrel，与安装器使用同一个启动快捷方式。",
+      "silent_start": "静默启动",
+      "silent_start_help": "启动后在后台运行，不显示窗口。开启时会同时启用系统托盘，点击托盘图标可重新打开窗口。托盘启用时生效，显式打开目录时除外。",
+      "save_failed": "无法更改启动设置：{error}"
+    },
     "sidebar": {
       "application": "应用",
       "appearance": "外观",

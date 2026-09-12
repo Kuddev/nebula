@@ -88,6 +88,7 @@ pub struct SettingsPane {
     pub(super) focus_handle: FocusHandle,
     /// 渲染与写盘的单一事实源；每次 persist 后整体重载。
     pub(super) runtime: RuntimeSettings,
+    launch_at_login: bool,
     /// 当前分区（`SECTIONS` 下标）；默认落在应用主页。
     active_section: usize,
     appearance_picker: Option<appearance_picker::AppearancePicker>,
@@ -298,6 +299,33 @@ impl SettingsPane {
         }
         if key == "background_image_cover_chrome" {
             self.request_cover_chrome(value, window, cx);
+            return;
+        }
+        if key == "launch_at_login" || key == "silent_start" {
+            let result = if key == "launch_at_login" {
+                crate::platform::startup::set_launch_at_login(value).map(|()| {
+                    self.launch_at_login = value;
+                })
+            } else {
+                let mut updates = vec![(key, (value as u8).to_string())];
+                if value {
+                    updates.push(("tray", "1".to_owned()));
+                }
+                self.try_persist(&updates, cx)
+            };
+            if let Err(error) = result {
+                let language = crate::gpui_shell::config::ui_language(cx);
+                super::toast::toast(
+                    window,
+                    cx,
+                    super::toast::ToastKind::Warning,
+                    language.format(
+                        crate::i18n::Message::SettingsStartupSaveFailed,
+                        &[("error", &error.to_string())],
+                    ),
+                );
+            }
+            cx.notify();
             return;
         }
         if key == "ai_toasts" {
@@ -1120,6 +1148,24 @@ impl SettingsPane {
         // `platform::capabilities` 的说明）。
         let caps = crate::platform::CAPABILITIES;
         self.group(language.pick("会话生命周期", "Session lifecycle"), cx)
+            .when(caps.launch_at_login, |group| {
+                group.child(self.switch_row(
+                    "launch_at_login",
+                    language.text(crate::i18n::Message::SettingsStartupLaunchAtLogin),
+                    language.text(crate::i18n::Message::SettingsStartupLaunchAtLoginHelp),
+                    self.launch_at_login,
+                    cx,
+                ))
+            })
+            .when(caps.hide_window_on_close, |group| {
+                group.child(self.switch_row(
+                    "silent_start",
+                    language.text(crate::i18n::Message::SettingsStartupSilentStart),
+                    language.text(crate::i18n::Message::SettingsStartupSilentStartHelp),
+                    self.runtime.silent_start,
+                    cx,
+                ))
+            })
             .when(caps.hide_window_on_close, |group| {
                 group.child(self.switch_row(
                     "keep_session",

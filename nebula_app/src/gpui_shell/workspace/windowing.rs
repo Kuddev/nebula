@@ -375,7 +375,14 @@ fn open_workspace_window(
     role: WindowRole,
 ) -> gpui::Result<(u64, Entity<NebulaWorkspace>)> {
     let (runtime_window_id, runtime_hub) = allocate_window(cx);
-    let options = workspace_window_options(cx, focus, role);
+    let start_hidden = shell_events.is_some()
+        && matches!(startup, WorkspaceStartup::RestoreOrDefault)
+        && crate::platform::startup::start_hidden(&nebula_settings::RuntimeSettings::load());
+    let mut options = workspace_window_options(cx, focus, role);
+    if start_hidden {
+        options.show = false;
+        options.focus = false;
+    }
     let workspace_slot = Rc::new(RefCell::new(None));
     let hwnd_slot = Rc::new(RefCell::new(0isize));
     let workspace_out = workspace_slot.clone();
@@ -397,6 +404,7 @@ fn open_workspace_window(
                 cx,
             )
         });
+        workspace.update(cx, |workspace, _| workspace.window_hidden = start_hidden);
         if runtime_window_id == 1
             && let Ok(path) = std::env::var("NEBULA_GPUI_OPEN_DOC")
             && !path.is_empty()

@@ -146,7 +146,11 @@ pub fn run_shell(initial_cwd: Option<std::path::PathBuf>) {
             #[cfg(windows)]
             crate::ai_hook::spawn_config_guard();
             init(cx);
-            cx.activate(true);
+            if initial_cwd.is_some()
+                || !crate::platform::startup::start_hidden(&nebula_settings::RuntimeSettings::load())
+            {
+                cx.activate(true);
+            }
             open_main_window(cx, ai_events, shell_rx, runtime_hub, initial_cwd);
         });
     crate::tray::shutdown();

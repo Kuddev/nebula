@@ -6,6 +6,13 @@
     "en_us": "English"
   },
   "settings": {
+    "startup": {
+      "launch_at_login": "Start at login",
+      "launch_at_login_help": "Start Pebrel when you sign in to Windows. Uses the same startup shortcut as the installer.",
+      "silent_start": "Start silently",
+      "silent_start_help": "Start in the background without showing a window. Enables the system tray; click its icon to reopen. Applies while the tray is enabled, except when opening a directory explicitly.",
+      "save_failed": "Could not change startup settings: {error}"
+    },
     "sidebar": {
       "application": "Application",
       "appearance": "Appearance",
