@@ -216,7 +216,9 @@ mod tab_rename_paste_tests {
     }
 
     #[gpui::test]
-    fn focused_tab_rename_ctrl_v_reaches_input_without_pasting_terminal(cx: &mut TestAppContext) {
+    fn focused_tab_rename_paste_shortcut_reaches_input_without_pasting_terminal(
+        cx: &mut TestAppContext,
+    ) {
         cx.update(|cx| {
             gpui_component::init(cx);
             super::init(cx);
@@ -242,7 +244,11 @@ mod tab_rename_paste_tests {
             window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
         });
 
-        cx.simulate_keystrokes("ctrl-v");
+        let paste_shortcut = match crate::platform::Platform::current() {
+            crate::platform::Platform::MacOS => "cmd-v",
+            _ => "ctrl-v",
+        };
+        cx.simulate_keystrokes(paste_shortcut);
 
         let (value, workspace_paste_actions, terminal_pastes) = probe.read_with(cx, |probe, cx| {
             (
@@ -251,7 +257,7 @@ mod tab_rename_paste_tests {
                 probe.terminal_pastes,
             )
         });
-        assert_eq!(value, "renamed-tab", "Ctrl+V 必须替换重命名框当前选区");
+        assert_eq!(value, "renamed-tab", "平台粘贴快捷键必须替换重命名框当前选区");
         assert_eq!(workspace_paste_actions, 0, "输入框上下文不得命中终端粘贴动作");
         assert_eq!(terminal_pastes, 0, "重命名框聚焦时不得向背后的终端粘贴");
     }
