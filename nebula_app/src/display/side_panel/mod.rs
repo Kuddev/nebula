@@ -25,12 +25,14 @@ use unicode_width::UnicodeWidthChar;
 mod enumerate;
 mod gitignore;
 mod icons;
+mod notice;
 #[cfg(feature = "legacy-shell")]
 mod render;
 mod search;
 #[cfg(test)]
 mod tests;
 mod vcs;
+pub(crate) use notice::PanelNotice;
 
 // 子模块的项一律 `pub(crate)`：本 crate 是 bin，没有下游用户，所以拆分不必
 // 把内部实现抬到 `pub`。glob 转发让 `display::side_panel::X` 这层路径不变。
@@ -395,7 +397,7 @@ pub struct SidePanel {
     /// `custom_root` 互斥，且不改变终端实际 cwd / Git 跟随位置。
     custom_wsl_root: Option<crate::shell_detect::WslCwd>,
     /// Visible feedback for an invalid/disappeared custom root.
-    root_notice: Option<String>,
+    root_notice: Option<PanelNotice>,
     /// Flattened visible tree rows for the Files view.
     rows: Vec<FileRow>,
     /// Last unfiltered tree snapshot. Search results replace `rows`, but
@@ -448,7 +450,7 @@ pub struct SidePanel {
     /// Set by the worker when it finishes — `sync` folds it into a refresh.
     op_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Last operation's error (empty = success), shown on the summary line.
-    op_error: std::sync::Arc<std::sync::Mutex<String>>,
+    op_error: std::sync::Arc<std::sync::Mutex<PanelNotice>>,
     /// A snapshot worker (fs walk + git subprocesses) is in flight. Guards
     /// against stacking workers; a refresh requested meanwhile re-arms
     /// `needs_refresh` and runs after this one lands.
@@ -617,7 +619,7 @@ impl SidePanel {
         let custom_invalidated = self.custom_root.as_ref().is_some_and(|root| !root.is_dir());
         if custom_invalidated {
             self.custom_root = None;
-            self.root_notice = Some("所选目录不可用，已跟随当前目录".to_owned());
+            self.root_notice = Some(PanelNotice::FollowingDirectory);
         }
         let next_root = self
             .custom_root
@@ -718,7 +720,7 @@ impl SidePanel {
     /// belongs to one window and this field is deliberately never serialized.
     pub fn set_custom_root(&mut self, root: PathBuf) -> bool {
         if !root.is_dir() {
-            self.root_notice = Some("所选目录不可用".to_owned());
+            self.root_notice = Some(PanelNotice::DirectoryUnavailable);
             return false;
         }
         let changed = self.custom_root.as_ref() != Some(&root) || self.root.as_ref() != Some(&root);
@@ -826,8 +828,12 @@ impl SidePanel {
         self.scroll = 0;
     }
 
-    pub fn root_notice(&self) -> Option<&str> {
-        self.root_notice.as_deref()
+    pub fn root_notice(&self) -> Option<String> {
+        self.localized_root_notice(crate::i18n::UiLanguage::ZhCn)
+    }
+
+    pub fn localized_root_notice(&self, language: crate::i18n::UiLanguage) -> Option<String> {
+        self.root_notice.as_ref().map(|notice| notice.text(language))
     }
 
     /// Only real Git file rows are interactive. Section headers and the blank
@@ -854,8 +860,8 @@ impl SidePanel {
     }
 
     /// 面板顶部的一句话提示（复用根目录不可用的同一条 UI）。
-    pub fn set_notice(&mut self, message: String) {
-        self.root_notice = Some(message);
+    pub fn set_notice(&mut self, message: impl Into<PanelNotice>) {
+        self.root_notice = Some(message.into());
     }
 
     fn current_index_root(&self) -> Option<FileIndexRoot> {

@@ -143,7 +143,12 @@ mod tests {
         assert!(panel.sync(Some(cwd.clone())));
         assert!(!panel.custom_root_active());
         assert_eq!(panel.root(), Some(cwd.as_path()));
-        assert_eq!(panel.root_notice(), Some("所选目录不可用，已跟随当前目录"));
+        assert_eq!(panel.root_notice().as_deref(), Some("所选目录不可用，已跟随当前目录"));
+
+        assert_eq!(
+            panel.localized_root_notice(crate::i18n::UiLanguage::EnUs).as_deref(),
+            Some("The selected directory is unavailable; following the current directory")
+        );
 
         panel.wait_snapshot();
         panel.file_index.release_for_test();
@@ -165,7 +170,7 @@ mod tests {
         assert!(panel.sync(Some(root.clone())));
         assert!(!panel.custom_root_active());
         assert_eq!(panel.root(), Some(root.as_path()));
-        assert_eq!(panel.root_notice(), Some("所选目录不可用，已跟随当前目录"));
+        assert_eq!(panel.root_notice().as_deref(), Some("所选目录不可用，已跟随当前目录"));
     }
 
     #[test]

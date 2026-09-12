@@ -252,11 +252,15 @@ impl SidePanel {
 
     /// Last mutation's error, if any (cleared by the next successful op).
     pub fn op_error(&self) -> Option<String> {
-        let e = self.op_error.lock().ok()?;
-        (!e.is_empty()).then(|| e.clone())
+        self.localized_op_error(crate::i18n::UiLanguage::ZhCn)
     }
 
-    fn set_op_error(&mut self, message: impl Into<String>) {
+    pub fn localized_op_error(&self, language: crate::i18n::UiLanguage) -> Option<String> {
+        let text = self.op_error.lock().ok()?.text(language);
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn set_op_error(&mut self, message: impl Into<PanelNotice>) {
         if let Ok(mut error) = self.op_error.lock() {
             *error = message.into();
         }
@@ -274,7 +278,7 @@ impl SidePanel {
         let done = self.op_done.clone();
         let error = self.op_error.clone();
         if let Ok(mut message) = error.lock() {
-            message.clear();
+            *message = PanelNotice::default();
         }
         let display_name = program.display().to_string();
         let spawn_result =
@@ -287,16 +291,16 @@ impl SidePanel {
                     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
                 }
                 let msg = match cmd.output() {
-                    Ok(out) if out.status.success() => String::new(),
+                    Ok(out) if out.status.success() => PanelNotice::default(),
                     Ok(out) => {
                         let err = String::from_utf8_lossy(&out.stderr);
                         // First meaningful line is enough for a status strip.
                         err.lines()
                             .find(|l| !l.trim().is_empty())
-                            .unwrap_or(&format!("{display_name} 失败"))
-                            .to_string()
+                            .map(|line| PanelNotice::Raw(line.to_owned()))
+                            .unwrap_or_else(|| PanelNotice::CommandFailed(display_name.clone()))
                     },
-                    Err(e) => format!("{display_name}: {e}"),
+                    Err(e) => PanelNotice::Raw(format!("{display_name}: {e}")),
                 };
                 if let Ok(mut slot) = error.lock() {
                     *slot = msg;
@@ -306,7 +310,7 @@ impl SidePanel {
             });
         if let Err(spawn_error) = spawn_result {
             self.op_running.store(false, Ordering::Relaxed);
-            self.set_op_error(format!("无法启动版本控制任务: {spawn_error}"));
+            self.set_op_error(PanelNotice::TaskStartFailed(spawn_error.to_string()));
         }
     }
 
