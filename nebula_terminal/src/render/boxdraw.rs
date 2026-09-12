@@ -7,8 +7,8 @@
 //! 且任何渲染后端都免费继承同一套字形。
 //!
 //! 坐标系：单元格局部、逻辑像素、y 向下。内部先换算到设备像素做整数
-//! 吸附（与旧渲染器同规则），出口再除回 scale——这是笔画清晰、跨行列
-//! 连续的关键。与旧实现的两点已知差异：
+//! 吸附，直线和圆角共享笔画边界规则，出口再除回 scale——这是笔画清晰、
+//! 跨行列连续的关键。与旧实现的另外两点已知差异：
 //! - Powerline 三角/箭头在窄单元格下不再回退字体，而是在右缘截平
 //!   （几何裁剪天然优雅，无需 None 逃逸路径）；
 //! - ░▒▓ 以 alpha 表达浓度（64/128/192 ÷ 255，与旧像素灰度一致）。
@@ -61,8 +61,13 @@ pub fn primitives(c: char, width: f32, height: f32, scale: f32) -> Option<Vec<Pr
     Some(geom.finish(scale))
 }
 
-/// 设备像素坐标下的图元累加器：镜像旧 `Canvas` 的直线/矩形语义
-/// （整数截断吸附、画布边缘裁剪），但输出几何而不是像素。
+/// 未裁剪的笔画边界。直线和圆角必须对同一半像素作相同的取整，
+/// 否则单元格尺寸与笔画宽度的奇偶组合会让接头错开一个设备像素。
+fn stroke_bounds(center: f32, stroke: f32) -> (f32, f32) {
+    ((center - stroke / 2.0).round(), (center + stroke / 2.0).round())
+}
+
+/// 设备像素坐标下的图元累加器：像素吸附与画布边缘裁剪后输出几何。
 struct Geom {
     w: f32,
     h: f32,
@@ -85,17 +90,15 @@ impl Geom {
         self.h / 2.0
     }
 
-    /// 横线在 `y` 处、笔画宽 `stroke` 的上下界（整数吸附，同旧 Canvas）。
+    /// 横线在 `y` 处、笔画宽 `stroke` 的上下界（整数吸附后裁剪）。
     fn h_line_bounds(&self, y: f32, stroke: f32) -> (f32, f32) {
-        let top = ((y - stroke / 2.0) as i32).max(0) as f32;
-        let bottom = ((y + stroke / 2.0) as i32).min(self.h as i32) as f32;
-        (top, bottom)
+        let (top, bottom) = stroke_bounds(y, stroke);
+        (top.max(0.0), bottom.min(self.h))
     }
 
     fn v_line_bounds(&self, x: f32, stroke: f32) -> (f32, f32) {
-        let left = ((x - stroke / 2.0) as i32).max(0) as f32;
-        let right = ((x + stroke / 2.0) as i32).min(self.w as i32) as f32;
-        (left, right)
+        let (left, right) = stroke_bounds(x, stroke);
+        (left.max(0.0), right.min(self.w))
     }
 
     /// 实心矩形，裁剪到单元格（旧 Canvas 在画布边缘截断的对应物）。
@@ -446,8 +449,8 @@ fn draw(c: char, g: &mut Geom) {
             // 比相邻直线偏半个像素。
             let t = stroke;
             let half = t / 2.0;
-            let snap_beg = |base: f32| (base - half).round() + half;
-            let snap_end = |base: f32| (base + half).round() - half;
+            let snap_beg = |base: f32| stroke_bounds(base, t).0 + half;
+            let snap_end = |base: f32| stroke_bounds(base, t).1 - half;
             let (left, top, right, bottom, start_angle, end_angle) = match c {
                 '\u{256d}' => (
                     snap_beg(w * 0.5),
@@ -834,8 +837,8 @@ mod tests {
         let max_x = rects.iter().map(|(r, _)| r.x + r.w).fold(f32::MIN, f32::max);
         assert_eq!((min_x, max_x), (0.0, W));
         for (rect, alpha) in &rects {
-            // y_center = 10，stroke 1：(10 - 0.5) as i32 = 9，高 1。
-            assert_eq!((rect.y, rect.h, *alpha), (9.0, 1.0, 1.0));
+            // y_center = 10，stroke 1：round(10 - 0.5) = 10，高 1。
+            assert_eq!((rect.y, rect.h, *alpha), (10.0, 1.0, 1.0));
         }
     }
 
@@ -919,6 +922,69 @@ mod tests {
                 if let Primitive::Rect { rect, .. } = prim {
                     for v in [rect.y * scale, (rect.y + rect.h) * scale] {
                         assert!((v - v.round()).abs() < 1e-4, "{c:?} 的 y 边界 {v} 未吸附设备像素");
+                    }
+                }
+            }
+        }
+    }
+
+    fn covers_pixel(primitives: &[Primitive], point: [f32; 2]) -> bool {
+        primitives.iter().any(|primitive| match primitive {
+            Primitive::Rect { rect, .. } => {
+                point[0] >= rect.x
+                    && point[0] < rect.x + rect.w
+                    && point[1] >= rect.y
+                    && point[1] < rect.y + rect.h
+            },
+            Primitive::Poly { points } => {
+                let mut positive = false;
+                let mut negative = false;
+                for (a, b) in points.iter().zip(points.iter().cycle().skip(1)) {
+                    let cross =
+                        (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0]);
+                    positive |= cross > 1e-5;
+                    negative |= cross < -1e-5;
+                }
+                !(positive && negative)
+            },
+        })
+    }
+
+    #[test]
+    fn rounded_corners_join_straight_lines_at_every_device_pixel() {
+        for width in [7, 8, 9, 10, 13, 14, 15, 16, 20, 21, 24] {
+            for height in [14, 15, 20, 21, 32, 33] {
+                for scale in [1.0, 1.25, 1.5, 2.0] {
+                    let glyph = |c| {
+                        primitives(c, width as f32 / scale, height as f32 / scale, scale).unwrap()
+                    };
+                    let horizontal = glyph('─');
+                    let vertical = glyph('│');
+                    for (c, right, down) in [
+                        ('╭', true, true),
+                        ('╮', false, true),
+                        ('╯', false, false),
+                        ('╰', true, false),
+                    ] {
+                        let corner = glyph(c);
+                        let x = if right { width as f32 - 0.5 } else { 0.5 } / scale;
+                        let y = if down { height as f32 - 0.5 } else { 0.5 } / scale;
+                        for row in 0..height {
+                            let point = [x, (row as f32 + 0.5) / scale];
+                            assert_eq!(
+                                covers_pixel(&corner, point),
+                                covers_pixel(&horizontal, point),
+                                "{c} horizontal seam at row {row}, {width}x{height}, scale {scale}",
+                            );
+                        }
+                        for column in 0..width {
+                            let point = [(column as f32 + 0.5) / scale, y];
+                            assert_eq!(
+                                covers_pixel(&corner, point),
+                                covers_pixel(&vertical, point),
+                                "{c} vertical seam at column {column}, {width}x{height}, scale {scale}",
+                            );
+                        }
                     }
                 }
             }

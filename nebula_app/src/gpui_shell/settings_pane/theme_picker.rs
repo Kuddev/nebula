@@ -1,7 +1,7 @@
 use super::appearance_picker::{AppearanceColors, AppearanceSelection, picker_columns};
 use super::*;
 
-pub(super) const THEME_ORDER: [ThemeName; 13] = ThemeName::BUILTIN;
+pub(super) const THEME_ORDER: [ThemeName; ThemeName::BUILTIN.len()] = ThemeName::BUILTIN;
 
 fn theme_foreground(name: ThemeName) -> [u8; 3] {
     let theme = name.term_theme();

@@ -416,8 +416,7 @@ impl SettingsPane {
         // 成一次重绘，所以每帧调是安全的。
         cx.refresh_windows();
         cx.notify();
-        // 用户拖动后 opacity 已是显式选择；同时把旧 blur=1 规范成枚举值，
-        // 否则共享迁移层会再次把 blur=1 + opacity=1.00 解读成默认 0.82。
+        // 保存显式不透明度，并把旧的模糊布尔值规范为当前枚举值。
         self.schedule_slider_persist(
             vec![
                 ("opacity", format!("{opacity:.2}")),

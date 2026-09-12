@@ -1,7 +1,7 @@
 use super::*;
 
 /// 主题下拉（展示名 = 持久化名，与旧壳一致）。
-pub(super) const THEME_VALUES: [&str; 13] = ThemeName::BUILTIN_NAMES;
+pub(super) const THEME_VALUES: [&str; ThemeName::BUILTIN.len()] = ThemeName::BUILTIN_NAMES;
 
 pub(super) const REPOSITORY_URL: &str = "https://github.com/Kuddev/pebrel";
 pub(super) const BUG_REPORT_TEMPLATE: &str = "bug_report.yml";

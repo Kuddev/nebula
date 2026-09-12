@@ -24,12 +24,14 @@ fn appearance_theme_catalog_matches_the_approved_gallery_order() {
             "Linen",
             "Catppuccin Mocha",
             "Catppuccin Latte",
+            "Catppuccin Frappé",
+            "Catppuccin Macchiato",
             "Glass Light",
             "Glass Dark"
         ]
     );
     assert_eq!(themes.choices(1).len(), 8);
-    assert_eq!(themes.choices(2).len(), 5);
+    assert_eq!(themes.choices(2).len(), 7);
     for choice in themes.choices(0) {
         assert_ne!(themes.choices(1).contains(&choice), themes.choices(2).contains(&choice));
     }
@@ -48,15 +50,43 @@ fn appearance_icon_filters_cover_each_catalog_entry_once() {
 #[test]
 fn appearance_theme_confirmation_preserves_icon_and_other_settings() {
     let initial = "theme=Nebula\nfollow_system_theme=1\napp_icon=graphite-violet\nbackground=#111111\nfont_size=17\nshell=cmd\n";
-    let updates = AppearanceSelection::Theme(ThemeName::LinenLight).updates();
-    let updated = nebula_settings::apply_updates(initial, &updates);
-    let runtime = RuntimeSettings::from_raw(&nebula_settings::RawSettings::from_text(&updated));
-    assert_eq!(runtime.theme, ThemeName::LinenLight);
-    assert!(!runtime.follow_system_theme);
-    assert_eq!(runtime.background, Some(ThemeName::LinenLight.term_theme().background));
-    assert_eq!(runtime.app_icon, AppIconName::GraphiteViolet);
-    assert!(updated.contains("font_size=17"));
-    assert!(updated.contains("shell=cmd"));
+    for theme in
+        [ThemeName::LinenLight, ThemeName::CatppuccinFrappe, ThemeName::CatppuccinMacchiato]
+    {
+        let updates = AppearanceSelection::Theme(theme).updates();
+        let updated = nebula_settings::apply_updates(initial, &updates);
+        let runtime = RuntimeSettings::from_raw(&nebula_settings::RawSettings::from_text(&updated));
+        assert_eq!(runtime.theme, theme);
+        assert!(!runtime.follow_system_theme);
+        assert_eq!(runtime.background, Some(theme.term_theme().background));
+        assert_eq!(runtime.app_icon, AppIconName::GraphiteViolet);
+        assert!(updated.contains("font_size=17"));
+        assert!(updated.contains("shell=cmd"));
+    }
+}
+
+#[test]
+fn catppuccin_system_appearance_restores_the_saved_dark_flavor() {
+    use crate::gpui_shell::theme::resolve_theme_name;
+
+    for theme in
+        [ThemeName::CatppuccinMocha, ThemeName::CatppuccinFrappe, ThemeName::CatppuccinMacchiato]
+    {
+        let initial = format!("theme={}\nfollow_system_theme=1\n", theme.prompt_name());
+        let runtime = RuntimeSettings::from_raw(&nebula_settings::RawSettings::from_text(&initial));
+        for is_light in [false, true, false] {
+            assert_eq!(
+                resolve_theme_name(runtime.theme, runtime.follow_system_theme, is_light),
+                if is_light { ThemeName::CatppuccinLatte } else { theme }
+            );
+            assert_eq!(runtime.theme, theme);
+        }
+        assert_eq!(resolve_theme_name(runtime.theme, false, true), theme);
+    }
+    assert_eq!(
+        resolve_theme_name(ThemeName::CatppuccinLatte, true, false),
+        ThemeName::CatppuccinMocha
+    );
 }
 
 #[test]

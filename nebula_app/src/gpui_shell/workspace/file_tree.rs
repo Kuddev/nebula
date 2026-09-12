@@ -32,9 +32,8 @@ pub(super) const DRAWER_TEXT_INSET: f32 = 4.0;
 
 /// 文件树右键菜单的宿主：必须挂在 workspace 根上，不能当抽屉行的 child。
 ///
-/// `ContextMenuExt` 会把 `deferred(anchored(PopupMenu))` 挂回触发行；行在带
-/// `shadow` 的抽屉里面。菜单翻到抽屉左缘时，抽屉投影会垫在菜单周围，看起来
-/// 比侧栏 Tab 右键厚一截。
+/// `ContextMenuExt` 会把 `deferred(anchored(PopupMenu))` 挂回触发行；提升到
+/// workspace 后，菜单不受抽屉自身的裁剪与推出动画影响。
 pub(super) struct FileTreeContextMenu {
     menu: Entity<PopupMenu>,
     position: Point<Pixels>,
@@ -447,10 +446,6 @@ impl NebulaWorkspace {
             .flex_shrink_0()
             .p_2()
             .gap_2()
-            // Flat presets share the tab sidebar surface; the workspace paints the seam.
-            .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
-            .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
-            .bg(theme.sidebar)
             .occlude()
             .child(view_switch)
             .child(

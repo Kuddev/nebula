@@ -1,4 +1,39 @@
-//! Startup compatibility for platform environment variable names.
+//! Startup aliases and platform compatibility for local terminal environments.
+
+/// Refresh local pane environments before adding identity and other pane overrides.
+pub(crate) fn prepare_local_pty(options: &mut nebula_terminal::tty::Options) {
+    #[cfg(windows)]
+    {
+        if let Err(error) = nebula_terminal::tty::refresh_environment(options) {
+            log::warn!("Could not refresh the Windows environment for a new pane: {error}");
+        }
+        let inherited_override =
+            !options.env_is_complete && std::env::var_os(GROK_LEGACY_CONSOLE).is_some();
+        apply_windows_terminal_defaults(options, inherited_override);
+    }
+    #[cfg(not(windows))]
+    let _ = options;
+}
+
+#[cfg(windows)]
+const GROK_LEGACY_CONSOLE: &str = "GROK_FORCE_LEGACY_CONSOLE";
+
+#[cfg(windows)]
+fn apply_windows_terminal_defaults(
+    options: &mut nebula_terminal::tty::Options,
+    inherited_override: bool,
+) {
+    // Grok 1.0.25 treats unknown Windows terminal names as legacy consoles and
+    // omits its Braille logo. Keep our real identity and use its capability override.
+    // Remove this default when Grok recognizes Pebrel's terminal capabilities.
+    // A complete refreshed environment is authoritative, including deleted keys.
+    if (!options.env_is_complete && inherited_override)
+        || options.env.keys().any(|name| name.eq_ignore_ascii_case(GROK_LEGACY_CONSOLE))
+    {
+        return;
+    }
+    options.env.insert(GROK_LEGACY_CONSOLE.to_owned(), "0".to_owned());
+}
 
 /// Must run before any threads start: environment mutation is process-global.
 pub unsafe fn import_environment_aliases() {
@@ -48,6 +83,92 @@ fn configuration_override(suffix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn local_terminal_defaults_enable_grok_unicode_without_changing_identity() {
+        let mut options = nebula_terminal::tty::Options {
+            env: [("TERM_PROGRAM", "pebrel"), ("WSLENV", "KEEP/p")]
+                .into_iter()
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+            env_is_complete: true,
+            ..Default::default()
+        };
+        super::apply_windows_terminal_defaults(&mut options, false);
+        assert_eq!(options.env[super::GROK_LEGACY_CONSOLE], "0");
+        assert_eq!(options.env["TERM_PROGRAM"], "pebrel");
+        assert_eq!(options.env["WSLENV"], "KEEP/p");
+        assert!(!options.env.contains_key("WT_SESSION"));
+        let once = options.clone();
+        super::apply_windows_terminal_defaults(&mut options, false);
+        assert_eq!(options, once);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_terminal_defaults_preserve_explicit_grok_overrides_case_insensitively() {
+        for name in [super::GROK_LEGACY_CONSOLE, "grok_force_legacy_console"] {
+            for value in ["1", "true", "0", "false", ""] {
+                let mut options = nebula_terminal::tty::Options {
+                    env: [(name.to_owned(), value.to_owned())].into_iter().collect(),
+                    env_is_complete: true,
+                    ..Default::default()
+                };
+                let original = options.clone();
+                super::apply_windows_terminal_defaults(&mut options, false);
+                assert_eq!(options, original);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inherited_grok_override_only_applies_to_incomplete_environments() {
+        let mut options = nebula_terminal::tty::Options::default();
+        super::apply_windows_terminal_defaults(&mut options, true);
+        assert!(!options.env.contains_key(super::GROK_LEGACY_CONSOLE));
+
+        // A successful refresh can remove a stale value from the parent's registry
+        // snapshot. Do not resurrect it when the new complete environment omits it.
+        options.env_is_complete = true;
+        super::apply_windows_terminal_defaults(&mut options, true);
+        assert_eq!(options.env[super::GROK_LEGACY_CONSOLE], "0");
+
+        let mut fallback = nebula_terminal::tty::Options::default();
+        super::apply_windows_terminal_defaults(&mut fallback, false);
+        assert_eq!(fallback.env[super::GROK_LEGACY_CONSOLE], "0");
+        assert!(!fallback.env_is_complete);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn refreshed_local_terminal_preserves_the_pane_grok_override() {
+        let mut options = nebula_terminal::tty::Options {
+            env: [("grok_force_legacy_console".to_owned(), "1".to_owned())].into_iter().collect(),
+            ..Default::default()
+        };
+        super::prepare_local_pty(&mut options);
+        let overrides: Vec<_> = options
+            .env
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(super::GROK_LEGACY_CONSOLE))
+            .collect();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].1, "1");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn local_terminal_preparation_preserves_non_windows_environments() {
+        let mut options = nebula_terminal::tty::Options {
+            env: [("TERM_PROGRAM".to_owned(), "pebrel".to_owned())].into_iter().collect(),
+            ..Default::default()
+        };
+        let original = options.clone();
+        super::prepare_local_pty(&mut options);
+        assert_eq!(options, original);
+    }
+
     #[test]
     fn environment_aliases_preserve_legacy_inputs_and_prefer_explicit_pebrel_values() {
         let aliases = super::environment_aliases(

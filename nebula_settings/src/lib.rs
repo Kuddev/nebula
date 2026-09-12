@@ -206,6 +206,8 @@ pub enum ThemeName {
     MintDark,
     CatppuccinMocha,
     CatppuccinLatte,
+    CatppuccinFrappe,
+    CatppuccinMacchiato,
     GlassLight,
     GlassDark,
 }
@@ -228,6 +230,8 @@ impl ThemeName {
             "MintDark" => Self::MintDark,
             "CatppuccinMocha" => Self::CatppuccinMocha,
             "CatppuccinLatte" => Self::CatppuccinLatte,
+            "CatppuccinFrappe" => Self::CatppuccinFrappe,
+            "CatppuccinMacchiato" => Self::CatppuccinMacchiato,
             "GlassLight" => Self::GlassLight,
             "GlassDark" => Self::GlassDark,
 
@@ -252,6 +256,8 @@ impl ThemeName {
             Self::MintDark => "MintDark",
             Self::CatppuccinMocha => "CatppuccinMocha",
             Self::CatppuccinLatte => "CatppuccinLatte",
+            Self::CatppuccinFrappe => "CatppuccinFrappe",
+            Self::CatppuccinMacchiato => "CatppuccinMacchiato",
             Self::GlassLight => "GlassLight",
             Self::GlassDark => "GlassDark",
         }
@@ -268,6 +274,8 @@ impl ThemeName {
             | Self::MintDark
             | Self::CatppuccinMocha
             | Self::CatppuccinLatte
+            | Self::CatppuccinFrappe
+            | Self::CatppuccinMacchiato
             | Self::GlassLight
             | Self::GlassDark => themes::fresh_terminal(self),
             Self::Nebula => TermTheme {
@@ -832,8 +840,8 @@ impl BellModeName {
 /// - `Aero`：实时模糊窗口**后方的真实内容**，并叠加 Win32 深色玻璃色调。
 /// - `Acrylic`：实时模糊 + tint/噪点/饱和度，最贵。
 pub enum BlurModeName {
-    None,
     #[default]
+    None,
     Mica,
     MicaAlt,
     Aero,
@@ -1051,31 +1059,15 @@ pub const DEFAULT_PANE_CARD_GUTTER: f32 = 8.0;
 pub const MIN_PANE_CARD_GUTTER: f32 = 0.0;
 pub const MAX_PANE_CARD_GUTTER: f32 = 32.0;
 pub const MAX_PANE_CARD_DIVIDER: f32 = 4.0;
-/// 系统材质启用且用户未明确设置透明度时，让基础层适度透出。
-const SYSTEM_MATERIAL_OPACITY: f32 = 0.82;
-
 impl RuntimeSettings {
     pub fn load() -> Self {
         Self::from_raw(&RawSettings::load())
     }
 
     pub fn from_raw(raw: &RawSettings) -> Self {
-        let raw_blur = raw.value("blur");
-        let blur = raw_blur.and_then(BlurModeName::from_settings).unwrap_or_default();
-        let configured_opacity = raw.f32("opacity").map(|opacity| opacity.clamp(0.0, 1.0));
-        // 旧壳会把缺省值完整写成 `blur=1` + `opacity=1.00`。那不是用户主动
-        // 选择的实色覆盖，却会把迁移后的 Mica 完全盖住；只迁移这组旧记号，
-        // 新枚举值下显式设置的 1.00 仍保持全不透明。
-        let legacy_material_default = raw_blur.is_some_and(|value| {
-            matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
-        }) && configured_opacity == Some(1.0);
-        let material_default = matches!(blur, BlurModeName::Mica | BlurModeName::MicaAlt)
-            && (configured_opacity.is_none() || legacy_material_default);
-        let opacity = if material_default {
-            SYSTEM_MATERIAL_OPACITY
-        } else {
-            configured_opacity.unwrap_or(1.0)
-        };
+        let blur = raw.value("blur").and_then(BlurModeName::from_settings).unwrap_or_default();
+        // Theme colors are opaque by default. Material selection never lowers opacity.
+        let opacity = raw.f32("opacity").unwrap_or(1.0).clamp(0.0, 1.0);
 
         Self {
             language: raw
@@ -1410,8 +1402,8 @@ mod tests {
         assert!(settings.restore_session);
         assert!(settings.resume_ai);
         assert!(settings.tray);
-        assert_eq!(settings.blur, BlurModeName::Mica);
-        assert!((settings.opacity - SYSTEM_MATERIAL_OPACITY).abs() < 1e-6);
+        assert_eq!(settings.blur, BlurModeName::None);
+        assert_eq!(settings.opacity, 1.0);
         assert_eq!(settings.background, None);
         assert!(!settings.panel_resize);
         assert_eq!(settings.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
@@ -1499,21 +1491,19 @@ mod tests {
         assert_eq!(BlurModeName::from_settings("false"), Some(BlurModeName::None));
         assert_eq!(BlurModeName::from_settings("1"), Some(BlurModeName::Mica));
         assert_eq!(BlurModeName::from_settings("true"), Some(BlurModeName::Mica));
-        assert!(
-            (RuntimeSettings::from_raw(&RawSettings::from_text("blur=1\nopacity=1.00\n")).opacity
-                - SYSTEM_MATERIAL_OPACITY)
-                .abs()
-                < 1e-6
+        assert_eq!(
+            RuntimeSettings::from_raw(&RawSettings::from_text("blur=1\nopacity=1.00\n")).opacity,
+            1.0
         );
         assert_eq!(
             RuntimeSettings::from_raw(&RawSettings::from_text("blur=mica\nopacity=1.00\n")).opacity,
             1.0
         );
 
-        // 认不出的值回落到缺省档，而不是把窗口留在无模糊状态。
+        // 认不出的值回落到默认关闭，不主动启用系统材质。
         assert_eq!(
             RuntimeSettings::from_raw(&RawSettings::from_text("blur=frosted\n")).blur,
-            BlurModeName::Mica
+            BlurModeName::None
         );
         assert_eq!(
             RuntimeSettings::from_raw(&RawSettings::from_text("blur=acrylic\n")).blur,
@@ -1537,6 +1527,25 @@ mod tests {
         assert!(BlurModeName::MicaAlt.enabled());
         assert!(BlurModeName::Aero.enabled());
         assert!(BlurModeName::Acrylic.enabled());
+    }
+
+    #[test]
+    fn opacity_defaults_to_opaque_and_preserves_explicit_values_for_every_material() {
+        for blur in ["none", "mica", "mica-alt", "aero", "acrylic", "1", "true"] {
+            let raw = format!("blur={blur}\n");
+            let runtime = RuntimeSettings::from_raw(&RawSettings::from_text(&raw));
+            assert_eq!(runtime.opacity, 1.0, "{blur}");
+            assert_eq!(Some(runtime.blur), BlurModeName::from_settings(blur));
+            for opacity in [0.0, 0.65, 1.0] {
+                let raw = format!("blur={blur}\nopacity={opacity}\n");
+                let runtime = RuntimeSettings::from_raw(&RawSettings::from_text(&raw));
+                assert_eq!(runtime.opacity, opacity, "{raw}");
+            }
+        }
+        let invalid =
+            RuntimeSettings::from_raw(&RawSettings::from_text("blur=unknown\nopacity=invalid\n"));
+        assert_eq!(invalid.blur, BlurModeName::None);
+        assert_eq!(invalid.opacity, 1.0);
     }
 
     #[test]

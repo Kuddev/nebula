@@ -883,11 +883,7 @@ impl NebulaWorkspace {
             .flex_shrink_0()
             .p_2()
             .gap_2()
-            // 与文件树共用抽屉接缝合同（见 `render_file_tree`）：圆角只给左侧两角，
-            // 右缘贴窗口边框不倒角，四边无描边。
-            .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
-            .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
-            .bg(theme.sidebar)
+            // 与文件树共用父容器的壳色，不在内容层叠加背景或圆角。
             .occlude()
             .child(view_switch)
             // VCS 状态现在跟着侧栏定位走（`SidePanel::vcs_root`），所以必须在

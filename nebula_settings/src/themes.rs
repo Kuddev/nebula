@@ -13,7 +13,7 @@ pub struct FreshPalette {
 
 impl ThemeName {
     /// The only catalog of selectable built-ins. Retired identifiers remain readable.
-    pub const BUILTIN: [Self; 13] = [
+    pub const BUILTIN: [Self; 15] = [
         Self::BreezeLight,
         Self::BreezeDark,
         Self::MintLight,
@@ -25,12 +25,14 @@ impl ThemeName {
         Self::LinenLight,
         Self::CatppuccinMocha,
         Self::CatppuccinLatte,
+        Self::CatppuccinFrappe,
+        Self::CatppuccinMacchiato,
         Self::GlassLight,
         Self::GlassDark,
     ];
 
-    pub const BUILTIN_NAMES: [&'static str; 13] = {
-        let mut names = [""; 13];
+    pub const BUILTIN_NAMES: [&'static str; Self::BUILTIN.len()] = {
+        let mut names = [""; Self::BUILTIN.len()];
         let mut index = 0;
         while index < Self::BUILTIN.len() {
             names[index] = Self::BUILTIN[index].prompt_name();
@@ -292,6 +294,40 @@ impl ThemeName {
                 cyan: [0x17, 0x92, 0x99],
                 frame: [0x9c, 0xa0, 0xb0],
             },
+            // Catppuccin/palette (MIT): https://github.com/catppuccin/palette
+            // Base/Mantle surfaces, Text/Subtext 1 ink, Lavender accent.
+            Self::CatppuccinFrappe => ReviewedPalette {
+                shell: [0x29, 0x2c, 0x3c],
+                background: [0x30, 0x34, 0x46],
+                foreground: [0xc6, 0xd0, 0xf5],
+                muted: [0xb5, 0xbf, 0xe2],
+                accent: [0xba, 0xbb, 0xf1],
+                selected: [0x41, 0x45, 0x59, 255],
+                line: [0x51, 0x57, 0x6d, 255],
+                red: [0xe7, 0x82, 0x84],
+                green: [0xa6, 0xd1, 0x89],
+                yellow: [0xe5, 0xc8, 0x90],
+                blue: [0x8c, 0xaa, 0xee],
+                purple: [0xca, 0x9e, 0xe6],
+                cyan: [0x81, 0xc8, 0xbe],
+                frame: [0x73, 0x79, 0x94],
+            },
+            Self::CatppuccinMacchiato => ReviewedPalette {
+                shell: [0x1e, 0x20, 0x30],
+                background: [0x24, 0x27, 0x3a],
+                foreground: [0xca, 0xd3, 0xf5],
+                muted: [0xb8, 0xc0, 0xe0],
+                accent: [0xb7, 0xbd, 0xf8],
+                selected: [0x36, 0x3a, 0x4f, 255],
+                line: [0x49, 0x4d, 0x64, 255],
+                red: [0xed, 0x87, 0x96],
+                green: [0xa6, 0xda, 0x95],
+                yellow: [0xee, 0xd4, 0x9f],
+                blue: [0x8a, 0xad, 0xf4],
+                purple: [0xc6, 0xa0, 0xf6],
+                cyan: [0x8b, 0xd5, 0xca],
+                frame: [0x6e, 0x73, 0x8d],
+            },
             Self::GlassLight => ReviewedPalette {
                 shell: [0xe9, 0xec, 0xef],
                 background: [0xef, 0xf1, 0xf5],
@@ -339,6 +375,15 @@ pub(crate) fn fresh_terminal(name: ThemeName) -> TermTheme {
         ThemeName::CatppuccinLatte => [
             0x5c5f77, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xacb0be,
             0x6c6f85, 0xd20f39, 0x40a02b, 0xdf8e1d, 0x1e66f5, 0xea76cb, 0x179299, 0xbcc0cc,
+        ],
+        // Official ANSI 0–15, including the distinct bright colors (2026-09-12).
+        ThemeName::CatppuccinFrappe => [
+            0x51576d, 0xe78284, 0xa6d189, 0xe5c890, 0x8caaee, 0xf4b8e4, 0x81c8be, 0xa5adce,
+            0x626880, 0xe67172, 0x8ec772, 0xd9ba73, 0x7b9ef0, 0xf2a4db, 0x5abfb5, 0xb5bfe2,
+        ],
+        ThemeName::CatppuccinMacchiato => [
+            0x494d64, 0xed8796, 0xa6da95, 0xeed49f, 0x8aadf4, 0xf5bde6, 0x8bd5ca, 0xa5adcb,
+            0x5b6078, 0xec7486, 0x8ccf7f, 0xe1c682, 0x78a1f6, 0xf2a9dd, 0x63cbc0, 0xb8c0e0,
         ],
         ThemeName::GlassLight => [
             0x303030, 0xa31700, 0x0a7f3d, 0xaf551d, 0x006cd8, 0x583cac, 0x00798a, 0x494949,
@@ -393,6 +438,8 @@ mod tests {
             ThemeName::BreezeDark,
             ThemeName::MintLight,
             ThemeName::MintDark,
+            ThemeName::CatppuccinFrappe,
+            ThemeName::CatppuccinMacchiato,
         ] {
             assert_eq!(ThemeName::from_prompt_name(name.prompt_name()), Some(name));
             let palette = name.fresh_palette().unwrap();

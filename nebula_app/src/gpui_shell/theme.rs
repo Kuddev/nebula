@@ -84,12 +84,6 @@ pub(crate) fn theme_card_persist_updates(name: ThemeName) -> [(&'static str, Str
     ]
 }
 
-/// 当前生效主题的终端底色（给「跟随主题」取色器同步用，不是壳色）。
-pub(crate) fn theme_term_background(cx: &App) -> Hsla {
-    let c = chrome_theme(effective_theme_name(cx)).palette().term_bg;
-    to_hsla(c.r, c.g, c.b)
-}
-
 fn to_hsla(r: u8, g: u8, b: u8) -> Hsla {
     GpuiRgba { r: f32::from(r) / 255.0, g: f32::from(g) / 255.0, b: f32::from(b) / 255.0, a: 1.0 }
         .into()
@@ -195,15 +189,14 @@ fn shell_color(theme: NebulaTheme) -> Hsla {
 /// 与「铺满到窗口边」由此成为同一条渲染路径的两组取值，不是两套代码、更不是
 /// 两套页面。
 ///
-/// 取值分两层：主题自带的 [`nebula_settings::ThemeCardGeometry`] 打底，用户在
-/// settings.txt 里的显式值覆盖它。于是切主题就换形态，而手调过的人不会被主题
-/// 夺回控制权。
+/// 主题默认叠加用户配置后，按半径确定形态：直角铺满、圆角留缝。
+/// 只调整生效值，不改写保存的卡缝、投影和竖线；切回对应形态时恢复这些配置。
 ///
 /// 卡内壁到网格的内间距**不在这里**：那是 `SizeInfo` 的 `padding.x/y` 与
 /// `padding_right()`（`config/window.rs`），本来就可配。两处都给会双份叠加。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaneCardStyle {
-    /// 卡圆角。0 与 `margin` 全零搭配即铺满形态。
+    /// 卡圆角。0 时外间距和投影同时停用，终端铺满可用区域。
     pub radius: f32,
     /// 卡与周围 chrome 的外间距，**逐边给**——不能假设对称，理由见
     /// [`paint_shell_around_card`]。GPUI 侧它落在父容器的 padding 上（卡是子
@@ -211,7 +204,7 @@ pub struct PaneCardStyle {
     pub margin: gpui::Edges<f32>,
     /// 卡投影。
     pub shadow: bool,
-    /// 侧栏与终端之间的竖线宽度，0 = 不画。
+    /// 侧栏与终端之间生效的竖线宽度；圆角卡不画，直角卡沿用配置。
     pub divider: f32,
 }
 
@@ -229,14 +222,21 @@ impl PaneCardStyle {
     /// settings 就会在跟随系统主题时和 chrome 分家。
     pub fn resolve(theme: ThemeName, runtime: &nebula_settings::RuntimeSettings) -> Self {
         let geometry = theme.card_geometry();
-        let gutter = runtime.pane_card_gutter.unwrap_or(geometry.gutter);
+        let radius = runtime.pane_card_radius.unwrap_or(geometry.radius);
+        let rounded = radius > 0.0;
+        let gutter =
+            if rounded { runtime.pane_card_gutter.unwrap_or(geometry.gutter) } else { 0.0 };
         Self {
-            radius: runtime.pane_card_radius.unwrap_or(geometry.radius),
+            radius,
             // 上边恒零：08-26 裁定侧栏 / 终端卡 / 右侧抽屉三列顶边都贴 chrome
             // 下沿。可配的那个数只作用于左 / 右 / 下三边。
             margin: gpui::Edges { top: 0.0, right: gutter, bottom: gutter, left: gutter },
-            shadow: runtime.pane_card_shadow.unwrap_or(geometry.shadow),
-            divider: runtime.pane_card_divider.unwrap_or(geometry.divider),
+            shadow: rounded && runtime.pane_card_shadow.unwrap_or(geometry.shadow),
+            divider: if rounded {
+                0.0
+            } else {
+                runtime.pane_card_divider.unwrap_or(geometry.divider)
+            },
         }
     }
 
@@ -248,20 +248,8 @@ impl PaneCardStyle {
     }
 }
 
-/// A flush pane extends its background through the titlebar; explicit custom
-/// gutters/radii retain a surrounding shell instead.
-pub(crate) fn pane_is_flush(cx: &App) -> bool {
-    let card = PaneCardStyle::current(cx);
-    card.radius == 0.0
-        && card.margin.top == 0.0
-        && card.margin.right == 0.0
-        && card.margin.bottom == 0.0
-        && card.margin.left == 0.0
-}
-
-/// 侧栏与终端之间那条竖线的颜色。从壳色推导而不新增 palette 色位：9 个主题
-/// 一个都不用改，而且亮暗自动反向——浅色主题压暗、深色主题提亮，两边都能
-/// 读作一条分界而不是一道亮缝。
+/// 侧栏与正文的弱分界直接使用 HTML 对应的 `line` RGBA 令牌。
+/// 它与外窗描边、强调色分别取值，不额外合成一套灰色。
 pub fn card_divider_color(cx: &App) -> Hsla {
     wash(chrome_theme_resolved(cx).skin().hairline)
 }
@@ -709,8 +697,44 @@ fn apply_skin_tokens(chrome: NebulaTheme, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_theme_name, theme_card_persist_updates};
-    use nebula_settings::ThemeName;
+    use super::{PaneCardStyle, resolve_theme_name, theme_card_persist_updates};
+    use nebula_settings::{RawSettings, RuntimeSettings, ThemeName};
+
+    #[test]
+    fn square_panes_fill_the_column_despite_saved_card_spacing_and_shadow() {
+        let runtime = RuntimeSettings::from_raw(&RawSettings::from_text(
+            "pane_card_radius=0\npane_card_gutter=8\npane_card_shadow=1\n",
+        ));
+        for theme in [ThemeName::Nord, ThemeName::Paper, ThemeName::SilverLight] {
+            let card = PaneCardStyle::resolve(theme, &runtime);
+            assert_eq!(card.margin, gpui::Edges::default(), "{theme:?}");
+            assert!(!card.shadow, "{theme:?}");
+            assert_eq!(card.divider, 1.0, "{theme:?}");
+        }
+    }
+
+    #[test]
+    fn changing_pane_shape_restores_spacing_and_dividers_without_rewriting_preferences() {
+        let mut runtime = RuntimeSettings::from_raw(&RawSettings::from_text(
+            "pane_card_radius=14\npane_card_gutter=8\npane_card_shadow=1\npane_card_divider=2\n",
+        ));
+        let rounded = PaneCardStyle::resolve(ThemeName::Paper, &runtime);
+        assert_eq!(rounded.margin, gpui::Edges { top: 0.0, right: 8.0, bottom: 8.0, left: 8.0 });
+        assert!(rounded.shadow);
+        assert_eq!(rounded.divider, 0.0);
+
+        runtime.pane_card_radius = Some(0.0);
+        let square = PaneCardStyle::resolve(ThemeName::Paper, &runtime);
+        assert_eq!(square.margin, gpui::Edges::default());
+        assert!(!square.shadow);
+        assert_eq!(square.divider, 2.0);
+
+        runtime.pane_card_radius = Some(14.0);
+        assert_eq!(PaneCardStyle::resolve(ThemeName::Paper, &runtime), rounded);
+        assert_eq!(runtime.pane_card_gutter, Some(8.0));
+        assert_eq!(runtime.pane_card_shadow, Some(true));
+        assert_eq!(runtime.pane_card_divider, Some(2.0));
+    }
 
     #[test]
     fn follow_system_remaps_theme_family_and_manual_mode_keeps_preference() {

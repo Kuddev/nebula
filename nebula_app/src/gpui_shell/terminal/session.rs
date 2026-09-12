@@ -93,10 +93,7 @@ pub(super) fn local_options(
     if let Err(error) = crate::platform::shell_integration::prepare(&mut options) {
         log::warn!("Could not prepare shell integration: {error}");
     }
-    #[cfg(windows)]
-    if let Err(error) = tty::refresh_environment(&mut options) {
-        log::warn!("Could not refresh the Windows environment for a new pane: {error}");
-    }
+    crate::platform::environment::prepare_local_pty(&mut options);
     // 终端网络代理开启时，把当前系统代理同步给新会话（HTTP(S)_PROXY 变量），
     // 让会话里的 curl/git/npm 等不必重复设。系统代理探不到则什么都不做。
     // 放在环境重建之后：注入值作为 pane 专属覆盖，不被注册表快照冲掉。

@@ -862,10 +862,8 @@ pub(super) fn nebula_settings_load(config: &UiConfig) -> NebulaRuntimeSettings {
         // 默认开：托盘是 agent 等待提醒的常驻出口（任务栏闪烁会被忽略、
         // toast 会过期）；不想要常驻图标的人在设置里关。
         tray: true,
-        // 2026-07-31 用户裁定：默认开。纯 alpha 下背景的高频细节压着文字，
-        // 那正是"透明度调低就看不清"的物理来源；模糊把它拍成低频色块。想
-        // 真透出后面窗口内容的人可以关掉。
-        blur: true,
+        // Both shells use the shared opt-in material default.
+        blur: nebula_settings::BlurModeName::default().enabled(),
         opacity: config.window_opacity(),
         background: None,
         background_image: None,
@@ -1083,19 +1081,9 @@ fn parse_bool(value: &str, default: bool) -> bool {
     }
 }
 
-/// `blur` 键与 GPUI 壳共用，但那边是五档枚举（`nebula_settings::BlurModeName`：
-/// none / mica / mica-alt / aero / acrylic），这边只有开关。
-///
-/// 不能直接套 [`parse_bool`]：它对认不出的值回落到 `default`，而这里的
-/// default 是 `true`——于是 GPUI 写下的 `blur=none` 会被旧壳读成"开"，用户
-/// 关掉的模糊一开旧壳就自己回来了。这里显式认五个枚举名，档位信息丢掉但
-/// 开关语义保住。
+/// Project the shared material parser into the legacy shell's boolean switch.
 fn parse_blur_enabled(value: &str) -> bool {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "none" => false,
-        "aero" | "mica" | "mica-alt" | "acrylic" => true,
-        other => parse_bool(other, true),
-    }
+    nebula_settings::BlurModeName::from_settings(value).unwrap_or_default().enabled()
 }
 
 fn parse_cursor_shape(value: &str) -> Option<CursorShape> {

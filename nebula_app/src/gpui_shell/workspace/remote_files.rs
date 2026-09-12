@@ -476,9 +476,6 @@ impl NebulaWorkspace {
             .flex_shrink_0()
             .p_2()
             .gap_2()
-            .rounded_tl(crate::gpui_shell::theme::card_radius(cx))
-            .rounded_bl(crate::gpui_shell::theme::card_radius(cx))
-            .bg(cx.theme().sidebar)
             .occlude()
             .drag_over::<ExternalPaths>(move |style, _, _, _| style.bg(drop_highlight))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {

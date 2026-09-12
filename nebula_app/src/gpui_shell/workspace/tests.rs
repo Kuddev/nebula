@@ -354,13 +354,15 @@ fn pane_card_divider_reaches_the_window_top_without_moving_its_bottom() {
         f32::from(card.origin.y + card.size.height),
         "向上延伸不能越过原来的正文底边"
     );
-    assert!(
-        (f32::from(divider.size.width) * 1.5 - 2.0).abs() < f32::EPSILON,
-        "150% 缩放下 1px 线应吸附为两个物理像素"
-    );
-
-    let scale_one = pane_card_divider_bounds(card, 1.0, 1.0).unwrap();
-    assert_eq!(f32::from(scale_one.size.width), 1.0);
+    for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 3.0] {
+        let line = pane_card_divider_bounds(card, 1.0, scale).unwrap();
+        assert!(
+            (f32::from(line.size.width) * scale - 1.0).abs() < f32::EPSILON,
+            "default divider must remain one physical pixel at scale {scale}"
+        );
+    }
+    let wide = pane_card_divider_bounds(card, 2.0, 1.5).unwrap();
+    assert_eq!(f32::from(wide.size.width), 2.0, "explicit wider dividers retain their size");
 }
 
 #[test]

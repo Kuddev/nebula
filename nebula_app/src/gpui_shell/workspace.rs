@@ -520,7 +520,9 @@ fn pane_card_divider_bounds(
     }
 
     let scale = scale_factor.max(1.0);
-    let width = (divider * scale).round().max(1.0) / scale;
+    // Keep the default a physical hairline; wider custom dividers retain logical scaling.
+    let physical_width = if divider <= 1.0 { 1.0 } else { (divider * scale).round() };
+    let width = physical_width.max(1.0) / scale;
     let height = bounds.size.height + bounds.origin.y;
     let mut origin = bounds.origin;
     origin.y = px(0.0);
@@ -902,6 +904,8 @@ pub struct NebulaWorkspace {
     split_bounds: SplitBoundsStore,
     /// pane 矩形的帧记录（ctrl+alt+方向 的最近邻导航用）。
     pane_bounds: PaneBoundsStore,
+    /// 标题栏背景使用本帧实际终端列边界，与两侧面板和卡缝连续衔接。
+    titlebar_background: window_titlebar::TitleBarBackground,
     /// GPUI presentation over the shared old-shell command catalog.
     command_palette_open: bool,
     command_palette_input: Entity<InputState>,
@@ -1180,6 +1184,7 @@ impl NebulaWorkspace {
             reader_focus: None,
             split_bounds: Rc::new(RefCell::new(HashMap::new())),
             pane_bounds: Rc::new(RefCell::new(HashMap::new())),
+            titlebar_background: window_titlebar::TitleBarBackground::default(),
             command_palette_open: false,
             command_palette_input,
             command_palette_selected: 0,
@@ -3204,15 +3209,13 @@ impl NebulaWorkspace {
             .justify_end()
             .flex_shrink_0()
             .overflow_hidden()
-            // 槽位自己铺壳色：底部那 8px 间距与抽屉圆角的缺口露出来的必须是壳色，
-            // 和终端卡四周的卡缝同一底。workspace 根是透明的（Acrylic 要透到 DWM），
-            // 不铺这层的话缝里露的是系统背板——实测比壳色亮一档且靠窗边越亮
-            // （44,46,53 → 62,64,71 vs 壳色 33,37,46），就是"底部颜色不对"。
+            // 本地文件、SFTP 和 Git 共用这一层壳色，与左侧栏、卡缝融为一体。
+            // 子视图只画内容；再次铺半透明底色会叠加 alpha，变成更亮的独立浮卡。
             .bg(cx.theme().background)
             .child(
                 // 抽屉整体从右缘推进来，而不是原地被擦出来。旧壳
                 // （side_panel.rs:1718）把 x 插值成
-                // `rest_x + (1-eased) * (w + margin)`——整块浮板在动；只动槽位宽度
+                // `rest_x + (1-eased) * (w + margin)`——整列内容在动；只动槽位宽度
                 // 的话内容一动不动，只有裁剪窗口在变宽，那就是"擦除"的观感来源。
                 // 槽位宽度仍然同步收放，正文（终端卡）才会跟着让位。
                 //
@@ -3852,6 +3855,7 @@ impl Render for NebulaWorkspace {
         // 终端卡几何取一次，布局与壳色带共用同一个实例——两处各取一次也算
         // 「各写一份」，主题在这一帧中途换掉就会出现半旧半新的卡缝。
         let card_style = crate::gpui_shell::theme::PaneCardStyle::current(cx);
+        let titlebar_background = self.titlebar_background.clone();
         let draw_file_divider = self.side_panel.open;
         let sidebar_logo_target_px =
             (TAB_LABEL_ICON_SIZE * window.scale_factor()).round().max(1.0) as u32;
@@ -4093,31 +4097,13 @@ impl Render for NebulaWorkspace {
                 .inset_0(),
             )
             .child(
-                // 侧栏模式保留旧壳的侧栏开关与齿轮。组件默认 34px 标题栏会让
-                // 32px 按钮几乎贴边，因此显式设为 48px、上下各留 8px；右侧
-                // 窗口控制仍共享同一标题带。
-                window_titlebar::settings_aware_title_bar(settings_active, cx)
-                    .when(top_tabs, |bar| {
-                        // 正文卡在顶部模式保留 8px 左缝；标题栏默认 12px，
-                        // 这里覆写后首个 tab 才与卡内 powerline 严格同轴。
-                        bar.pl(px(top_tabs::TOP_TAB_LEFT_INSET)).child(
-                            self.render_top_title_bar(
-                                files_active,
-                                git_active,
-                                settings_active,
-                                window,
-                                cx,
-                            ),
-                        )
-                    })
-                    .when(!top_tabs, |bar| {
-                        bar.child(self.render_sidebar_title_bar(
-                            files_active,
-                            git_active,
-                            settings_active,
-                            cx,
-                        ))
-                    }),
+                self.render_window_title_bar(
+                    files_active,
+                    git_active,
+                    settings_active,
+                    window,
+                    cx,
+                ),
             )
             .child(
                 // 不用 h_flex：它默认 items_center，会把子项高度压成内容高度。
@@ -4174,7 +4160,7 @@ impl Render for NebulaWorkspace {
                             .relative()
                             .child(
                                 gpui::canvas(
-                                    |_, _, _| (),
+                                    move |bounds, _, _| titlebar_background.record_pane(bounds),
                                     |bounds, _, window, cx| {
                                         // 卡缝、圆角、竖线全部读同一份 style 真源：
                                         // 布局的 padding 与这里的壳色带必须逐边对上，

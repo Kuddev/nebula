@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn reset_removes_all_overrides_and_keeps_user_data() {
-        let text = "# preferences\r\n THEME = Nord\r\ncopy_on_select=1\nkeybind=ctrl+x:Copy\nFONT_SIZE=30\nexecutor=custom\nssh_hosts=saved-host\nai_provider=custom\nfuture_setting=keep\n";
+        let text = "# preferences\r\n THEME = Nord\r\ncopy_on_select=1\nkeybind=ctrl+x:Copy\nFONT_SIZE=30\nexecutor=custom\nblur=acrylic\nopacity=0.65\nssh_hosts=saved-host\nai_provider=custom\nfuture_setting=keep\n";
         let result = default_settings_text(text);
         assert_eq!(
             result,
@@ -137,6 +137,8 @@ mod tests {
         let defaults = RuntimeSettings::from_raw(&RawSettings::default());
         assert_eq!(runtime.theme, defaults.theme);
         assert_eq!(runtime.copy_on_select, defaults.copy_on_select);
+        assert_eq!(runtime.blur, crate::BlurModeName::None);
+        assert_eq!(runtime.opacity, 1.0);
         assert!(runtime.font_size_px.is_none());
         assert!(runtime.shell.is_none());
         assert!(crate::keybind_pairs_from_text(&result).is_empty());

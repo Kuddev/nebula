@@ -14,10 +14,12 @@ Every release entry is provided in English and Simplified Chinese.
 - Added editable local and SSH text documents with save operations, changed-file checks, and preservation of unsaved text when a save fails.
 - Added reusable terminal layouts that open in a separate window and retain terminal launch settings without replaying command history.
 - Added dragging files from the system file manager into local and WSL terminals to insert quoted paths without executing them. Local files for SSH sessions can be uploaded through Remote Files. Addresses [#106](https://github.com/Kuddev/nebula/issues/106).
-- Expanded the built-in theme picker to 13 palettes, including Breeze, Mint, Catppuccin Mocha/Latte, and Glass light/dark variants. Glass uses static colors and does not automatically enable background blur.
+- Expanded the built-in theme picker to 15 palettes. New Catppuccin Frappé and Macchiato join Latte and Mocha to complete all four flavors, alongside Breeze, Mint, and Glass light/dark variants. Glass uses static colors and does not automatically enable background blur.
 
 #### Fixed
 
+- Fixed rounded terminal box corners joining straight strokes one physical pixel off at some character sizes and display scales.
+- Prevented Grok's Windows legacy-console fallback from hiding its dotted welcome logo in newly opened local terminals, while respecting explicit legacy-console overrides.
 - Fixed the Default Shell setting and the new-terminal menu recommending PowerShell on macOS when no shell is configured. Both now use the same host-default resolver as the terminal backend. Contributed by [@YinBuLiao](https://github.com/YinBuLiao) in [#110](https://github.com/Kuddev/pebrel/pull/110).
 - Fixed mixed shell icons giving settings-menu rows different heights. Shells without a brand image also receive an icon in the new-terminal menu. Contributed by [@YinBuLiao](https://github.com/YinBuLiao) in [#111](https://github.com/Kuddev/pebrel/pull/111).
 - Shortened long and multi-line notification previews while retaining the original notification text in logs. Plain persistent notifications can be dismissed by clicking the card. Contributed in part by [@YinBuLiao](https://github.com/YinBuLiao) in [#112](https://github.com/Kuddev/pebrel/pull/112).
@@ -27,6 +29,8 @@ Every release entry is provided in English and Simplified Chinese.
 
 #### Improved
 
+- Changed the default appearance to 100% opacity with background blur off, so themes use solid backgrounds. Explicit opacity and blur choices are preserved.
+- Made default sidebar and file-pane separators stay one physical pixel wide at high display scaling, retaining each theme's divider color.
 - Improved Markdown reading with bounded preview work and shared background formula rendering; unsupported or oversized expressions retain their source.
 - Added in-place feedback to code and formula copy controls, and kept document focus mode separate from operating-system fullscreen.
 - Made Git-ignored files and directories distinguishable with italic text in the file tree.
@@ -41,10 +45,12 @@ Windows packages include an installer and portable ZIP. Linux x64 packages and m
 - 新增本地和 SSH 文本文档编辑，支持保存、文件外部变更检查，并在保存失败时保留未保存的内容。
 - 新增可复用的终端布局，在独立窗口中打开并保留终端启动设置，不重放命令历史。
 - 新增从系统文件管理器向本地和 WSL 终端拖入文件，插入加引号的路径而不执行；SSH 会话所需的本地文件可通过“远程文件”上传。对应 [#106](https://github.com/Kuddev/nebula/issues/106)。
-- 将内置主题选择器扩展为 13 套配色，包含 Breeze、Mint、Catppuccin Mocha／Latte，以及 Glass 浅色／深色。Glass 使用静态配色，不会自动开启背景模糊。
+- 将内置主题选择器扩展为 15 套配色。新增 Catppuccin Frappé 和 Macchiato，与已有的 Latte、Mocha 补齐四款配色，同时包含 Breeze、Mint 及 Glass 浅色／深色主题。Glass 使用静态配色，不会自动开启背景模糊。
 
 #### 修复
 
+- 修复终端圆角框线在部分字符尺寸和显示缩放下，与相邻直线错开一个物理像素的问题。
+- 避免 Grok 在新开的 Windows 本地终端中因错误启用旧控制台模式而隐藏点阵欢迎图案，同时保留用户显式设置的旧控制台覆盖值。
 - 修复 macOS 未配置 Shell 时，“默认 Shell”设置和新建终端菜单推荐 PowerShell 的问题。两处现在与终端后端共用宿主默认 Shell 解析。由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#110](https://github.com/Kuddev/pebrel/pull/110) 中贡献。
 - 修复不同 Shell 图标使设置菜单行高不一致的问题；没有品牌图片的 Shell 在新建终端菜单中也会显示图标。由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#111](https://github.com/Kuddev/pebrel/pull/111) 中贡献。
 - 缩短长通知和多行通知的预览，同时在日志中保留通知原文。普通驻留通知可点击卡片关闭。部分修复由 [@YinBuLiao](https://github.com/YinBuLiao) 在 [#112](https://github.com/Kuddev/pebrel/pull/112) 中贡献。
@@ -54,6 +60,8 @@ Windows packages include an installer and portable ZIP. Linux x64 packages and m
 
 #### 改进
 
+- 默认关闭背景模糊，并使用 100% 不透明度，让主题按实色显示；保留用户已明确设置的模糊和不透明度。
+- 侧栏和文件区的默认分隔线在高缩放下保持单个物理像素宽度，并沿用主题分隔线颜色，让边界更轻。
 - 改进 Markdown 阅读，限制预览处理量，并共享后台公式渲染；不支持或超限的表达式保留源码。
 - 为代码和公式复制控件加入就地反馈，并将文档专注模式与系统全屏分开。
 - 文件树中被 Git 忽略的文件和目录使用斜体显示，便于区分。

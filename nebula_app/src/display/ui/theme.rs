@@ -48,6 +48,8 @@ pub enum NebulaTheme {
     MintDark,
     CatppuccinMocha,
     CatppuccinLatte,
+    CatppuccinFrappe,
+    CatppuccinMacchiato,
     GlassLight,
     GlassDark,
 }
@@ -91,6 +93,8 @@ impl NebulaTheme {
             (Self::MintLight | Self::MintDark, false) => Self::MintDark,
             (Self::CatppuccinMocha | Self::CatppuccinLatte, true) => Self::CatppuccinLatte,
             (Self::CatppuccinMocha | Self::CatppuccinLatte, false) => Self::CatppuccinMocha,
+            (Self::CatppuccinFrappe | Self::CatppuccinMacchiato, true) => Self::CatppuccinLatte,
+            (Self::CatppuccinFrappe | Self::CatppuccinMacchiato, false) => self,
             (Self::GlassLight | Self::GlassDark, true) => Self::GlassLight,
             (Self::GlassLight | Self::GlassDark, false) => Self::GlassDark,
         }
@@ -113,6 +117,8 @@ impl NebulaTheme {
             Self::MintDark => "Mint Dark",
             Self::CatppuccinMocha => "Catppuccin Mocha",
             Self::CatppuccinLatte => "Catppuccin Latte",
+            Self::CatppuccinFrappe => "Catppuccin Frappé",
+            Self::CatppuccinMacchiato => "Catppuccin Macchiato",
             Self::GlassLight => "Glass Light",
             Self::GlassDark => "Glass Dark",
         }
@@ -136,6 +142,8 @@ impl NebulaTheme {
             Self::MintDark => "Theme: Mint Dark",
             Self::CatppuccinMocha => "Theme: Catppuccin Mocha",
             Self::CatppuccinLatte => "Theme: Catppuccin Latte",
+            Self::CatppuccinFrappe => "Theme: Catppuccin Frappé",
+            Self::CatppuccinMacchiato => "Theme: Catppuccin Macchiato",
             Self::GlassLight => "Theme: Glass Light",
             Self::GlassDark => "Theme: Glass Dark",
         }
@@ -158,6 +166,8 @@ impl NebulaTheme {
             Self::MintDark => "MintDark",
             Self::CatppuccinMocha => "CatppuccinMocha",
             Self::CatppuccinLatte => "CatppuccinLatte",
+            Self::CatppuccinFrappe => "CatppuccinFrappe",
+            Self::CatppuccinMacchiato => "CatppuccinMacchiato",
             Self::GlassLight => "GlassLight",
             Self::GlassDark => "GlassDark",
         }
@@ -182,6 +192,8 @@ impl NebulaTheme {
             "MintDark" => Self::MintDark,
             "CatppuccinMocha" => Self::CatppuccinMocha,
             "CatppuccinLatte" => Self::CatppuccinLatte,
+            "CatppuccinFrappe" => Self::CatppuccinFrappe,
+            "CatppuccinMacchiato" => Self::CatppuccinMacchiato,
             "GlassLight" => Self::GlassLight,
             "GlassDark" => Self::GlassDark,
 
@@ -218,6 +230,8 @@ impl NebulaTheme {
             | Self::MintDark
             | Self::CatppuccinMocha
             | Self::CatppuccinLatte
+            | Self::CatppuccinFrappe
+            | Self::CatppuccinMacchiato
             | Self::GlassLight
             | Self::GlassDark => rgb8(self.fresh_palette().unwrap().accent),
             Self::Nebula => Rgb::new(82, 168, 255),
@@ -375,6 +389,8 @@ impl NebulaTheme {
             | Self::MintDark
             | Self::CatppuccinMocha
             | Self::CatppuccinLatte
+            | Self::CatppuccinFrappe
+            | Self::CatppuccinMacchiato
             | Self::GlassLight
             | Self::GlassDark => nebula_settings::ThemeName::from_prompt_name(self.prompt_name())
                 .unwrap()

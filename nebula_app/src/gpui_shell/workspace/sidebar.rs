@@ -922,8 +922,6 @@ impl NebulaWorkspace {
         let settings_active_bg = cx.theme().sidebar_accent;
         let settings_active_fg = cx.theme().sidebar_accent_foreground;
         let sidebar_visible = !self.sidebar_collapsed && !self.reader_focus_active(cx);
-        let flush_sidebar =
-            !settings_active && sidebar_visible && crate::gpui_shell::theme::pane_is_flush(cx);
         h_flex()
             .size_full()
             .items_center()
@@ -934,13 +932,6 @@ impl NebulaWorkspace {
                     // 32px，`.small()` 会把热区缩成 24px。
                     .gap_2()
                     .items_center()
-                    .when(flush_sidebar, |left| {
-                        // Keep the sidebar-colored strip aligned with the actual
-                        // sidebar, including the title bar's leading padding.
-                        let inset = if cfg!(target_os = "macos") { 80.0 } else { 12.0 };
-                        left.h_full().w(px(self.sidebar_width)).flex_shrink_0()
-                            .ml(px(-inset)).pl(px(inset)).bg(cx.theme().background)
-                    })
                     .occlude()
                     .child(
                         Button::new("toggle-sidebar")
