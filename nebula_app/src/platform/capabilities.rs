@@ -15,6 +15,8 @@ pub struct Capabilities {
     pub hide_window_on_close: bool,
     /// 系统托盘图标（`crate::tray`）。
     pub system_tray: bool,
+    /// Manage the per-user login startup entry.
+    pub launch_at_login: bool,
     /// 系统通知后端已实现；实际投递仍受系统通知权限控制。
     pub system_notifications: bool,
     /// 系统提示音（`platform::beep`）。
@@ -39,6 +41,7 @@ pub const CAPABILITIES: Capabilities = {
         Capabilities {
             hide_window_on_close: true,
             system_tray: true,
+            launch_at_login: true,
             system_notifications: true,
             system_bell: true,
             self_update_install: true,
@@ -54,6 +57,7 @@ pub const CAPABILITIES: Capabilities = {
         Capabilities {
             hide_window_on_close: false,
             system_tray: false,
+            launch_at_login: false,
             system_notifications: true,
             system_bell: false,
             self_update_install: false,
@@ -75,6 +79,7 @@ mod tests {
         let all = [
             CAPABILITIES.hide_window_on_close,
             CAPABILITIES.system_tray,
+            CAPABILITIES.launch_at_login,
             CAPABILITIES.system_notifications,
             CAPABILITIES.system_bell,
             CAPABILITIES.self_update_install,

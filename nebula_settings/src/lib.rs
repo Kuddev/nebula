@@ -984,6 +984,8 @@ pub struct RuntimeSettings {
     /// from the Application settings page when this is disabled.
     pub auto_check_updates: bool,
     pub keep_session: bool,
+    /// Start the first window hidden when a system tray is available and enabled.
+    pub silent_start: bool,
     pub restore_session: bool,
     pub resume_ai: bool,
     /// 常驻系统托盘图标。
@@ -1128,6 +1130,7 @@ impl RuntimeSettings {
             fetch: raw.bool_on("fetch").unwrap_or(false),
             auto_check_updates: raw.bool_on("auto_check_updates").unwrap_or(true),
             keep_session: raw.bool_on("keep_session").unwrap_or(false),
+            silent_start: raw.bool_on("silent_start").unwrap_or(false),
             restore_session: raw.bool_on("restore_session").unwrap_or(true),
             resume_ai: raw.bool_on("resume_ai").unwrap_or(true),
             tray: raw.bool_on("tray").unwrap_or(true),
@@ -1322,6 +1325,7 @@ mod tests {
              fetch=1\n\
              powerline=0\n\
              keep_session=1\n\
+             silent_start=1\n\
              restore_session=0\n\
              resume_ai=0\n\
              tray=0\n\
@@ -1359,6 +1363,7 @@ mod tests {
         assert_eq!(settings.cell_width_mode, CellWidthModeName::Relaxed);
         assert!(settings.fetch);
         assert!(settings.keep_session);
+        assert!(settings.silent_start);
         assert!(!settings.restore_session);
         assert!(!settings.resume_ai);
         assert!(!settings.tray);
@@ -1399,6 +1404,7 @@ mod tests {
         assert!(!settings.fetch);
         assert!(settings.auto_check_updates);
         assert!(!settings.keep_session);
+        assert!(!settings.silent_start);
         assert!(settings.restore_session);
         assert!(settings.resume_ai);
         assert!(settings.tray);

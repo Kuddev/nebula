@@ -484,6 +484,7 @@ impl SettingsPane {
         Self {
             focus_handle: cx.focus_handle(),
             runtime,
+            launch_at_login: crate::platform::startup::launch_at_login(),
             active_section: 1,
             appearance_picker: None,
             theme_picker_trigger: cx.focus_handle(),

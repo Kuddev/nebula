@@ -34,7 +34,7 @@ pub(super) const SECTION_SEARCH_TERMS: [&str; 10] = [
     "network 网络 proxy 代理 connectivity 连接",
     "interaction 交互 copy 复制 paste 粘贴 tab 标签 panel 面板",
     "keymap key binding shortcut quick terminal 快速终端 独立窗口 已有窗口 按键映射 快捷键",
-    "advanced 高级 session 会话 tray 托盘 restore 恢复",
+    "advanced 高级 session 会话 tray 托盘 restore 恢复 startup autostart login silent 自启动 静默启动 开机 登录",
     "backup 备份 export 导出 restore 恢复",
 ];
 
