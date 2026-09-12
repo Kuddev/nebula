@@ -481,7 +481,7 @@ pub(crate) fn draw_text(
                     as usize)
                     .max(4);
             let (summary, summary_ink) = if let Some(notice) = panel.root_notice() {
-                (clip_tail(notice, summary_cols), Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b))
+                (clip_tail(&notice, summary_cols), Rgb::new(sk.danger.r, sk.danger.g, sk.danger.b))
             } else {
                 (
                     panel

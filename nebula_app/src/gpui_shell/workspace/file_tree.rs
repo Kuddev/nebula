@@ -3,6 +3,7 @@
 //! 几何与密度以旧 OpenGL 壳的 `display::side_panel::panel_layout`
 //! （side_panel.rs:1695）和它的行水洗（同文件 2712-2800）为基准，不自创数字。
 
+use crate::display::side_panel::PanelNotice;
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -546,7 +547,7 @@ impl NebulaWorkspace {
                             })),
                     ),
             )
-            .when_some(self.side_panel.root_notice(), |panel, notice| {
+            .when_some(self.side_panel.localized_root_notice(crate::gpui_shell::config::ui_language(cx)), |panel, notice| {
                 panel.child(div().text_xs().text_color(theme.warning).child(notice.to_owned()))
             })
             .child(search_box)
@@ -774,7 +775,7 @@ impl NebulaWorkspace {
         cx: &mut Context<Self>,
     ) {
         if !path.exists() {
-            self.side_panel.set_notice("路径已不存在".to_owned());
+            self.side_panel.set_notice(PanelNotice::PathUnavailable);
             cx.notify();
             return;
         }
@@ -810,7 +811,7 @@ impl NebulaWorkspace {
                             this.side_panel.request_refresh();
                             this.sync_side_panel_to_active(false, cx);
                         },
-                        Err(error) => this.side_panel.set_notice(format!("删除失败：{error}")),
+                        Err(error) => this.side_panel.set_notice(PanelNotice::DeleteFailed(error)),
                     }
                     cx.notify();
                 });
@@ -836,22 +837,16 @@ impl NebulaWorkspace {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
                 use crate::display::side_panel::IgnoreOutcome;
-                use crate::i18n::Message;
-                let language = crate::gpui_shell::config::ui_language(cx);
                 let notice = match result {
-                    Ok(IgnoreOutcome::Added { entry, .. }) => {
-                        language.format(Message::FilesIgnoreAdded, &[("entry", &entry)])
-                    },
-                    Ok(IgnoreOutcome::Removed { entry, .. }) => {
-                        language.format(Message::FilesIgnoreRemoved, &[("entry", &entry)])
-                    },
+                    Ok(IgnoreOutcome::Added { entry, .. }) => PanelNotice::IgnoreAdded(entry),
+                    Ok(IgnoreOutcome::Removed { entry, .. }) => PanelNotice::IgnoreRemoved(entry),
                     Ok(IgnoreOutcome::AlreadyPresent { entry }) => {
-                        language.format(Message::FilesIgnorePresent, &[("entry", &entry)])
+                        PanelNotice::IgnorePresent(entry)
                     },
                     Ok(IgnoreOutcome::AlreadyVisible { entry }) => {
-                        language.format(Message::FilesIgnoreVisible, &[("entry", &entry)])
+                        PanelNotice::IgnoreVisible(entry)
                     },
-                    Err(error) => language.format(Message::FilesIgnoreFailed, &[("error", &error)]),
+                    Err(error) => PanelNotice::IgnoreFailed(error),
                 };
                 this.side_panel.set_notice(notice);
                 this.side_panel.request_refresh();

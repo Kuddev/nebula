@@ -920,7 +920,7 @@ pub struct NebulaWorkspace {
     _command_manager_subscription: Subscription,
     /// Git/SVN 提交信息输入（GPUI 输入组件）；提交动作直达共享模型
     /// `vcs_commit_message`，不经旧壳的内部输入状态机。
-    git_commit_input: Entity<InputState>,
+    git_commit_input: vcs_panel::CommitInput,
     /// Git 树"丢弃改动"的二次确认（路径）；任何其他 VCS 操作都清掉它。
     vcs_discard_confirm: Option<String>,
     /// 命令面板的行覆盖：`None` = 常规命令目录，`Some` = 某个专用列表
@@ -1098,7 +1098,7 @@ impl NebulaWorkspace {
                 workspace_ui_language().pick("搜索文件和文件夹…", "Search files and folders..."),
             )
         });
-        let git_commit_input = cx.new(|cx| InputState::new(window, cx).placeholder("提交信息…"));
+        let git_commit_input = vcs_panel::CommitInput::new(window, cx);
         let command_palette_subscription = cx.subscribe_in(
             &command_palette_input,
             window,
@@ -2592,12 +2592,12 @@ impl NebulaWorkspace {
     /// 提交按钮/Enter：读 GPUI 输入框的消息直达共享模型（git 提交暂存区、
     /// svn 提交工作副本），成功入队后清空输入。
     fn submit_vcs_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let message = self.git_commit_input.read(cx).value().trim().to_string();
+        let message = self.git_commit_input.input.read(cx).value().trim().to_string();
         if message.is_empty() {
             return;
         }
         self.side_panel.vcs_commit_message(&message);
-        self.git_commit_input.update(cx, |input, cx| input.set_value("", window, cx));
+        self.git_commit_input.input.update(cx, |input, cx| input.set_value("", window, cx));
         cx.notify();
     }
 
@@ -3201,7 +3201,7 @@ impl NebulaWorkspace {
             // 页签——用户想看的永远是"当前这台机器上的文件"。
             crate::display::side_panel::PanelView::Files if remote => self.render_remote_files(cx),
             crate::display::side_panel::PanelView::Files => self.render_file_tree(cx),
-            crate::display::side_panel::PanelView::Git => self.render_git_tree(cx),
+            crate::display::side_panel::PanelView::Git => self.render_git_tree(window, cx),
         };
         div()
             .h_full()

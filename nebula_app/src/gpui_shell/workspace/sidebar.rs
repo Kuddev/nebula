@@ -1005,7 +1005,10 @@ impl NebulaWorkspace {
                             .icon(IconName::Github)
                             .ghost()
                             .selected(git_active)
-                            .tooltip("Git 状态 (Ctrl+Shift+G)")
+                            .tooltip(
+                                crate::gpui_shell::config::ui_language(cx)
+                                    .text(crate::i18n::Message::VcsToggleGit),
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.toggle_git_tree(cx);
                             })),

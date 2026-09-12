@@ -2,6 +2,10 @@
 mod catalog_builder;
 #[path = "../src/i18n/mod.rs"]
 mod i18n;
+#[path = "../src/display/side_panel/notice.rs"]
+mod panel_notice;
+#[path = "../src/gpui_shell/workspace/vcs_panel/relative_time.rs"]
+mod vcs_relative_time;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -48,6 +52,8 @@ fn first_and_repeated_translation_lookups_allocate_nothing() {
     for language in i18n::UiLanguage::ALL {
         for _ in 0..1_000 {
             black_box(language.text(black_box(i18n::Message::SettingsSidebarNetwork)));
+            black_box(language.text(black_box(i18n::Message::VcsChanges)));
+            black_box(language.text(black_box(i18n::Message::VcsCommitPlaceholder)));
             black_box(language.tr(black_box("settings.sidebar.network")));
             black_box(language.pick(black_box("网络"), black_box("Network")));
             black_box(language.pick(black_box("新文案"), black_box("Unmigrated text")));
@@ -61,4 +67,14 @@ fn first_and_repeated_translation_lookups_allocate_nothing() {
 fn embedded_translations_stay_within_the_initial_payload_budget() {
     assert!(i18n::TRANSLATED_BYTES < 256 * 1024);
     assert!(i18n::MESSAGE_COUNT >= 200);
+}
+
+#[test]
+fn vcs_messages_follow_resolved_english_and_fall_back_for_partial_locales() {
+    let english = i18n::UiLanguage::for_locale(Some("en-GB"));
+    assert_eq!(english.tr("vcs.changes"), "Changes");
+    assert_eq!(english.tr("vcs.commit_placeholder"), "Commit message...");
+    assert_eq!(i18n::UiLanguage::ZhCn.tr("vcs.changes"), "变更");
+    assert_eq!(i18n::UiLanguage::FrFr.tr("vcs.changes"), "Changes");
+    assert_eq!(english.tr_args("vcs.refresh_status", &[("vcs", "Git")]), "Refresh Git status");
 }
