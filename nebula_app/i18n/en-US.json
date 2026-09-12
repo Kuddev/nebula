@@ -6,6 +6,8 @@
     "en_us": "English"
   },
   "settings": {
+    "reset_title": "Restore default settings?",
+    "reset_description": "This will reset your settings and keyboard shortcuts. SSH hosts, credentials and history will be kept, and your current settings will be backed up. Continue?",
     "sidebar": {
       "application": "Application",
       "appearance": "Appearance",

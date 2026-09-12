@@ -1279,7 +1279,7 @@ impl SettingsPane {
                     .px_3()
                     .text_color(muted)
                     .tooltip(language.pick("恢复设置与快捷键；保留 SSH 主机、凭据和历史，并备份原设置。", "Restores settings and shortcuts. Keeps SSH hosts, credentials and history, and backs up current settings."))
-                    .on_click(cx.listener(|this, _, window, cx| this.reset_all_settings(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_reset_all_settings(window, cx))),
             )
             .into_any_element()
     }
