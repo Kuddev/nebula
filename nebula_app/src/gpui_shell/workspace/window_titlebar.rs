@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+pub(super) mod macos;
+
 /// Prepaint records the actual pane column before any titlebar paint runs. Keep
 /// this cell for the workspace lifetime, so resizing and panel animations do not
 /// allocate a new shared slot or duplicate the body's layout calculations.
@@ -94,8 +97,11 @@ impl NebulaWorkspace {
             .when(settings_active, |bar| {
                 bar.border_b_1().border_color(crate::gpui_shell::theme::settings_hairline(cx))
             })
+            .when(top_tabs && !cfg!(target_os = "macos"), |bar| {
+                bar.pl(px(top_tabs::TOP_TAB_LEFT_INSET))
+            })
             .when(top_tabs, |bar| {
-                bar.pl(px(top_tabs::TOP_TAB_LEFT_INSET)).child(self.render_top_title_bar(
+                bar.child(self.render_top_title_bar(
                     files_active,
                     git_active,
                     settings_active,
@@ -111,6 +117,14 @@ impl NebulaWorkspace {
                     cx,
                 ))
             });
+
+        // AppKit owns both the control group and its geometry. Read the live
+        // frames so system layout, resize and full-screen transitions agree.
+        #[cfg(target_os = "macos")]
+        let bar = {
+            let (height, inset) = macos::layout(window);
+            bar.h(px(height)).pl(px(inset))
+        };
 
         div()
             .relative()

@@ -128,7 +128,10 @@ Keep the extracted directory structure intact:
 Install [rustup](https://rustup.rs) and the build dependencies for your platform.
 The repository pins Rust 1.97.1 in `rust-toolchain.toml`. Linux dependency packages
 are listed in `.github/workflows/release.yml`; macOS requires Xcode command-line
-tools. Windows requires Windows 10 1809+ / 11 and a supported Rust linker toolchain.
+tools with macOS SDK 26 or newer (`xcrun --sdk macosx --show-sdk-version`) for
+the native Liquid Glass window controls. This build requirement does not raise
+the macOS 14 minimum runtime version. Windows requires Windows 10 1809+ / 11
+and a supported Rust linker toolchain.
 
 ```powershell
 git clone https://github.com/Kuddev/pebrel
