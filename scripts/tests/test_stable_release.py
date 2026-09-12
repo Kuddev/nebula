@@ -109,6 +109,49 @@ class StableReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(StableReleaseError, "invalid stable version"):
             expected_asset_names("1.6.0-rc.1")
 
+    def test_17_and_later_assets_use_only_pebrel_installer(self) -> None:
+        for version in ("1.7.0", "1.7.1", "1.10.0", "2.0.0"):
+            with self.subTest(version=version):
+                names = expected_asset_names(version)
+                self.assertEqual(len(names), 7)
+                self.assertIn(f"Pebrel-v{version}-windows-x64-setup.exe", names)
+                self.assertNotIn(f"NebulaTerminal-{version}-windows-x64-setup.exe", names)
+
+    def test_17_assets_reject_retired_alias_and_missing_installer(self) -> None:
+        version = "1.7.0"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in expected_asset_names(version):
+                if name.startswith("Pebrel-"):
+                    write_fake_asset(root / name)
+            self.assertEqual(len(validate_assets(root, version)), 7)
+            legacy = root / "NebulaTerminal-1.7.0-windows-x64-setup.exe"
+            write_fake_asset(legacy)
+            with self.assertRaisesRegex(StableReleaseError, "unexpected: NebulaTerminal"):
+                validate_assets(root, version)
+            legacy.unlink()
+            (root / "Pebrel-v1.7.0-windows-x64-setup.exe").unlink()
+            with self.assertRaisesRegex(StableReleaseError, "missing: Pebrel-v1.7.0-windows-x64-setup.exe"):
+                validate_assets(root, version)
+
+    def test_17_notes_require_only_current_asset_names(self) -> None:
+        version = "1.7.0"
+        checksums = "\n".join(
+            f"- `{name}`: `PENDING FINAL BUILD`"
+            for name in expected_asset_names(version) if name.startswith("Pebrel-")
+        )
+        body = notes().replace(VERSION, version).replace(STABLE_SHA256_PLACEHOLDER, checksums)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "v1.7.0.md"
+            source.write_text(body, encoding="utf-8")
+            self.assertEqual(validate_notes(source, version), body)
+            source.write_text(
+                body + "- `NebulaTerminal-1.7.0-windows-x64-setup.exe`: `PENDING FINAL BUILD`\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(StableReleaseError, "unexpected: NebulaTerminal"):
+                validate_notes(source, version)
+
     def test_complete_assets_require_identical_legacy_installer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

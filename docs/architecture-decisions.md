@@ -87,10 +87,16 @@ unrelated feature's growth. Remote approval/enforcement is not implied by this l
   documentation use Pebrel. Existing Runtime API and hook protocol names remain
   stable for clients already using them.
 - **Release compatibility:** Old clients select an exact `NebulaTerminal-...` asset
-  name. A future public release needs a compatibility asset containing the same
-  installer bytes until those clients have migrated. Repository redirects do not
-  create aliases for renamed asset filenames. Keep published asset filenames and
-  tags intact when changing the repository name.
+  name. Version 1.6.0 supplied that alias with identical installer bytes. On
+  2026-09-12, the maintainer explicitly retired this alias starting with 1.7.0.
+  The published 1.6.0 update resolver already prefers the Pebrel filename;
+  clients that require the old name must download the current installer from the
+  Release page. Current CI publishes only the Pebrel installer, and the shared
+  manifest rejects an old-name extra asset from 1.7.0 onward. Historical manifests
+  still require their original assets and byte identity, covered by positive and
+  negative release-helper tests. This does not retire configuration or protocol
+  compatibility readers. Repository redirects do not create aliases for renamed
+  asset filenames; keep existing published assets and tags intact.
 - **Validation:** The installer migration passed 77 isolated native fixture
   checks and a complete Inno Setup syntax build on 2026-09-07. This covers owned
   files, custom directories, shortcuts, PATH, locks and retry behavior; it does

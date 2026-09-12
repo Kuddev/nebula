@@ -482,12 +482,6 @@ jobs:
           $ErrorActionPreference = 'Stop'
           ./scripts/package-release.ps1 -Version $env:PACKAGE_VERSION -PackageBrand Pebrel -OutputDirectory dist -TargetDirectory target -Force
           ./scripts/build-installer.ps1 -Version $env:PACKAGE_VERSION -PackageBrand Pebrel -OutputDirectory dist -TargetDirectory target -Force
-          $canonical = Join-Path (Resolve-Path dist) "Pebrel-v$env:PACKAGE_VERSION-windows-x64-setup.exe"
-          $legacy = Join-Path (Resolve-Path dist) "NebulaTerminal-$env:PACKAGE_VERSION-windows-x64-setup.exe"
-          Copy-Item -LiteralPath $canonical -Destination $legacy -Force
-          $canonicalHash = (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash
-          $legacyHash = (Get-FileHash -LiteralPath $legacy -Algorithm SHA256).Hash
-          if ($canonicalHash -ne $legacyHash) { throw 'legacy installer alias differs from canonical installer' }
       - name: Run Windows conformance
         shell: pwsh
         env:
@@ -507,7 +501,6 @@ jobs:
           path: |
             dist/Pebrel-v${{ needs.prepare.outputs.version }}-windows-x64.zip
             dist/Pebrel-v${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
-            dist/NebulaTerminal-${{ needs.prepare.outputs.version }}-windows-x64-setup.exe
           if-no-files-found: error
           retention-days: 14
       - name: Upload Windows conformance evidence

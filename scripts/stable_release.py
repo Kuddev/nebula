@@ -34,7 +34,7 @@ def validate_version(version: str) -> None:
 
 def expected_asset_names(version: str) -> tuple[str, ...]:
     validate_version(version)
-    return (
+    names = (
         f"Pebrel-v{version}-linux-x64-preview.AppImage",
         f"Pebrel-v{version}-linux-x64-preview.deb",
         f"Pebrel-v{version}-linux-x64-preview.tar.gz",
@@ -42,8 +42,11 @@ def expected_asset_names(version: str) -> tuple[str, ...]:
         f"Pebrel-v{version}-macos-x64-preview.dmg",
         f"Pebrel-v{version}-windows-x64.zip",
         f"Pebrel-v{version}-windows-x64-setup.exe",
-        f"NebulaTerminal-{version}-windows-x64-setup.exe",
     )
+    # The old-name installer was retired from 1.7.0; retain historical manifests.
+    if tuple(map(int, version.split("."))) < (1, 7, 0):
+        names += (f"NebulaTerminal-{version}-windows-x64-setup.exe",)
+    return names
 
 
 def mark_platform_previews(directory: Path, version: str) -> None:
@@ -109,7 +112,7 @@ def validate_assets(directory: Path, version: str) -> list[Path]:
 
     installer = directory / f"Pebrel-v{version}-windows-x64-setup.exe"
     legacy = directory / f"NebulaTerminal-{version}-windows-x64-setup.exe"
-    if sha256(installer) != sha256(legacy):
+    if legacy.name in expected and sha256(installer) != sha256(legacy):
         raise StableReleaseError("legacy Windows installer alias is not byte-identical to Pebrel installer")
     return assets
 
