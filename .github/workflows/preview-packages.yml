@@ -302,10 +302,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: macos-26
             architecture: aarch64
             native_architecture: arm64
-          - runner: macos-15-intel
+          - runner: macos-26-intel
             architecture: x86_64
             native_architecture: x86_64
     runs-on: ${{ matrix.runner }}
@@ -322,6 +322,11 @@ jobs:
 
       - name: Verify native runner architecture
         run: test "$(uname -m)" = "${{ matrix.native_architecture }}"
+
+      - name: Require the modern AppKit SDK for native window controls
+        run: |
+          sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+          test "${sdk_version%%.*}" -ge 26
 
       - name: Test native DMG capacity and mounted contents
         run: python3 -m unittest scripts.tests.test_macos_dmg -v
