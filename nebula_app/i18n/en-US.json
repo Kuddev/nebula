@@ -462,5 +462,27 @@
     "exported": "Host metadata exported without credentials",
     "imported": "Added {added} hosts; skipped {skipped} existing hosts",
     "imported_partial": "Added {added} hosts, but could not update their visibility. Retry the import: {error}"
+  },
+  "menu": {
+    "file": "File",
+    "view": "View",
+    "window": "Window",
+    "services": "Services",
+    "hide": "Hide Pebrel",
+    "hide_others": "Hide Others",
+    "show_all": "Show All",
+    "quit": "Quit Pebrel",
+    "split_right": "Split Right",
+    "split_down": "Split Down",
+    "close_pane": "Close Tab or Pane",
+    "command_palette": "Command Palette",
+    "toggle_sidebar": "Toggle Sidebar",
+    "toggle_files": "Toggle File Tree",
+    "toggle_git": "Toggle Git Panel",
+    "reset_font": "Reset Font Size",
+    "toggle_fullscreen": "Toggle Full Screen",
+    "next_tab": "Next Tab",
+    "previous_tab": "Previous Tab",
+    "zoom_pane": "Toggle Pane Zoom"
   }
 }

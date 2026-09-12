@@ -173,5 +173,27 @@
     "copied_lines": "已複製 {lines} 行到剪貼簿",
     "paste_lines": "貼上 {lines} 行文字？",
     "sent_to": "已傳送至 {target}"
+  },
+  "menu": {
+    "file": "檔案",
+    "view": "顯示",
+    "window": "視窗",
+    "services": "服務",
+    "hide": "隱藏 Pebrel",
+    "hide_others": "隱藏其他應用程式",
+    "show_all": "顯示全部",
+    "quit": "結束 Pebrel",
+    "split_right": "向右分割",
+    "split_down": "向下分割",
+    "close_pane": "關閉分頁或窗格",
+    "command_palette": "命令面板",
+    "toggle_sidebar": "顯示/隱藏側邊欄",
+    "toggle_files": "顯示/隱藏檔案樹",
+    "toggle_git": "顯示/隱藏 Git 面板",
+    "reset_font": "重設字型大小",
+    "toggle_fullscreen": "切換全螢幕",
+    "next_tab": "下一個分頁",
+    "previous_tab": "上一個分頁",
+    "zoom_pane": "切換窗格最大化"
   }
 }
