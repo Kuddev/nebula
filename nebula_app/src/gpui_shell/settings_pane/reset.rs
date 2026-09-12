@@ -1,7 +1,31 @@
 use super::*;
 
 impl SettingsPane {
-    pub(super) fn reset_all_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_reset_all_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::i18n::Message;
+
+        let language = crate::gpui_shell::config::ui_language(cx);
+        let pane = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, _cx| {
+            let pane = pane.clone();
+            confirm_dialog(
+                dialog,
+                window,
+                language.text(Message::SettingsResetTitle),
+                language.text(Message::SettingsResetDescription),
+                language.text(Message::CommonRestoreDefaults),
+                language.text(Message::CommonCancel),
+                ButtonVariant::Danger,
+            )
+            .on_ok(move |_, window, cx| {
+                let _ = pane.update(cx, |this, cx| this.reset_all_settings(window, cx));
+                true
+            })
+        });
+        cx.notify();
+    }
+
+    fn reset_all_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let language = crate::gpui_shell::config::ui_language(cx);
         self.slider_persist = None;
         let backup = match nebula_settings::restore_default_settings() {

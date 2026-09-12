@@ -6,6 +6,8 @@
     "en_us": "English"
   },
   "settings": {
+    "reset_title": "恢复默认设置？",
+    "reset_description": "这将重置你的设置与快捷键。SSH 主机、凭据和历史将保留，当前设置会备份。是否继续？",
     "sidebar": {
       "application": "应用",
       "appearance": "外观",
